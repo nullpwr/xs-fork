@@ -150,6 +150,9 @@ typedef enum {
     NODE_DO_EXPR,   /* do { block } expression */
     NODE_WITH,      /* with expr as name { block } */
 
+    NODE_LOAD,          /* load "plugin" or load "plugin" with { ... } */
+    NODE_PLUGIN_DECL,   /* plugin "name" { meta{} lexer{} parser{} ... } */
+
     NODE_PROGRAM,
 } NodeTag;
 
@@ -255,6 +258,7 @@ void            enumvariantlist_free(EnumVariantList *el);
 struct Node {
     NodeTag tag;
     Span    span;
+    int     node_id;
     union {
         struct { int64_t ival; } lit_int;
         struct { char *bigint_str; } lit_bigint;
@@ -592,10 +596,28 @@ struct Node {
         struct { Node *body; } do_expr;
         struct { Node *expr; char *name; Node *body; } with_;
 
+        struct {
+            char  *path;
+            char **rename_keys;
+            char **rename_vals;
+            int    nrenames;
+        } load_;
+
+        struct {
+            char     *name;
+            Node     *meta;
+            Node     *lexer_sec;
+            Node     *parser_sec;
+            NodeList  passes;
+            Node     *sema_sec;
+            Node     *runtime_sec;
+        } plugin_decl;
+
         struct { NodeList stmts; } program;
     };
 };
 
+int   node_next_id(void);
 Node *node_new(NodeTag tag, Span span);
 void  node_free(Node *n);
 Node *program_new(NodeList stmts, Span span);

@@ -7,6 +7,26 @@
 #include <stdio.h>
 #include <errno.h>
 
+/* dynamic token table for plugins */
+DynToken g_dyn_tokens[TK_PLUGIN_MAX - TK_PLUGIN_BASE];
+int g_ndyn_tokens = 0;
+
+int lexer_register_dyn_token(const char *name, const char *pattern) {
+    if (g_ndyn_tokens >= (TK_PLUGIN_MAX - TK_PLUGIN_BASE)) return -1;
+    int idx = g_ndyn_tokens++;
+    g_dyn_tokens[idx].name = xs_strdup(name);
+    g_dyn_tokens[idx].pattern = xs_strdup(pattern);
+    g_dyn_tokens[idx].kind = TK_PLUGIN_BASE + idx;
+    return g_dyn_tokens[idx].kind;
+}
+
+int lexer_dyn_token_kind(const char *name) {
+    for (int i = 0; i < g_ndyn_tokens; i++)
+        if (strcmp(g_dyn_tokens[i].name, name) == 0)
+            return g_dyn_tokens[i].kind;
+    return -1;
+}
+
 // keyword table
 typedef struct { const char *word; TokenKind kind; } KWEntry;
 static const KWEntry KEYWORDS[] = {
@@ -81,6 +101,7 @@ static const KWEntry KEYWORDS[] = {
     {"del",      TK_DEL},
     {"do",       TK_DO},
     {"with",     TK_WITH},
+    {"load",     TK_LOAD},
     {NULL,       TK_UNKNOWN},
 };
 
@@ -573,6 +594,16 @@ static Token lex_ident(Lexer *l, int sl, int sc, int sp) {
 
     Token t; t.span = span; t.sval = NULL; t.ival = 0;
     TokenKind kw = lookup_keyword(name);
+    /* check dynamic plugin tokens if not a built-in keyword */
+    if (kw == TK_IDENT) {
+        for (int di = 0; di < g_ndyn_tokens; di++) {
+            if (strcmp(name, g_dyn_tokens[di].pattern) == 0) {
+                t.kind = (TokenKind)g_dyn_tokens[di].kind;
+                t.sval = name;
+                return t;
+            }
+        }
+    }
     t.kind = kw;
     if (kw == TK_BOOL) {
         t.ival = (name[0]=='t') ? 1 : 0;
@@ -1126,7 +1157,8 @@ void token_array_free(TokenArray *ta) {
         if (t->kind == TK_STRING || t->kind == TK_RAW_STRING ||
             t->kind == TK_CHAR   || t->kind == TK_IDENT      ||
             t->kind == TK_BIGINT ||
-            t->kind == TK_MACRO_BANG || t->kind == TK_UNKNOWN)
+            t->kind == TK_MACRO_BANG || t->kind == TK_UNKNOWN ||
+            ((int)t->kind >= TK_PLUGIN_BASE && (int)t->kind < TK_PLUGIN_MAX))
             free(t->sval);
     }
     free(ta->items);
@@ -1189,6 +1221,11 @@ const char *token_kind_name(TokenKind k) {
     case TK_DEL: return "del";
     case TK_DO: return "do";
     case TK_WITH: return "with";
-    default: return "?";
+    case TK_LOAD: return "load";
+    default:
+        /* check dynamic plugin tokens */
+        if ((int)k >= TK_PLUGIN_BASE && (int)k < TK_PLUGIN_BASE + g_ndyn_tokens)
+            return g_dyn_tokens[(int)k - TK_PLUGIN_BASE].name;
+        return "?";
     }
 }

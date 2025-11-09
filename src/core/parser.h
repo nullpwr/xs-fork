@@ -45,6 +45,9 @@ extern int (*g_plugin_is_keyword)(const char *word);
 /* phase 3: parser override hook (set by interp.c) */
 extern Node *(*g_plugin_try_parser_override)(Parser *p, const char *keyword);
 
+/* disambiguation: forced plugin id for <plugin-id> syntax (set by parser, read by interp.c) */
+extern const char *g_plugin_forced_id;
+
 /* parse individual constructs (exposed for override chaining) */
 Node *parser_parse_if(Parser *p);
 Node *parser_parse_for(Parser *p);

@@ -1524,6 +1524,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_DEFER:
     case NODE_BREAK:
     case NODE_CONTINUE:
+    case NODE_LOAD:
+    case NODE_PLUGIN_DECL:
     case NODE_PROGRAM:
         sb_add(s, "XS_NULL");
         break;
@@ -2441,13 +2443,32 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             emit_stmt(s, n->module_decl.body.items[i], depth);
         break;
     case NODE_CLASS_DECL: {
-        /* Class -> struct with vtable pointer */
+        /* Class -> struct with vtable pointer and any base fields */
         sb_indent(s, depth);
         sb_printf(s, "typedef struct %s {\n", n->class_decl.name);
+        if (n->class_decl.nbases > 0 && n->class_decl.bases && n->class_decl.bases[0]) {
+            sb_indent(s, depth + 1);
+            sb_printf(s, "/* extends %s */\n", n->class_decl.bases[0]);
+        }
         sb_indent(s, depth + 1);
         sb_add(s, "void *__vtable;\n");
         sb_indent(s, depth + 1);
         sb_add(s, "int __tag;\n");
+        /* scan constructor for field assignments (self.x = ...) */
+        for (int i = 0; i < n->class_decl.members.len; i++) {
+            Node *m = n->class_decl.members.items[i];
+            if (m && m->tag == NODE_FN_DECL && m->fn_decl.name &&
+                (strcmp(m->fn_decl.name, "new") == 0 || strcmp(m->fn_decl.name, "init") == 0)) {
+                /* emit params as fields (heuristic) */
+                for (int p = 0; p < m->fn_decl.params.len; p++) {
+                    const char *pn = m->fn_decl.params.items[p].name;
+                    if (pn && strcmp(pn, "self") != 0) {
+                        sb_indent(s, depth + 1);
+                        sb_printf(s, "xs_val %s;\n", pn);
+                    }
+                }
+            }
+        }
         sb_indent(s, depth);
         sb_printf(s, "} %s;\n\n", n->class_decl.name);
         /* emit methods as standalone functions */
@@ -3384,6 +3405,25 @@ char *transpile_c(Node *program, const char *filename) {
                 }
             }
         }
+    }
+
+    /* emit forward declarations for pub functions (header-like) */
+    if (program->tag == NODE_PROGRAM) {
+        int has_pub = 0;
+        for (int i = 0; i < program->program.stmts.len; i++) {
+            Node *st = program->program.stmts.items[i];
+            if (st && st->tag == NODE_FN_DECL && st->fn_decl.is_pub && !is_main_fn(st)) {
+                if (!has_pub) {
+                    sb_add(&s, "/* exported function prototypes */\n");
+                    has_pub = 1;
+                }
+                sb_add(&s, "xs_val ");
+                emit_safe_name(&s, st->fn_decl.name);
+                emit_params_c(&s, &st->fn_decl.params);
+                sb_add(&s, ";\n");
+            }
+        }
+        if (has_pub) sb_addc(&s, '\n');
     }
 
     if (needs_main_wrap) {

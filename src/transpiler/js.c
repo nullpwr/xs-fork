@@ -821,6 +821,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "undefined");
         break;
     case NODE_PROGRAM:
+    case NODE_LOAD:
+    case NODE_PLUGIN_DECL:
         sb_add(s, "undefined");
         break;
     case NODE_DEFER:
@@ -1763,7 +1765,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_CLASS_DECL:
         sb_indent(s, depth);
-        sb_printf(s, "class %s {\n", n->class_decl.name);
+        if (n->class_decl.nbases > 0 && n->class_decl.bases && n->class_decl.bases[0])
+            sb_printf(s, "class %s extends %s {\n", n->class_decl.name, n->class_decl.bases[0]);
+        else
+            sb_printf(s, "class %s {\n", n->class_decl.name);
         for (int i = 0; i < n->class_decl.members.len; i++) {
             Node *m = n->class_decl.members.items[i];
             if (m && m->tag == NODE_FN_DECL) {
@@ -2018,6 +2023,14 @@ char *transpile_js(Node *program, const char *filename) {
     /* auto-call main if defined */
     if (has_main) {
         sb_add(&s, "main();\n");
+    }
+
+    /* source map reference */
+    if (filename) {
+        /* derive .xs.map name from source filename */
+        const char *base = strrchr(filename, '/');
+        base = base ? base + 1 : filename;
+        sb_printf(&s, "\n//# sourceMappingURL=%s.map\n", base);
     }
 
     return s.data;

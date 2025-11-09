@@ -156,10 +156,14 @@ void enumvariantlist_free(EnumVariantList *el) {
     el->items = NULL; el->len = el->cap = 0;
 }
 
+static int g_node_id_counter = 0;
+int node_next_id(void) { return g_node_id_counter++; }
+
 Node *node_new(NodeTag tag, Span span) {
     Node *n = xs_calloc(1, sizeof(Node));
-    n->tag  = tag;
-    n->span = span;
+    n->tag     = tag;
+    n->span    = span;
+    n->node_id = node_next_id();
     if (tag == NODE_BLOCK) n->block.has_decls = -1; /* -1 = unknown */
     return n;
 }
@@ -498,6 +502,20 @@ void node_free(Node *n) {
         break;
     case NODE_DEL:
         free(n->del_.name);
+        break;
+    case NODE_LOAD:
+        free(n->load_.path);
+        free_string_array(n->load_.rename_keys, n->load_.nrenames);
+        free_string_array(n->load_.rename_vals, n->load_.nrenames);
+        break;
+    case NODE_PLUGIN_DECL:
+        free(n->plugin_decl.name);
+        node_free(n->plugin_decl.meta);
+        node_free(n->plugin_decl.lexer_sec);
+        node_free(n->plugin_decl.parser_sec);
+        nodelist_free(&n->plugin_decl.passes);
+        node_free(n->plugin_decl.sema_sec);
+        node_free(n->plugin_decl.runtime_sec);
         break;
     case NODE_PROGRAM:
         nodelist_free(&n->program.stmts);

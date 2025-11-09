@@ -1,6 +1,7 @@
 #include "core/xs_compat.h"
 #include "core/parser.h"
 #include "core/xs_utils.h"
+#include "plugins/plugin_parse.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -12,6 +13,7 @@ Node *(*g_plugin_try_syntax_handler)(Parser *p, Token *tok) = NULL;
 Node *(*g_plugin_try_syntax_expr_handler)(Parser *p, Token *tok) = NULL;
 int (*g_plugin_is_keyword)(const char *word) = NULL;
 Node *(*g_plugin_try_parser_override)(Parser *p, const char *keyword) = NULL;
+const char *g_plugin_forced_id = NULL;
 
 typedef struct { const char *typo; const char *suggestion; } TypoEntry;
 static const TypoEntry KEYWORD_TYPOS[] = {
@@ -1332,8 +1334,25 @@ static Node *parse_primary(Parser *p) {
             g_plugin_is_keyword(t->sval)) {
             int saved_pos = p->pos;
             pp_advance(p);
+            /* disambiguation: check for !<plugin-id> after keyword */
+            const char *saved_forced = g_plugin_forced_id;
+            if (pp_peek(p, 0)->kind == TK_OP_NOT) {
+                Token *lt = pp_peek(p, 1);
+                if (lt->kind == TK_LT) {
+                    Token *id_tok = pp_peek(p, 2);
+                    Token *gt_tok = pp_peek(p, 3);
+                    if (id_tok->kind == TK_IDENT && id_tok->sval && gt_tok->kind == TK_GT) {
+                        g_plugin_forced_id = id_tok->sval;
+                        pp_advance(p); /* skip ! */
+                        pp_advance(p); /* skip < */
+                        pp_advance(p); /* skip ident */
+                        pp_advance(p); /* skip > */
+                    }
+                }
+            }
             Node *plugin_node = g_plugin_try_syntax_expr_handler ?
                 g_plugin_try_syntax_expr_handler(p, t) : NULL;
+            g_plugin_forced_id = saved_forced;
             if (plugin_node) return plugin_node;
             p->pos = saved_pos;
             t = pp_peek(p, 0);
@@ -3571,6 +3590,61 @@ static Node *parse_debounce(Parser *p) {
     return n;
 }
 
+/* load "path" or load "path" with { KEY: "val", ... } */
+static Node *parse_load_stmt(Parser *p) {
+    Token *kw = pp_expect(p, TK_LOAD, "expected 'load'");
+    Span span = kw->span;
+
+    Token *path_tok = pp_expect(p, TK_STRING, "expected file path string after 'load'");
+    char *path = xs_strdup(path_tok->sval ? path_tok->sval : "");
+
+    char **rename_keys = NULL;
+    char **rename_vals = NULL;
+    int nrenames = 0;
+
+    /* optional: with { KEY: "val", ... } */
+    if (pp_check(p, TK_WITH)) {
+        pp_advance(p); /* consume 'with' */
+        pp_expect(p, TK_LBRACE, "expected '{' after 'with'");
+        while (!pp_check2(p, TK_RBRACE, TK_EOF)) {
+            /* key can be IDENT or STRING */
+            Token *key_tok = pp_peek(p, 0);
+            char *key = NULL;
+            if (key_tok->kind == TK_IDENT) {
+                key = xs_strdup(key_tok->sval ? key_tok->sval : "");
+                pp_advance(p);
+            } else if (key_tok->kind == TK_STRING) {
+                key = xs_strdup(key_tok->sval ? key_tok->sval : "");
+                pp_advance(p);
+            } else {
+                parse_error_at(p, key_tok->span, "P0001", "expected key name");
+                pp_advance(p);
+                continue;
+            }
+            pp_expect(p, TK_COLON, "expected ':' after key");
+            Token *val_tok = pp_expect(p, TK_STRING, "expected string value");
+            char *val = xs_strdup(val_tok->sval ? val_tok->sval : "");
+
+            rename_keys = xs_realloc(rename_keys, (nrenames + 1) * sizeof(char *));
+            rename_vals = xs_realloc(rename_vals, (nrenames + 1) * sizeof(char *));
+            rename_keys[nrenames] = key;
+            rename_vals[nrenames] = val;
+            nrenames++;
+            if (!pp_match(p, TK_COMMA)) break;
+        }
+        pp_expect(p, TK_RBRACE, "expected '}'");
+    }
+
+    if (!pp_match(p, TK_SEMICOLON)) pp_match(p, TK_NEWLINE);
+
+    Node *n = node_new(NODE_LOAD, span);
+    n->load_.path = path;
+    n->load_.rename_keys = rename_keys;
+    n->load_.rename_vals = rename_vals;
+    n->load_.nrenames = nrenames;
+    return n;
+}
+
 /* statement */
 static Node *parse_stmt(Parser *p) {
     skip_semis(p);
@@ -3811,6 +3885,7 @@ static Node *parse_stmt(Parser *p) {
     }
     if (tok->kind == TK_IMPORT) return parse_import(p);
     if (tok->kind == TK_USE) return parse_use(p);
+    if (tok->kind == TK_LOAD) return parse_load_stmt(p);
     if (tok->kind == TK_EVERY) return parse_every(p);
     if (tok->kind == TK_AFTER) return parse_after(p);
     if (tok->kind == TK_TIMEOUT) return parse_timeout(p);
@@ -4241,6 +4316,96 @@ static Node *parse_stmt(Parser *p) {
         return n;
     }
 
+    /* plugin "name" { ... } block declaration */
+    if (tok->kind == TK_IDENT && tok->sval && strcmp(tok->sval, "plugin") == 0 &&
+        pp_peek(p, 1)->kind == TK_STRING) {
+        pp_advance(p); /* consume 'plugin' */
+        return parse_plugin_decl(p);
+    }
+
+    /* pipeline { name -> name -> name } constraint block */
+    if (tok->kind == TK_IDENT && tok->sval && strcmp(tok->sval, "pipeline") == 0 &&
+        pp_peek(p, 1)->kind == TK_LBRACE) {
+        pp_advance(p); /* consume 'pipeline' */
+        pp_advance(p); /* consume '{' */
+        /* parse constraint chains: name -> name -> name
+           produces a NODE_BLOCK with string-pair lets encoding constraints */
+        NodeList stmts = nodelist_new();
+        int pair_id = 0;
+        while (!pp_check(p, TK_RBRACE) && pp_peek(p, 0)->kind != TK_EOF) {
+            /* skip newlines/semis */
+            while (pp_check(p, TK_NEWLINE) || pp_check(p, TK_SEMICOLON))
+                pp_advance(p);
+            if (pp_check(p, TK_RBRACE)) break;
+            /* parse chain: ident -> ident -> ident ... */
+            if (pp_peek(p, 0)->kind != TK_IDENT) { pp_advance(p); continue; }
+            Token *first = pp_peek(p, 0);
+            char *prev_name = xs_strdup(first->sval ? first->sval : "");
+            pp_advance(p);
+            while (pp_check(p, TK_ARROW)) {
+                pp_advance(p); /* consume -> */
+                Token *next_tok = pp_peek(p, 0);
+                char *next_name = xs_strdup(next_tok->sval ? next_tok->sval : "");
+                pp_advance(p);
+                /* encode constraint: let __pipeline_from_N = "prev" */
+                char from_buf[64], to_buf[64];
+                snprintf(from_buf, sizeof(from_buf), "__pipeline_from_%d", pair_id);
+                snprintf(to_buf, sizeof(to_buf), "__pipeline_to_%d", pair_id);
+                pair_id++;
+
+                Node *let_from = node_new(NODE_LET, span);
+                Node *pat_from = node_new(NODE_PAT_IDENT, span);
+                pat_from->pat_ident.name = xs_strdup(from_buf);
+                pat_from->pat_ident.mutable = 0;
+                let_from->let.pattern = pat_from;
+                let_from->let.name = xs_strdup(from_buf);
+                Node *val_from = node_new(NODE_LIT_STRING, span);
+                val_from->lit_string.sval = xs_strdup(prev_name);
+                val_from->lit_string.interpolated = 0;
+                val_from->lit_string.parts = nodelist_new();
+                let_from->let.value = val_from;
+                let_from->let.mutable = 0;
+                let_from->let.type_ann = NULL;
+                let_from->let.contract = NULL;
+                nodelist_push(&stmts, let_from);
+
+                Node *let_to = node_new(NODE_LET, span);
+                Node *pat_to = node_new(NODE_PAT_IDENT, span);
+                pat_to->pat_ident.name = xs_strdup(to_buf);
+                pat_to->pat_ident.mutable = 0;
+                let_to->let.pattern = pat_to;
+                let_to->let.name = xs_strdup(to_buf);
+                Node *val_to = node_new(NODE_LIT_STRING, span);
+                val_to->lit_string.sval = xs_strdup(next_name);
+                val_to->lit_string.interpolated = 0;
+                val_to->lit_string.parts = nodelist_new();
+                let_to->let.value = val_to;
+                let_to->let.mutable = 0;
+                let_to->let.type_ann = NULL;
+                let_to->let.contract = NULL;
+                nodelist_push(&stmts, let_to);
+
+                free(prev_name);
+                prev_name = xs_strdup(next_name);
+                free(next_name);
+            }
+            free(prev_name);
+            /* skip newlines/semis between chains */
+            while (pp_check(p, TK_NEWLINE) || pp_check(p, TK_SEMICOLON))
+                pp_advance(p);
+        }
+        if (pp_check(p, TK_RBRACE)) pp_advance(p);
+        if (stmts.len == 0) {
+            return node_new(NODE_LIT_NULL, span);
+        }
+        Node *blk = node_new(NODE_BLOCK, span);
+        blk->block.stmts = stmts;
+        blk->block.expr = NULL;
+        blk->block.has_decls = 1;
+        blk->block.is_unsafe = 0;
+        return blk;
+    }
+
     /* Labeled loop: ident: for/while/loop */
     if (tok->kind == TK_IDENT && pp_peek(p, 1)->kind == TK_COLON) {
         Token *next2 = pp_peek(p, 2);
@@ -4267,8 +4432,26 @@ static Node *parse_stmt(Parser *p) {
         g_plugin_is_keyword(tok->sval)) {
         int saved_pos = p->pos;
         pp_advance(p);
+        /* disambiguation: check for !<plugin-id> after keyword */
+        const char *saved_forced = g_plugin_forced_id;
+        Token *peek0 = pp_peek(p, 0);
+        if (peek0->kind == TK_OP_NOT) {
+            Token *lt = pp_peek(p, 1);
+            if (lt->kind == TK_LT) {
+                Token *id_tok = pp_peek(p, 2);
+                Token *gt_tok = pp_peek(p, 3);
+                if (id_tok->kind == TK_IDENT && id_tok->sval && gt_tok->kind == TK_GT) {
+                    g_plugin_forced_id = id_tok->sval;
+                    pp_advance(p); /* skip ! */
+                    pp_advance(p); /* skip < */
+                    pp_advance(p); /* skip ident */
+                    pp_advance(p); /* skip > */
+                }
+            }
+        }
         Node *plugin_node = g_plugin_try_syntax_handler ?
             g_plugin_try_syntax_handler(p, tok) : NULL;
+        g_plugin_forced_id = saved_forced;
         if (plugin_node) return plugin_node;
         p->pos = saved_pos;
         tok = pp_peek(p, 0);

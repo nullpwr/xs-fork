@@ -33,7 +33,7 @@ typedef enum {
     TK_EFFECT, TK_PERFORM, TK_HANDLE, TK_RESUME,
     TK_INLINE, TK_TAG, TK_BIND, TK_ADAPT,
     TK_EVERY, TK_AFTER, TK_TIMEOUT, TK_DEBOUNCE, TK_PAUSE, TK_DEL,
-    TK_DO, TK_WITH,
+    TK_DO, TK_WITH, TK_LOAD,
 
     // operators
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
@@ -113,5 +113,15 @@ void       lexer_free(Lexer *l);
 
 void       token_array_free(TokenArray *ta);
 const char *token_kind_name(TokenKind k);
+
+/* dynamic token registration for plugins */
+#define TK_PLUGIN_BASE 200
+#define TK_PLUGIN_MAX  256
+
+typedef struct { char *name; char *pattern; int kind; } DynToken;
+extern DynToken g_dyn_tokens[];
+extern int g_ndyn_tokens;
+int  lexer_register_dyn_token(const char *name, const char *pattern);
+int  lexer_dyn_token_kind(const char *name);
 
 #endif /* LEXER_H */
