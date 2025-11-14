@@ -29,6 +29,7 @@
 #define PATH_MAX 4096
 #endif
 #include <time.h>
+#include <signal.h>
 #ifdef XSC_ENABLE_VM
 #include "vm/bytecode.h"
 #include "vm/compiler.h"
@@ -66,6 +67,7 @@
 #endif
 #ifdef XSC_ENABLE_PLUGINS
 #include "plugins/plugin_api.h"
+#include "plugins/pipeline.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -79,6 +81,7 @@
 #include "jit/jit.h"
 #endif
 
+#include "core/gc.h"
 #include "optimizer/optimizer.h"
 #include "ir/ir.h"
 
@@ -89,6 +92,7 @@ static int program_has_plugin_use(Node *program) {
     for (int j = 0; j < program->program.stmts.len; j++) {
         Node *s = program->program.stmts.items[j];
         if (s && s->tag == NODE_USE && s->use_.is_plugin) return 1;
+        if (s && s->tag == NODE_LOAD) return 1;
     }
     return 0;
 }
@@ -330,6 +334,9 @@ static void cov_register_node(XSCoverage *cov, Node *n) {
         break;
     case NODE_PAT_REGEX:
         break;
+    case NODE_LOAD:
+    case NODE_PLUGIN_DECL:
+        break;
     case NODE_PROGRAM:
         cov_register_nodelist(cov, &n->program.stmts);
         break;
@@ -426,6 +433,7 @@ static void usage(void) {
         "  --lenient            Downgrade errors to warnings\n"
         "  --optimize           Run AST optimizer\n"
         "  --emit <target>      Dump IR: ast, bytecode, ir, js, c, wasm\n"
+        "  --trace              Auto-load provenance tracking\n"
         "  --watch              Re-run on file change\n"
         "  --profile            Enable sampling profiler\n"
         "  --coverage           Enable line/branch coverage\n"
@@ -605,7 +613,14 @@ static void ast_dump(Node *n, int depth) {
 
 extern void xs_set_argv(int argc, char **argv);
 
+static void sigint_handler(int sig) {
+    (void)sig;
+    fprintf(stderr, "\nInterrupted\n");
+    exit(130);
+}
+
 int main(int argc, char **argv) {
+    signal(SIGINT, sigint_handler);
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     xs_set_argv(argc, argv);
@@ -616,6 +631,7 @@ int main(int argc, char **argv) {
     int do_watch    = 0;
     int do_optimize = 0;
     int emit_ir_ssa = 0;
+    int do_trace    = 0;
 #ifdef XSC_ENABLE_VM
     int do_vm         = 0;
     int emit_bytecode = 0;
@@ -737,13 +753,16 @@ int main(int argc, char **argv) {
                                "  c        C11 with XS runtime\n"
                                "  wasm32   WebAssembly binary\n"
                                "  wasi     WebAssembly with WASI interface\n")
-                H("replay",    "Usage: xs replay <trace.xst> [--ui]\n\n"
+                H("replay",    "Usage: xs replay <trace.xst> [--dump]\n\n"
                                "Replay a recorded execution trace interactively.\n\n"
+                               "Options:\n"
+                               "  --dump        Print all events and exit (non-interactive)\n\n"
                                "Commands during replay:\n"
                                "  n / next      Step forward\n"
                                "  p / prev      Step backward\n"
                                "  c / continue  Run to end\n"
                                "  g <n>         Go to event number\n"
+                               "  w <var>       Show provenance for variable\n"
                                "  q / quit      Exit replay\n")
                 H("new",       "Usage: xs new <name>\n\n"
                                "Scaffold a new XS project.\n\n"
@@ -965,24 +984,34 @@ int main(int argc, char **argv) {
 #endif
 
         } else if (strcmp(sub, "run") == 0) {
-            if (sub_argc < 1) { fprintf(stderr, "xs run: missing .xsc file\n"); return 1; }
-#ifdef XSC_ENABLE_VM
+            if (sub_argc < 1) { fprintf(stderr, "xs run: missing file\n"); return 1; }
             {
-                XSProto *proto = proto_read_file(sub_arg(0));
-                if (!proto) {
-                    fprintf(stderr, "xs run: failed to load %s\n", sub_arg(0));
-                    return 1;
-                }
-                VM *vm = vm_new();
-                vm_run(vm, proto);
-                vm_free(vm);
-                proto_free(proto);
-                return 0;
-            }
+                const char *run_path = sub_arg(0);
+                size_t rplen = strlen(run_path);
+                /* .xsc files go through the VM, .xs files through the interpreter */
+                if (rplen > 4 && strcmp(run_path + rplen - 4, ".xsc") == 0) {
+#ifdef XSC_ENABLE_VM
+                    XSProto *proto = proto_read_file(run_path);
+                    if (!proto) {
+                        fprintf(stderr, "xs run: failed to load %s\n", run_path);
+                        return 1;
+                    }
+                    VM *vm = vm_new();
+                    vm_run(vm, proto);
+                    vm_free(vm);
+                    proto_free(proto);
+                    return 0;
 #else
-            fprintf(stderr, "xs run: VM not available (rebuild with XSC_ENABLE_VM=1)\n");
-            return 1;
+                    fprintf(stderr, "xs run: VM not available (rebuild with XSC_ENABLE_VM=1)\n");
+                    return 1;
 #endif
+                } else {
+                    /* treat as .xs source file, run via interpreter */
+                    filename = run_path;
+                    file_arg = sub_idx + 1;
+                    goto run_file;
+                }
+            }
 
         } else if (strcmp(sub, "dap") == 0) {
 #ifdef _WIN32
@@ -1080,7 +1109,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(sub, "replay") == 0) {
 #ifdef XSC_ENABLE_TRACER
             if (sub_argc < 1) { fprintf(stderr, "xs replay: missing trace file\n"); return 1; }
-            int rc = replay_run(sub_arg(0));
+            int dump_mode = (sub_argc >= 2 && strcmp(sub_arg(1), "--dump") == 0);
+            int rc = dump_mode ? replay_dump(sub_arg(0)) : replay_run(sub_arg(0));
             cache_free(g_sema_cache);
             return rc;
 #else
@@ -1091,10 +1121,17 @@ int main(int argc, char **argv) {
         } else if (strcmp(sub, "fmt") == 0) {
 #ifdef XSC_ENABLE_FMT
             if (sub_argc < 1) { fprintf(stderr, "xs fmt: missing file\n"); return 1; }
-            int check_only = (sub_argc >= 2 && strcmp(sub_arg(1), "--check") == 0);
+            /* find --check flag and file arg in any order */
+            int check_only = 0;
+            const char *fmt_path = NULL;
+            for (int fi = 0; fi < sub_argc; fi++) {
+                if (strcmp(sub_arg(fi), "--check") == 0) check_only = 1;
+                else if (!fmt_path) fmt_path = sub_arg(fi);
+            }
+            if (!fmt_path) { fprintf(stderr, "xs fmt: missing file\n"); return 1; }
             if (check_only)
-                return fmt_file_check(sub_arg(0));
-            return fmt_file(sub_arg(0));
+                return fmt_file_check(fmt_path);
+            return fmt_file(fmt_path);
 #else
             fprintf(stderr, "xs fmt: not enabled in this build (rebuild with XSC_ENABLE_FMT=1)\n");
             return 1;
@@ -1708,6 +1745,7 @@ test_again: ;
         else if (strcmp(argv[i], "--lenient")  == 0) lenient  = 1;
         else if (strcmp(argv[i], "--strict")   == 0) strict   = 1;
         else if (strcmp(argv[i], "--no-color") == 0) g_no_color = 1;
+        else if (strcmp(argv[i], "--gc-debug") == 0) gc_set_debug(1);
         else if (strcmp(argv[i], "--optimize") == 0) do_optimize = 1;
         else if (strcmp(argv[i], "--watch")    == 0) do_watch = 1;
         else if (strcmp(argv[i], "run")        == 0) { /* skip */ }
@@ -1826,6 +1864,9 @@ test_again: ;
             do_coverage = 1;
 #endif
         }
+        else if (strcmp(argv[i], "--trace") == 0) {
+            do_trace = 1;
+        }
 #ifdef XSC_ENABLE_VM
         else if (strcmp(argv[i], "--emit")     == 0 && i+1 < argc) {
             const char *what = argv[++i];
@@ -1942,6 +1983,51 @@ test_again: ;
 run_file:;
     char *src = read_file(filename);
     if (!src) return 1;
+
+    /* --trace: prepend provenance plugin load (skip if already loaded) */
+    if (do_trace && !strstr(src, "load \"plugins/provenance") &&
+                    !strstr(src, "load \"provenance") &&
+                    !strstr(src, "provenance.xs")) {
+        /* resolve provenance plugin relative to executable */
+        char trace_prefix[PATH_MAX + 128];
+        char exe_path[PATH_MAX];
+        exe_path[0] = '\0';
+#ifdef _WIN32
+        GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+#elif defined(__linux__)
+        { ssize_t r = readlink("/proc/self/exe", exe_path, sizeof(exe_path)-1);
+          if (r > 0) exe_path[r] = '\0'; }
+#elif defined(__APPLE__)
+        { uint32_t sz = sizeof(exe_path);
+          _NSGetExecutablePath(exe_path, &sz); }
+#endif
+        if (exe_path[0] == '\0') snprintf(exe_path, sizeof(exe_path), "%s", argv[0]);
+        char *last_sep = strrchr(exe_path, '/');
+        if (!last_sep) last_sep = strrchr(exe_path, '\\');
+        if (last_sep) *last_sep = '\0';
+        /* try tests/plugins/provenance.xs relative to binary dir */
+        char prov_path[PATH_MAX];
+        snprintf(prov_path, sizeof(prov_path), "%s/tests/plugins/provenance.xs", exe_path);
+        struct stat prov_st;
+        if (stat(prov_path, &prov_st) != 0) {
+            /* try plugins/provenance.xs relative to script dir */
+            const char *last_slash = strrchr(filename, '/');
+            if (last_slash) {
+                int dirlen = (int)(last_slash - filename);
+                snprintf(prov_path, sizeof(prov_path), "%.*s/plugins/provenance.xs", dirlen, filename);
+            } else {
+                snprintf(prov_path, sizeof(prov_path), "plugins/provenance.xs");
+            }
+        }
+        snprintf(trace_prefix, sizeof(trace_prefix), "load \"%s\"\n", prov_path);
+        size_t plen = strlen(trace_prefix);
+        size_t slen = strlen(src);
+        char *new_src = malloc(plen + slen + 1);
+        memcpy(new_src, trace_prefix, plen);
+        memcpy(new_src + plen, src, slen + 1);
+        free(src);
+        src = new_src;
+    }
 
     char *src_for_cache = xs_strdup(src);
 
@@ -2193,6 +2279,7 @@ run_file:;
         XSTracer *tracer = record_path ? tracer_new(record_path) : NULL;
         if (tracer && trace_deep) tracer_set_deep(tracer, 1);
         interp->tracer = tracer;
+        interp_setup_tracer_suppress(interp);
 #endif
 #ifdef XSC_ENABLE_COVERAGE
         interp->coverage = cov;
@@ -2265,6 +2352,21 @@ run_file:;
         }
 #endif
         interp_run(interp, program);
+#ifdef XSC_ENABLE_PLUGINS
+        /* run custom passes after program execution.
+           closure environments survive because env refcounting keeps them alive
+           even after the temp plugin interpreter is freed. the callbacks are
+           called through the main interpreter so native fns like
+           plugin.runtime.global.set work correctly via s_plugin_host_globals. */
+        if (interp->pipeline && !interp->cf.signal) {
+            PluginPipeline *pp = (PluginPipeline *)interp->pipeline;
+            pipeline_run_passes(pp, program, "parser", 0, interp);
+            pipeline_run_passes(pp, program, "parser", 1, interp);
+            pipeline_run_passes(pp, program, "sema", 0, interp);
+            pipeline_run_passes(pp, program, "sema", 1, interp);
+            pipeline_dispatch_sema(pp, program, interp);
+        }
+#endif
         int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC);
         interp_free(interp);
         diag_context_free(dctx);

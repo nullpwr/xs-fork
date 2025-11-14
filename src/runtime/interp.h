@@ -8,6 +8,7 @@
 #include "core/ast.h"
 #include "coverage/coverage.h"
 #include "diagnostic/diagnostic.h"
+#include "runtime/scheduler.h"
 
 typedef struct {
     const char *func_name;
@@ -53,7 +54,10 @@ struct Interp {
 
     Value       *nursery_queue;
 
-    /* cooperative task queue */
+    /* cooperative task scheduler */
+    Scheduler   *scheduler;
+
+    /* legacy task queue (kept for compat) */
     struct { Value *fn; Value *result; int done; } task_queue[64];
     int          n_tasks;
 
@@ -76,12 +80,28 @@ struct Interp {
     /* phase 2: source kept alive for plugin re-parse */
     const char  *source;
     int          needs_reparse;
+
+    /* plugin pipeline (for plugin block declarations) */
+    void        *pipeline;  /* PluginPipeline*, or NULL */
+
+    /* runtime hook cancel flag */
+    int          hook_cancelled;
+
+    /* current program AST (set during interp_run, for pass execution) */
+    Node        *current_program;
+
+    /* debug hook: called before each statement in interp_exec.
+       Returns 1 to pause (enter DAP command loop), 0 to continue.
+       The void* is the opaque DAP state pointer. */
+    int         (*debug_hook)(void *dap_state, Interp *interp, Node *stmt);
+    void        *debug_hook_data;
 };
 
 Interp *interp_new(const char *filename);
 void    interp_free(Interp *i);
 void    interp_run(Interp *i, Node *program);
 void    interp_exec(Interp *i, Node *stmt);
+void    interp_setup_tracer_suppress(Interp *i);
 
 /* caller does NOT own the refcount; incref to keep */
 Value  *interp_eval(Interp *i, Node *expr);

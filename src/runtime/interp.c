@@ -7,6 +7,7 @@
 #include "core/parser.h"
 #include "core/xs_bigint.h"
 #include "core/xs_utils.h"
+#include "plugins/pipeline.h"
 #ifdef XSC_ENABLE_TRACER
 #include "tracer/tracer.h"
 #endif
@@ -19,6 +20,8 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include "core/utf8.h"
+#include "optimizer/inline_cache.h"
 #include <time.h>
 #include <limits.h>
 #ifndef PATH_MAX
@@ -53,15 +56,66 @@ static void dep_track_add(const char *name) {
     do { if ((i)->tracer) tracer_record_return((XSTracer*)(i)->tracer, name, val); } while(0)
 #define TRACE_STORE(i, name, val) \
     do { if ((i)->tracer) tracer_record_store((XSTracer*)(i)->tracer, name, val); } while(0)
+#define TRACE_PROVENANCE(i, var, origin, detail, line) \
+    do { if ((i)->tracer) tracer_record_provenance((XSTracer*)(i)->tracer, var, origin, detail, line); } while(0)
+
+static void trace_provenance_for_node(Interp *interp, const char *var, Node *expr) {
+    if (!interp->tracer || !expr) return;
+    const char *origin = "unknown";
+    const char *detail = "";
+    switch (expr->tag) {
+    case NODE_LIT_INT: case NODE_LIT_FLOAT: case NODE_LIT_STRING: case NODE_LIT_BOOL:
+        origin = "literal"; break;
+    case NODE_CALL:
+        origin = "fn_return";
+        if (expr->call.callee && expr->call.callee->tag == NODE_IDENT)
+            detail = expr->call.callee->ident.name;
+        break;
+    case NODE_BINOP:
+        origin = "binop";
+        detail = expr->binop.op;
+        break;
+    case NODE_IDENT:
+        origin = "variable";
+        detail = expr->ident.name;
+        break;
+    case NODE_METHOD_CALL:
+        origin = "method";
+        detail = expr->method_call.method ? expr->method_call.method : "";
+        break;
+    case NODE_UNARY:
+        origin = "unary";
+        detail = expr->unary.op;
+        break;
+    default: break;
+    }
+    tracer_record_provenance((XSTracer*)interp->tracer, var, origin, detail, expr->span.line);
+}
 #else
 #define TRACE_CALL(i, name, line)   ((void)0)
 #define TRACE_RETURN(i, name, val)  ((void)0)
 #define TRACE_STORE(i, name, val)   ((void)0)
+#define TRACE_PROVENANCE(i, var, origin, detail, line) ((void)0)
 #endif
 
 /* forward decl for plugin system */
 Value *call_value(Interp *i, Value *callee, Value **args, int argc,
                   const char *call_site);
+static Value *native_cancel(Interp *interp, Value **args, int argc);
+static Value *native_emit_runtime_hook(Interp *interp, Value **args, int argc);
+static Value *native_default_handler(Interp *interp, Value **args, int argc);
+static Value *native_tracer_active(Interp *interp, Value **args, int argc);
+static Value *native_tracer_write_prov(Interp *interp, Value **args, int argc);
+static Value *node_to_xs_map(Node *n);
+static int node_tag_from_string(const char *s);
+
+/* sema override chain state (for default() chaining) */
+static SemaPluginRule **g_sema_chain = NULL;
+static int g_sema_chain_len = 0;
+static int g_sema_chain_pos = 0;
+static Interp *g_sema_chain_interp = NULL;
+
+/* forced plugin id for disambiguation syntax (defined in parser.c) */
 
 /* plugin system globals */
 
@@ -156,6 +210,7 @@ static int g_in_eval_hook = 0; /* recursion guard */
 /* phase 2: syntax extension globals */
 
 static Value *g_syntax_handlers[16];
+static char  *g_syntax_handler_targets[16]; /* target production name for extend handlers */
 static int g_n_syntax_handlers = 0;
 static Value *g_syntax_expr_handlers[16];
 static int g_n_syntax_expr_handlers = 0;
@@ -175,6 +230,15 @@ typedef struct {
 } ParserOverride;
 static ParserOverride g_parser_overrides[32];
 static int g_n_parser_overrides = 0;
+
+/* parser production registry (pipeline parser { production NAME ... }) */
+typedef struct {
+    char keyword[64];
+    char plugin_id[64];
+    Value *callback;
+} ParserProduction;
+static ParserProduction g_parser_productions[32];
+static int g_n_parser_productions = 0;
 
 /* phase 3: lexer transform registry */
 static Value *g_lexer_transforms[16];
@@ -619,13 +683,21 @@ Interp *interp_new(const char *filename) {
     i->n_tasks        = 0;
     i->source         = NULL;
     i->needs_reparse  = 0;
+    i->pipeline       = pipeline_new();
     /* phase 2: register plugin parser bridge functions */
     g_plugin_is_keyword = plugin_is_keyword_impl;
     g_plugin_try_syntax_handler = plugin_try_syntax_handler_impl;
     g_plugin_try_syntax_expr_handler = plugin_try_syntax_expr_handler_impl;
     /* phase 3: parser override bridge */
     g_plugin_try_parser_override = plugin_try_parser_override_impl;
+    ic_init();
     stdlib_register(i);
+    /* plugin pipeline builtins */
+    interp_define_native(i, "cancel", native_cancel);
+    interp_define_native(i, "emit_runtime_hook", native_emit_runtime_hook);
+    interp_define_native(i, "default", native_default_handler);
+    interp_define_native(i, "__tracer_active", native_tracer_active);
+    interp_define_native(i, "__tracer_write_prov", native_tracer_write_prov);
     return i;
 }
 
@@ -654,6 +726,7 @@ void interp_free(Interp *i) {
     }
     i->n_tasks = 0;
     free(i->call_stack);
+    if (i->pipeline) pipeline_free(i->pipeline);
     free(i);
 }
 
@@ -1065,9 +1138,29 @@ tail_call_entry: ;
                     value_decref(rest);
                     arg_idx = cur_argc;
                 } else if (arg_idx < cur_argc) {
-                    if (param->tag == NODE_PAT_IDENT)
+                    if (param->tag == NODE_PAT_IDENT) {
                         env_define(call_env, param->pat_ident.name, cur_args[arg_idx], 1);
-                    else
+                        /* fire after_eval hooks for param binding (as NODE_LET) */
+                        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+                            g_in_eval_hook = 1;
+                            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                                EvalHook *hook = &g_after_eval[_h];
+                                if (!hook->callback) continue;
+                                if (hook->tag_filter >= 0 && hook->tag_filter != NODE_LET) continue;
+                                Value *node_map = xs_map_new();
+                                map_set(node_map->map, "tag", xs_str("let"));
+                                map_set(node_map->map, "name", xs_str(param->pat_ident.name));
+                                /* value is null: classify will fall through to param entry */
+                                map_set(node_map->map, "line", xs_int(param->span.line));
+                                Value *hargs[2] = { node_map, cur_args[arg_idx] };
+                                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                                value_decref(node_map);
+                                if (hresult) value_decref(hresult);
+                                if (i->cf.signal) { g_in_eval_hook = 0; break; }
+                            }
+                            g_in_eval_hook = 0;
+                        }
+                    } else
                         bind_pattern(i, param, cur_args[arg_idx], call_env, 1);
                     arg_idx++;
                 } else {
@@ -1635,13 +1728,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         int slen = (int)strlen(s);
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) return xs_int(slen);
         if (strcmp(method, "upper") == 0 || strcmp(method, "to_upper") == 0) {
-            char *r = xs_strdup(s);
-            for (int j=0; r[j]; j++) r[j] = toupper((unsigned char)r[j]);
+            int olen;
+            char *r = utf8_str_upper(s, slen, &olen);
             Value *v = xs_str(r); free(r); return v;
         }
         if (strcmp(method, "lower") == 0 || strcmp(method, "to_lower") == 0) {
-            char *r = xs_strdup(s);
-            for (int j=0; r[j]; j++) r[j] = tolower((unsigned char)r[j]);
+            int olen;
+            char *r = utf8_str_lower(s, slen, &olen);
             Value *v = xs_str(r); free(r); return v;
         }
         if (strcmp(method, "trim") == 0) {
@@ -2001,6 +2094,14 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             }
             res[ri] = '\0';
             Value *v = xs_str(res); free(res); return v;
+        }
+        /* byte_len: number of bytes in string */
+        if (strcmp(method, "byte_len") == 0) {
+            return xs_int(slen);
+        }
+        /* char_len: number of unicode codepoints */
+        if (strcmp(method, "char_len") == 0) {
+            return xs_int(utf8_strlen(s, slen));
         }
         /* from_chars: "".from_chars([...]): build string from char array */
         if (strcmp(method, "from_chars") == 0) {
@@ -4378,6 +4479,12 @@ Value *interp_eval(Interp *i, Node *n) {
             Value *args[1] = { node_map };
             Value *result = call_value(i, hook->callback, args, 1, "before_eval");
             value_decref(node_map);
+            if (i->hook_cancelled) {
+                i->hook_cancelled = 0;
+                if (result) value_decref(result);
+                g_in_eval_hook = 0;
+                return value_incref(XS_NULL_VAL);
+            }
             if (!result || result->tag == XS_NULL) {
                 if (result) value_decref(result);
                 g_in_eval_hook = 0;
@@ -4607,7 +4714,25 @@ Value *interp_eval(Interp *i, Node *n) {
         return v;
     }
 
-    case NODE_BINOP: return eval_binop(i, n);
+    case NODE_BINOP: {
+        Value *result = eval_binop(i, n);
+        /* after_eval hooks for binop nodes (observe-only) */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != NODE_BINOP) continue;
+                Value *node_map = node_to_xs_map(n);
+                Value *hargs[2] = { node_map, result };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
+        return result;
+    }
 
     case NODE_UNARY: {
         if (n->unary.op[0] == '?') {
@@ -4700,6 +4825,9 @@ Value *interp_eval(Interp *i, Node *n) {
 
         if (target->tag == NODE_IDENT) {
             TRACE_STORE(i, target->ident.name, result);
+#ifdef XSC_ENABLE_TRACER
+            trace_provenance_for_node(i, target->ident.name, n->assign.value);
+#endif
             int r = env_set(i->env, target->ident.name, result);
             if (r == -1) {
                 env_define(i->env, target->ident.name, result, 1);
@@ -4750,6 +4878,21 @@ Value *interp_eval(Interp *i, Node *n) {
         Value *ret = value_incref(result);
         if (val != result) value_decref(val);
         else value_decref(result);
+        /* after_eval hooks for assign nodes (observe-only) */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != NODE_ASSIGN) continue;
+                Value *node_map = node_to_xs_map(n);
+                Value *hargs[2] = { node_map, ret };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
         return ret;
     }
 
@@ -4846,7 +4989,7 @@ do_call: ;
         value_decref(callee);
         for (int j=0;j<argc;j++) value_decref(args[j]);
         if (args) free(args);
-        /* phase 2: after_eval hooks for call nodes */
+        /* phase 2: after_eval hooks for call nodes (observe-only) */
         if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
             g_in_eval_hook = 1;
             for (int _h = 0; _h < g_n_after_eval; _h++) {
@@ -4857,12 +5000,7 @@ do_call: ;
                 Value *hargs[2] = { node_map, result };
                 Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
                 value_decref(node_map);
-                if (hresult && hresult->tag != XS_NULL) {
-                    value_decref(result);
-                    result = hresult;
-                } else if (hresult) {
-                    value_decref(hresult);
-                }
+                if (hresult) value_decref(hresult);
             }
             g_in_eval_hook = 0;
         }
@@ -4882,10 +5020,37 @@ do_call: ;
         Value **args = argc ? xs_malloc(argc*sizeof(Value*)) : NULL;
         for (int j=0;j<argc;j++) args[j] = EVAL(i, n->method_call.args.items[j]);
         i->current_span = n->span;
-        Value *result = eval_method(i, obj, n->method_call.method, args, argc);
+
+        /* inline cache lookup for method dispatch */
+        Value *result = NULL;
+        int ic_sid = ic_site_id(n->node_id);
+        uint32_t ic_mh = ic_method_hash(n->method_call.method);
+        Value *ic_cached = ic_lookup(ic_sid, (int64_t)obj->tag, ic_mh);
+        if (ic_cached && ic_cached->tag == XS_FUNC) {
+            /* cache hit: skip the full method resolution */
+            result = call_value(i, ic_cached, args, argc, n->method_call.method);
+        }
+        if (!result) {
+            result = eval_method(i, obj, n->method_call.method, args, argc);
+        }
         value_decref(obj);
         for (int j=0;j<argc;j++) value_decref(args[j]);
         if (args) free(args);
+        /* after_eval hooks for method_call nodes */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)n->tag) continue;
+                Value *node_map = node_to_xs_map(n);
+                Value *hargs[2] = { node_map, result };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
         return result;
     }
 
@@ -4968,6 +5133,21 @@ do_call: ;
         }
 
         value_decref(obj); value_decref(idx);
+        /* after_eval hooks for index nodes */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)n->tag) continue;
+                Value *node_map = node_to_xs_map(n);
+                Value *hargs[2] = { node_map, result };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
         return result;
     }
 
@@ -5476,6 +5656,32 @@ do_call: ;
         if (!i->cf.signal && n->block.expr) {
             value_decref(result);
             result = EVAL(i, n->block.expr);
+        }
+        /* process hook table entries for nodes in this block */
+        if (has_decls && i->pipeline) {
+            PluginPipeline *pp = (PluginPipeline *)i->pipeline;
+            if (pp->nhook_entries > 0) {
+                for (int j = 0; j < n->block.stmts.len; j++) {
+                    Node *s = n->block.stmts.items[j];
+                    int hcount = 0;
+                    HookTableEntry *hooks = pipeline_lookup_hooks(pp, s->node_id, &hcount);
+                    if (hooks) {
+                        for (int h = 0; h < hcount; h++) {
+                            if (hooks[h].target && strcmp(hooks[h].hook_kind, "destructor") == 0) {
+                                Value *target_val = env_get(i->env, hooks[h].target);
+                                if (target_val && target_val->tag == XS_MAP) {
+                                    Value *destroy_fn = map_get(target_val->map, "destroy");
+                                    if (destroy_fn && (destroy_fn->tag == XS_CLOSURE || destroy_fn->tag == XS_NATIVE)) {
+                                        Value *r = call_value(i, destroy_fn, NULL, 0, "destructor_hook");
+                                        if (r) value_decref(r);
+                                    }
+                                }
+                            }
+                        }
+                        free(hooks);
+                    }
+                }
+            }
         }
         if (has_decls) {
             pop_env(i);
@@ -6052,10 +6258,30 @@ do_call: ;
         return result;
     }
 
-    default:
+    default: {
+        /* check for RT_HOOK_EXEC runtime hooks matching this node type */
+        PluginPipeline *exec_pp = (PluginPipeline *)i->pipeline;
+        if (exec_pp && exec_pp->nruntime_hooks > 0) {
+            const char *tag_name = node_tag_to_string(n->tag);
+            for (int rh = 0; rh < exec_pp->nruntime_hooks; rh++) {
+                RuntimePluginHook *hook = &exec_pp->runtime_hooks[rh];
+                if (hook->kind != RT_HOOK_EXEC || !hook->callback) continue;
+                if (hook->target && strcmp(hook->target, tag_name) == 0) {
+                    Value *node_map = node_to_xs_map(n);
+                    Value *env_map = xs_map_new();
+                    Value *hargs[2] = { node_map, env_map };
+                    Value *hr = call_value(i, hook->callback, hargs, 2, "exec_hook");
+                    value_decref(node_map);
+                    value_decref(env_map);
+                    if (hr && hr->tag != XS_NULL) return hr;
+                    if (hr) value_decref(hr);
+                }
+            }
+        }
         /* Delegate to exec for statement nodes used in expression context */
         interp_exec(i, n);
         return value_incref(XS_NULL_VAL);
+    }
     }
 }
 
@@ -6129,6 +6355,28 @@ static Value *try_load_xs_module(Interp *i, const char *modname) {
         }
         /* try <lib>/<name>/<name>.xs */
         snprintf(path, sizeof(path), "%s/%s/%s.xs", lib_dirs[d], modname, modname);
+        if (stat(path, &st) == 0) return load_xs_module_file(i, path);
+    }
+
+    /* fallback: global install dir ~/.xs/lib/ */
+    const char *home = getenv("HOME");
+    if (home) {
+        for (int e = 0; entry_files[e]; e++) {
+            snprintf(path, sizeof(path), "%s/.xs/lib/%s/%s", home, modname, entry_files[e]);
+            if (stat(path, &st) == 0) return load_xs_module_file(i, path);
+        }
+        snprintf(path, sizeof(path), "%s/.xs/lib/%s/%s.xs", home, modname, modname);
+        if (stat(path, &st) == 0) return load_xs_module_file(i, path);
+    }
+
+    /* check XS_LIB_PATH env var */
+    const char *xs_lib_path = getenv("XS_LIB_PATH");
+    if (xs_lib_path) {
+        for (int e = 0; entry_files[e]; e++) {
+            snprintf(path, sizeof(path), "%s/%s/%s", xs_lib_path, modname, entry_files[e]);
+            if (stat(path, &st) == 0) return load_xs_module_file(i, path);
+        }
+        snprintf(path, sizeof(path), "%s/%s/%s.xs", xs_lib_path, modname, modname);
         if (stat(path, &st) == 0) return load_xs_module_file(i, path);
     }
 
@@ -6535,6 +6783,7 @@ static int node_tag_from_string(const char *s) {
     if (strcmp(s, "binop") == 0)  return NODE_BINOP;
     if (strcmp(s, "unary") == 0)  return NODE_UNARY;
     if (strcmp(s, "call") == 0)   return NODE_CALL;
+    if (strcmp(s, "fn_call") == 0) return NODE_CALL;
     if (strcmp(s, "method_call") == 0) return NODE_METHOD_CALL;
     if (strcmp(s, "if") == 0)     return NODE_IF;
     if (strcmp(s, "block") == 0)  return NODE_BLOCK;
@@ -6584,6 +6833,7 @@ static Value *node_to_xs_map(Node *n) {
     if (!n) return value_incref(XS_NULL_VAL);
     Value *m = xs_map_new();
     map_set(m->map, "tag", xs_str(node_tag_to_string(n->tag)));
+    if (n->span.line > 0) map_set(m->map, "line", xs_int(n->span.line));
 
     switch (n->tag) {
     case NODE_LIT_INT:
@@ -6718,6 +6968,22 @@ static Value *node_to_xs_map(Node *n) {
         break;
     case NODE_DEL:
         map_set(m->map, "name", xs_str(n->del_.name));
+        break;
+    case NODE_METHOD_CALL: {
+        map_set(m->map, "obj", node_to_xs_map(n->method_call.obj));
+        map_set(m->map, "method", xs_str(n->method_call.method ? n->method_call.method : ""));
+        Value *mc_args = xs_array_new();
+        for (int j = 0; j < n->method_call.args.len; j++)
+            array_push(mc_args->arr, node_to_xs_map(n->method_call.args.items[j]));
+        map_set(m->map, "args", mc_args);
+        break;
+    }
+    case NODE_INDEX:
+        map_set(m->map, "obj", node_to_xs_map(n->index.obj));
+        map_set(m->map, "index", node_to_xs_map(n->index.index));
+        break;
+    case NODE_THROW:
+        if (n->throw_.value) map_set(m->map, "value", node_to_xs_map(n->throw_.value));
         break;
     default:
         break;
@@ -7131,6 +7397,7 @@ static Value *native_plugin_on_unknown(Interp *interp, Value **args, int argc) {
     if (g_n_syntax_handlers >= 16) return value_incref(XS_NULL_VAL);
     int idx = g_n_syntax_handlers++;
     g_syntax_handlers[idx] = value_incref(args[0]);
+    g_syntax_handler_targets[idx] = NULL; /* old API: no specific target */
     return make_hook_handle(idx, "on_unknown");
 }
 
@@ -7301,7 +7568,8 @@ static int plugin_is_keyword_impl(const char *word) {
 }
 
 static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
-    if (g_n_syntax_handlers == 0 || !g_plugin_interp) return NULL;
+    if ((g_n_syntax_handlers == 0 && g_n_parser_productions == 0) || !g_plugin_interp)
+        return NULL;
 
     /* build token map: #{ kind: "...", value: "...", line: N, col: N } */
     Value *token_map = xs_map_new();
@@ -7314,6 +7582,8 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
     g_active_parser = p;
 
     Node *result = NULL;
+
+    /* try on_unknown handlers first */
     for (int j = 0; j < g_n_syntax_handlers; j++) {
         Value *handler = g_syntax_handlers[j];
         if (!handler) continue;
@@ -7327,6 +7597,37 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
             value_decref(ret);
         }
         if (g_plugin_interp->cf.signal) break;
+    }
+
+    /* try production handlers keyed on token value */
+    if (!result && tok->sval) {
+        for (int j = 0; j < g_n_parser_productions; j++) {
+            if (!g_parser_productions[j].callback) continue;
+            if (strcmp(g_parser_productions[j].keyword, tok->sval) != 0) continue;
+            /* disambiguation: skip if forced plugin id doesn't match */
+            if (g_plugin_forced_id && g_parser_productions[j].plugin_id[0] &&
+                strcmp(g_parser_productions[j].plugin_id, g_plugin_forced_id) != 0) continue;
+            /* build a parser state map so callback can use plugin.parser methods */
+            Value *parser_map = xs_map_new();
+            map_set(parser_map->map, "expr", xs_native(native_parser_expr));
+            map_set(parser_map->map, "block", xs_native(native_parser_block));
+            map_set(parser_map->map, "ident", xs_native(native_parser_ident));
+            map_set(parser_map->map, "expect", xs_native(native_parser_expect));
+            map_set(parser_map->map, "at", xs_native(native_parser_at));
+            map_set(parser_map->map, "peek", xs_native(native_parser_peek));
+            Value *args[2] = { parser_map, token_map };
+            Value *ret = call_value(g_plugin_interp, g_parser_productions[j].callback,
+                                    args, 2, "parser.production");
+            value_decref(parser_map);
+            if (ret && ret->tag == XS_MAP) {
+                result = node_from_xs_map(ret);
+                value_decref(ret);
+                if (result) break;
+            } else if (ret) {
+                value_decref(ret);
+            }
+            if (g_plugin_interp->cf.signal) break;
+        }
     }
 
     g_active_parser = saved_parser;
@@ -7406,6 +7707,10 @@ static Value *native_hook_remove(Interp *interp, Value **args, int argc) {
         if (g_syntax_handlers[idx]) {
             value_decref(g_syntax_handlers[idx]);
             g_syntax_handlers[idx] = NULL;
+        }
+        if (g_syntax_handler_targets[idx]) {
+            free(g_syntax_handler_targets[idx]);
+            g_syntax_handler_targets[idx] = NULL;
         }
     } else if (strcmp(type, "on_unknown_expr") == 0 && idx >= 0 && idx < g_n_syntax_expr_handlers) {
         if (g_syntax_expr_handlers[idx]) {
@@ -7855,6 +8160,7 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
     int saved_postfix_handlers = g_n_postfix_handlers;
     int saved_plugin_keywords = g_n_plugin_keywords;
     int saved_parser_overrides = g_n_parser_overrides;
+    int saved_parser_productions = g_n_parser_productions;
     int saved_lexer_transforms = g_n_lexer_transforms;
     int saved_resolve_import = g_n_resolve_import;
     int saved_on_error = g_n_on_error;
@@ -7869,6 +8175,11 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
 
     /* create temp interpreter and inject plugin */
     Interp *tmp = interp_new(pfpath);
+    /* share the main interpreter's pipeline so plugin meta accumulates globally */
+    if (i->pipeline && tmp->pipeline) {
+        pipeline_free(tmp->pipeline);
+        tmp->pipeline = i->pipeline;
+    }
     env_define(tmp->globals, "plugin", value_incref(plugin_map), 1);
 
     /* save and restore the main interp pointer */
@@ -7911,8 +8222,10 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
         for (int j = saved_after_eval; j < g_n_after_eval; j++)
             value_decref(g_after_eval[j].callback);
         g_n_after_eval = saved_after_eval;
-        for (int j = saved_syntax_handlers; j < g_n_syntax_handlers; j++)
+        for (int j = saved_syntax_handlers; j < g_n_syntax_handlers; j++) {
             value_decref(g_syntax_handlers[j]);
+            if (g_syntax_handler_targets[j]) { free(g_syntax_handler_targets[j]); g_syntax_handler_targets[j] = NULL; }
+        }
         g_n_syntax_handlers = saved_syntax_handlers;
         for (int j = saved_syntax_expr_handlers; j < g_n_syntax_expr_handlers; j++)
             value_decref(g_syntax_expr_handlers[j]);
@@ -7931,6 +8244,9 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
                 value_decref(g_parser_overrides[j].previous);
         }
         g_n_parser_overrides = saved_parser_overrides;
+        for (int j = saved_parser_productions; j < g_n_parser_productions; j++)
+            value_decref(g_parser_productions[j].callback);
+        g_n_parser_productions = saved_parser_productions;
         for (int j = saved_lexer_transforms; j < g_n_lexer_transforms; j++)
             value_decref(g_lexer_transforms[j]);
         g_n_lexer_transforms = saved_lexer_transforms;
@@ -7964,10 +8280,11 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
             }
         }
         plugin_register_loaded(pname, pver);
-        /* flag re-parse if syntax handlers or overrides were newly registered */
+        /* flag re-parse if syntax handlers, overrides, or productions were newly registered */
         if (g_n_syntax_handlers > saved_syntax_handlers ||
             g_n_plugin_keywords > saved_plugin_keywords ||
-            g_n_parser_overrides > saved_parser_overrides)
+            g_n_parser_overrides > saved_parser_overrides ||
+            g_n_parser_productions > saved_parser_productions)
             i->needs_reparse = 1;
         /* store source, filepath, and AST so closures remain valid */
         int idx = g_xs_plugin_count - 1;
@@ -7982,6 +8299,9 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
     }
 
     value_decref(plugin_map);
+    /* detach shared pipeline before freeing temp interp so it doesn't get freed */
+    if (tmp->pipeline == i->pipeline)
+        tmp->pipeline = NULL;
     interp_free(tmp);
     /* restore sandbox flags */
     g_current_sandbox_flags = saved_sandbox_flags;
@@ -7989,6 +8309,511 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
     free(psrc);
     free(pfpath);
     if (pprog) node_free(pprog);
+
+    /* run any newly registered passes on the current program AST.
+       closure envs survive because env refcounting keeps them alive
+       after the temp interpreter is freed. callbacks are called through
+       the main interpreter so native fns work via s_plugin_host_globals. */
+    if (!had_error && i->pipeline && i->current_program && !i->cf.signal) {
+        PluginPipeline *pp = (PluginPipeline *)i->pipeline;
+        if (pp->npasses > 0) {
+            pipeline_run_passes(pp, i->current_program, "parser", 0, i);
+            if (i->cf.signal) CF_CLEAR(i);
+            pipeline_run_passes(pp, i->current_program, "parser", 1, i);
+            if (i->cf.signal) CF_CLEAR(i);
+            pipeline_run_passes(pp, i->current_program, "sema", 0, i);
+            if (i->cf.signal) CF_CLEAR(i);
+            pipeline_run_passes(pp, i->current_program, "sema", 1, i);
+            if (i->cf.signal) CF_CLEAR(i);
+        }
+        if (pp->nsema_rules > 0) {
+            pipeline_dispatch_sema(pp, i->current_program, i);
+            if (i->cf.signal) CF_CLEAR(i);
+        }
+    }
+}
+
+/* load statement rename info (set before exec_plugin_load, cleared after) */
+static char **g_load_rename_keys = NULL;
+static char **g_load_rename_vals = NULL;
+static int    g_load_nrenames = 0;
+
+/* exec_load_stmt: handle NODE_LOAD by creating a temp NODE_USE wrapper and
+   calling exec_plugin_load */
+static void exec_load_stmt(Interp *i, Node *stmt) {
+    const char *load_path = stmt->load_.path;
+
+    /* resolve relative to current file's directory */
+    char resolved[PATH_MAX];
+    if (load_path[0] != '/') {
+        const char *fn = i->filename ? i->filename : "";
+        const char *last_slash = strrchr(fn, '/');
+        if (last_slash) {
+            int dirlen = (int)(last_slash - fn);
+            snprintf(resolved, sizeof(resolved), "%.*s/%s", dirlen, fn, load_path);
+        } else {
+            snprintf(resolved, sizeof(resolved), "%s", load_path);
+        }
+    } else {
+        snprintf(resolved, sizeof(resolved), "%s", load_path);
+    }
+
+    /* try lib paths if not found -- only for bare names (no slash, no .xs ext) */
+    struct stat pst;
+    if (stat(resolved, &pst) != 0 &&
+        !strchr(load_path, '/') &&
+        !(strlen(load_path) > 3 && strcmp(load_path + strlen(load_path) - 3, ".xs") == 0)) {
+        char lib_try[PATH_MAX];
+        static const char *pdirs[] = { ".xs_lib", "xs_lib", NULL };
+        static const char *pentries[] = {
+            "plugin.xs", "main.xs", "lib.xs",
+            "src/plugin.xs", "src/main.xs", "src/lib.xs", NULL
+        };
+        int found = 0;
+
+        /* search local lib dirs */
+        for (int pd = 0; pdirs[pd] && !found; pd++) {
+            for (int pe = 0; pentries[pe] && !found; pe++) {
+                snprintf(lib_try, sizeof(lib_try), "%s/%s/%s", pdirs[pd], load_path, pentries[pe]);
+                if (stat(lib_try, &pst) == 0) {
+                    snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                    found = 1;
+                }
+            }
+            /* try <lib>/<name>/<name>.xs */
+            if (!found) {
+                snprintf(lib_try, sizeof(lib_try), "%s/%s/%s.xs", pdirs[pd], load_path, load_path);
+                if (stat(lib_try, &pst) == 0) {
+                    snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                    found = 1;
+                }
+            }
+        }
+
+        /* fallback: global install dir ~/.xs/lib/ */
+        if (!found) {
+            const char *home = getenv("HOME");
+            if (home) {
+                for (int pe = 0; pentries[pe] && !found; pe++) {
+                    snprintf(lib_try, sizeof(lib_try), "%s/.xs/lib/%s/%s", home, load_path, pentries[pe]);
+                    if (stat(lib_try, &pst) == 0) {
+                        snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                        found = 1;
+                    }
+                }
+                if (!found) {
+                    snprintf(lib_try, sizeof(lib_try), "%s/.xs/lib/%s/%s.xs", home, load_path, load_path);
+                    if (stat(lib_try, &pst) == 0) {
+                        snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                        found = 1;
+                    }
+                }
+            }
+        }
+
+        /* check XS_LIB_PATH env var */
+        if (!found) {
+            const char *xs_lib_path = getenv("XS_LIB_PATH");
+            if (xs_lib_path) {
+                for (int pe = 0; pentries[pe] && !found; pe++) {
+                    snprintf(lib_try, sizeof(lib_try), "%s/%s/%s", xs_lib_path, load_path, pentries[pe]);
+                    if (stat(lib_try, &pst) == 0) {
+                        snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                        found = 1;
+                    }
+                }
+                if (!found) {
+                    snprintf(lib_try, sizeof(lib_try), "%s/%s/%s.xs", xs_lib_path, load_path, load_path);
+                    if (stat(lib_try, &pst) == 0) {
+                        snprintf(resolved, sizeof(resolved), "%s", lib_try);
+                        found = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /* store rename info globally so exec_plugin_load can use it if needed */
+    g_load_rename_keys = stmt->load_.rename_keys;
+    g_load_rename_vals = stmt->load_.rename_vals;
+    g_load_nrenames = stmt->load_.nrenames;
+
+    /* create a temporary NODE_USE to pass to exec_plugin_load */
+    Node tmp_use;
+    memset(&tmp_use, 0, sizeof(tmp_use));
+    tmp_use.tag = NODE_USE;
+    tmp_use.span = stmt->span;
+    tmp_use.use_.path = stmt->load_.path;
+    tmp_use.use_.is_plugin = 1;
+    tmp_use.use_.sandbox_flags = 0;
+    tmp_use.use_.alias = NULL;
+    tmp_use.use_.names = NULL;
+    tmp_use.use_.name_aliases = NULL;
+    tmp_use.use_.nnames = 0;
+    tmp_use.use_.import_all = 0;
+
+    exec_plugin_load(i, &tmp_use, resolved);
+
+    /* clear rename info */
+    g_load_rename_keys = NULL;
+    g_load_rename_vals = NULL;
+    g_load_nrenames = 0;
+}
+
+/* AST walker for custom passes. returns replacement node (or original) for transforms. */
+static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
+    if (!n || !pass) return n;
+    /* check if this node's tag matches any visitor */
+    for (int v = 0; v < pass->nvisitors; v++) {
+        int tag_match = (pass->visitor_tags[v] == (int)n->tag);
+        if (!tag_match && pass->visitor_tags[v] == -1) {
+            /* name-based matching for custom/unresolved tag names */
+            if (pass->visitor_names && pass->visitor_names[v]) {
+                const char *cur_tag = node_tag_to_string(n->tag);
+                tag_match = (strcmp(pass->visitor_names[v], cur_tag) == 0);
+            } else {
+                tag_match = 1; /* wildcard: no name, match all */
+            }
+        }
+        if (tag_match) {
+            Value *cb = pass->visitors[v];
+            if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) continue;
+            /* reset sema chain position for each node visit */
+            if (g_sema_chain) g_sema_chain_pos = 0;
+            Value *node_map = node_to_xs_map(n);
+            /* pass state as second argument if available */
+            Value *args[2] = { node_map, pass->state ? pass->state : XS_NULL_VAL };
+            int nargs = pass->state ? 2 : 1;
+            /* suppress error output during pass execution */
+            DiagContext *saved_diag = interp->diag;
+            interp->diag = NULL;
+            Value *result = call_value(interp, cb, args, nargs, "pass_visitor");
+            interp->diag = saved_diag;
+            /* transform passes: if callback returns a map, replace the node */
+            if (pass->kind == PASS_TRANSFORM && result && result->tag == XS_MAP) {
+                Node *replacement = node_from_xs_map(result);
+                if (replacement) {
+                    value_decref(result);
+                    value_decref(node_map);
+                    if (interp->cf.signal) { CF_CLEAR(interp); }
+                    return replacement;
+                }
+            }
+            if (result) value_decref(result);
+            value_decref(node_map);
+            if (interp->cf.signal) { CF_CLEAR(interp); }
+        }
+    }
+    /* helper macro: walk child and replace in-place if transform returns new node */
+#define WALK_CHILD(ptr) do { \
+    Node *_r = walk_node_for_passes(interp, (ptr), pass); \
+    if (_r != (ptr)) (ptr) = _r; \
+} while (0)
+
+    /* helper: fire on_scope_exit callback if present */
+#define FIRE_SCOPE_EXIT(block_node) do { \
+    if (pass->on_scope_exit && (pass->on_scope_exit->tag == XS_FUNC || pass->on_scope_exit->tag == XS_NATIVE)) { \
+        Value *scope_info = xs_map_new(); \
+        map_set(scope_info->map, "line", xs_int((block_node)->span.line)); \
+        map_set(scope_info->map, "col", xs_int((block_node)->span.col)); \
+        Value *se_args[1] = { scope_info }; \
+        DiagContext *sd = interp->diag; \
+        interp->diag = NULL; \
+        Value *se_r = call_value(interp, pass->on_scope_exit, se_args, 1, "scope_exit"); \
+        interp->diag = sd; \
+        if (se_r) value_decref(se_r); \
+        value_decref(scope_info); \
+        if (interp->cf.signal) CF_CLEAR(interp); \
+    } \
+} while (0)
+
+    /* recurse into children based on node tag */
+    switch (n->tag) {
+    case NODE_PROGRAM:
+        for (int j = 0; j < n->program.stmts.len; j++)
+            WALK_CHILD(n->program.stmts.items[j]);
+        break;
+    case NODE_BLOCK:
+        for (int j = 0; j < n->block.stmts.len; j++)
+            WALK_CHILD(n->block.stmts.items[j]);
+        if (n->block.expr) WALK_CHILD(n->block.expr);
+        FIRE_SCOPE_EXIT(n);
+        break;
+    case NODE_FN_DECL:
+        if (n->fn_decl.body) WALK_CHILD(n->fn_decl.body);
+        FIRE_SCOPE_EXIT(n);
+        break;
+    case NODE_LET:
+    case NODE_VAR:
+        if (n->let.value) WALK_CHILD(n->let.value);
+        break;
+    case NODE_CONST:
+        if (n->const_.value) WALK_CHILD(n->const_.value);
+        break;
+    case NODE_IF:
+        WALK_CHILD(n->if_expr.cond);
+        WALK_CHILD(n->if_expr.then);
+        for (int j = 0; j < n->if_expr.elif_conds.len; j++) {
+            WALK_CHILD(n->if_expr.elif_conds.items[j]);
+            WALK_CHILD(n->if_expr.elif_thens.items[j]);
+        }
+        if (n->if_expr.else_branch) WALK_CHILD(n->if_expr.else_branch);
+        break;
+    case NODE_FOR:
+        WALK_CHILD(n->for_loop.iter);
+        WALK_CHILD(n->for_loop.body);
+        break;
+    case NODE_WHILE:
+        WALK_CHILD(n->while_loop.cond);
+        WALK_CHILD(n->while_loop.body);
+        break;
+    case NODE_LOOP:
+        WALK_CHILD(n->loop.body);
+        break;
+    case NODE_CALL:
+        WALK_CHILD(n->call.callee);
+        for (int j = 0; j < n->call.args.len; j++)
+            WALK_CHILD(n->call.args.items[j]);
+        break;
+    case NODE_METHOD_CALL:
+        WALK_CHILD(n->method_call.obj);
+        for (int j = 0; j < n->method_call.args.len; j++)
+            WALK_CHILD(n->method_call.args.items[j]);
+        break;
+    case NODE_BINOP:
+        WALK_CHILD(n->binop.left);
+        WALK_CHILD(n->binop.right);
+        break;
+    case NODE_UNARY:
+        WALK_CHILD(n->unary.expr);
+        break;
+    case NODE_ASSIGN:
+        WALK_CHILD(n->assign.target);
+        WALK_CHILD(n->assign.value);
+        break;
+    case NODE_RETURN:
+        if (n->ret.value) WALK_CHILD(n->ret.value);
+        break;
+    case NODE_EXPR_STMT:
+        WALK_CHILD(n->expr_stmt.expr);
+        break;
+    case NODE_LAMBDA:
+        WALK_CHILD(n->lambda.body);
+        break;
+    case NODE_MATCH:
+        WALK_CHILD(n->match.subject);
+        for (int j = 0; j < n->match.arms.len; j++)
+            WALK_CHILD(n->match.arms.items[j].body);
+        break;
+    case NODE_TRY:
+        WALK_CHILD(n->try_.body);
+        for (int j = 0; j < n->try_.catch_arms.len; j++)
+            WALK_CHILD(n->try_.catch_arms.items[j].body);
+        if (n->try_.finally_block) WALK_CHILD(n->try_.finally_block);
+        break;
+    case NODE_CLASS_DECL:
+        for (int j = 0; j < n->class_decl.members.len; j++)
+            WALK_CHILD(n->class_decl.members.items[j]);
+        break;
+    case NODE_INDEX:
+        WALK_CHILD(n->index.obj);
+        WALK_CHILD(n->index.index);
+        break;
+    case NODE_FIELD:
+        WALK_CHILD(n->field.obj);
+        break;
+    default:
+        break;
+    }
+#undef WALK_CHILD
+#undef FIRE_SCOPE_EXIT
+    return n;
+}
+
+int pipeline_run_passes(PluginPipeline *p, Node *program, const char *phase_ref, int is_after, void *interp) {
+    if (!p || !program || !interp) return 0;
+    Interp *i = (Interp *)interp;
+    /* use topologically sorted order when available, fall back to registration order */
+    if (p->sorted_passes && p->nsorted == p->npasses) {
+        for (int j = 0; j < p->nsorted; j++) {
+            CustomPass *pass = p->sorted_passes[j];
+            if (!pass->phase_ref) continue;
+            if (strcmp(pass->phase_ref, phase_ref) != 0) continue;
+            if (pass->is_after != is_after) continue;
+            if (pass->nvisitors == 0) continue;
+            walk_node_for_passes(i, program, pass);
+        }
+    } else {
+        for (int j = 0; j < p->npasses; j++) {
+            CustomPass *pass = &p->passes[j];
+            if (!pass->phase_ref) continue;
+            if (strcmp(pass->phase_ref, phase_ref) != 0) continue;
+            if (pass->is_after != is_after) continue;
+            if (pass->nvisitors == 0) continue;
+            walk_node_for_passes(i, program, pass);
+        }
+    }
+    return 0;
+}
+
+/* comparison for sorting sema rules by priority (lower = earlier) */
+static int cmp_sema_rule_priority(const void *a, const void *b) {
+    SemaPluginRule *ra = *(SemaPluginRule **)a;
+    SemaPluginRule *rb = *(SemaPluginRule **)b;
+    return ra->priority - rb->priority;
+}
+
+int pipeline_dispatch_sema(PluginPipeline *p, Node *program, void *interp) {
+    if (!p || !program || !interp) return 0;
+    if (p->nsema_rules == 0) return 0;
+    Interp *ip = (Interp *)interp;
+
+    /* group override rules by target and dispatch through chains.
+       for each unique target, collect matching rules, sort by priority,
+       then run as a chain where default() advances to the next handler. */
+
+    /* first, collect unique targets */
+    const char *targets[64];
+    int ntargets = 0;
+    for (int j = 0; j < p->nsema_rules && ntargets < 64; j++) {
+        const char *t = p->sema_rules[j].target;
+        int found = 0;
+        for (int k = 0; k < ntargets; k++) {
+            if (strcmp(targets[k], t) == 0) { found = 1; break; }
+        }
+        if (!found) targets[ntargets++] = t;
+    }
+
+    /* for each target, build a chain of matching rules sorted by priority */
+    for (int ti = 0; ti < ntargets; ti++) {
+        int tag = node_tag_from_string(targets[ti]);
+        const char *tag_str = (tag == -1) ? targets[ti] : NULL; /* for name-based matching */
+        SemaPluginRule *chain[64];
+        int chain_len = 0;
+        for (int j = 0; j < p->nsema_rules && chain_len < 64; j++) {
+            if (strcmp(p->sema_rules[j].target, targets[ti]) == 0 &&
+                p->sema_rules[j].callback) {
+                chain[chain_len++] = &p->sema_rules[j];
+            }
+        }
+        if (chain_len == 0) continue;
+
+        /* sort by priority (lower number = runs first) */
+        qsort(chain, chain_len, sizeof(SemaPluginRule *), cmp_sema_rule_priority);
+
+        /* if only one rule (or no overrides), just run as a simple pass */
+        if (chain_len == 1) {
+            CustomPass sp;
+            memset(&sp, 0, sizeof(sp));
+            sp.nvisitors = 1;
+            sp.visitors = (Value **)&chain[0]->callback;
+            sp.visitor_tags = &tag;
+            char *sema_name = tag_str ? xs_strdup(tag_str) : NULL;
+            sp.visitor_names = &sema_name;
+            walk_node_for_passes(ip, program, &sp);
+            if (sema_name) free(sema_name);
+            continue;
+        }
+
+        /* multiple rules: set up the chain for default() chaining */
+        /* save previous chain state (for nesting) */
+        SemaPluginRule **saved_chain = g_sema_chain;
+        int saved_len = g_sema_chain_len;
+        int saved_pos = g_sema_chain_pos;
+
+        /* build a pass that only calls the first handler;
+           default() will advance through the rest */
+        CustomPass sp;
+        memset(&sp, 0, sizeof(sp));
+        sp.nvisitors = 1;
+        Value *first_cb = chain[0]->callback;
+        sp.visitors = &first_cb;
+        sp.visitor_tags = &tag;
+        char *sema_name2 = tag_str ? xs_strdup(tag_str) : NULL;
+        sp.visitor_names = &sema_name2;
+
+        SemaPluginRule *chain_heap[64];
+        memcpy(chain_heap, chain, chain_len * sizeof(SemaPluginRule *));
+        g_sema_chain = chain_heap;
+        g_sema_chain_len = chain_len;
+        g_sema_chain_pos = 0;
+        g_sema_chain_interp = ip;
+
+        walk_node_for_passes(ip, program, &sp);
+
+        /* restore previous chain state */
+        g_sema_chain = saved_chain;
+        g_sema_chain_len = saved_len;
+        g_sema_chain_pos = saved_pos;
+        if (sema_name2) free(sema_name2);
+    }
+    return 0;
+}
+
+/* native cancel() function for runtime hooks */
+static Value *native_cancel(Interp *interp, Value **args, int argc) {
+    (void)args; (void)argc;
+    interp->hook_cancelled = 1;
+    return value_incref(XS_NULL_VAL);
+}
+
+/* native emit_runtime_hook(node_id, kind, target) for annotate passes */
+static Value *native_emit_runtime_hook(Interp *interp, Value **args, int argc) {
+    if (argc < 3) return value_incref(XS_NULL_VAL);
+    PluginPipeline *pp = (PluginPipeline *)interp->pipeline;
+    if (!pp) return value_incref(XS_NULL_VAL);
+    int node_id = 0;
+    if (args[0] && args[0]->tag == XS_INT) node_id = (int)args[0]->i;
+    const char *kind = (args[1] && args[1]->tag == XS_STR) ? args[1]->s : "";
+    const char *target = (args[2] && args[2]->tag == XS_STR) ? args[2]->s : "";
+    pipeline_emit_hook(pp, node_id, kind, target, span_zero());
+    return value_incref(XS_NULL_VAL);
+}
+
+/* native default(node) for sema override chaining */
+static Value *native_default_handler(Interp *interp, Value **args, int argc) {
+    /* advance the override chain: call the next handler if one exists */
+    if (g_sema_chain && g_sema_chain_pos + 1 < g_sema_chain_len) {
+        g_sema_chain_pos++;
+        SemaPluginRule *next = g_sema_chain[g_sema_chain_pos];
+        if (next->callback)
+            return call_value(interp, next->callback, args, argc, "sema_default");
+    }
+    /* no more handlers in the chain, fall through to built-in */
+    (void)interp; (void)args; (void)argc;
+    return value_incref(XS_NULL_VAL);
+}
+
+/* native __tracer_active() - check if tracer is recording */
+static Value *native_tracer_active(Interp *interp, Value **args, int argc) {
+    (void)args; (void)argc;
+    return xs_bool(interp->tracer != NULL);
+}
+
+void interp_setup_tracer_suppress(Interp *i) {
+    if (i && i->tracer)
+        tracer_set_suppress_flag((XSTracer*)i->tracer, &g_in_eval_hook);
+}
+
+/* native __tracer_write_prov(var_name, json_string) - write rich provenance to trace */
+static Value *native_tracer_write_prov(Interp *interp, Value **args, int argc) {
+    if (!interp->tracer || argc < 2) return xs_null();
+    const char *var = (args[0] && args[0]->tag == XS_STR) ? args[0]->s : "?";
+    const char *json = (args[1] && args[1]->tag == XS_STR) ? args[1]->s : "{}";
+    /* force-write bypasses suppression so explicit plugin provenance goes through */
+    tracer_record_provenance_force((XSTracer*)interp->tracer, var, "plugin", json, 0);
+    return xs_null();
+}
+
+/* apply load...with renames */
+static const char *apply_load_rename(const char *orig) {
+    for (int j = 0; j < g_load_nrenames; j++) {
+        if (g_load_rename_keys && g_load_rename_vals &&
+            strcmp(g_load_rename_keys[j], orig) == 0) {
+            return g_load_rename_vals[j];
+        }
+    }
+    return orig;
 }
 
 /* end plugin system */
@@ -7998,6 +8823,25 @@ void interp_exec(Interp *i, Node *stmt) {
     i->current_span = stmt->span;
     if (i->coverage && stmt->span.line > 0)
         coverage_record_line(i->coverage, stmt->span.line);
+
+    /* fire before_eval hooks for statement nodes so plugins can track them */
+    if (g_has_eval_hooks && g_n_before_eval > 0 && !g_in_eval_hook &&
+        (stmt->tag == NODE_LET || stmt->tag == NODE_VAR ||
+         stmt->tag == NODE_RETURN || stmt->tag == NODE_THROW)) {
+        g_in_eval_hook = 1;
+        for (int _h = 0; _h < g_n_before_eval; _h++) {
+            EvalHook *hook = &g_before_eval[_h];
+            if (!hook->callback) continue;
+            if (hook->tag_filter >= 0 && hook->tag_filter != (int)stmt->tag) continue;
+            Value *node_map = node_to_xs_map(stmt);
+            Value *args[1] = { node_map };
+            Value *result = call_value(i, hook->callback, args, 1, "before_eval");
+            value_decref(node_map);
+            if (result) value_decref(result);
+            if (i->cf.signal) { g_in_eval_hook = 0; return; }
+        }
+        g_in_eval_hook = 0;
+    }
 
     switch (stmt->tag) {
     case NODE_EXPR_STMT: {
@@ -8044,8 +8888,41 @@ void interp_exec(Interp *i, Node *stmt) {
         if (stmt->let.name) {
             env_define(i->env, stmt->let.name, val, mutable);
             TRACE_STORE(i, stmt->let.name, val);
+#ifdef XSC_ENABLE_TRACER
+            trace_provenance_for_node(i, stmt->let.name, stmt->let.value);
+#endif
+            /* pipeline constraint handling: when __pipeline_to_N is defined,
+               look up matching __pipeline_from_N and register constraint */
+            if (i->pipeline && stmt->let.name &&
+                strncmp(stmt->let.name, "__pipeline_to_", 14) == 0) {
+                const char *idx_str = stmt->let.name + 14;
+                char from_name[64];
+                snprintf(from_name, sizeof(from_name), "__pipeline_from_%s", idx_str);
+                Value *from_val = env_get(i->env, from_name);
+                if (from_val && from_val->tag == XS_STR &&
+                    val && val->tag == XS_STR) {
+                    pipeline_add_constraint(
+                        (PluginPipeline *)i->pipeline, from_val->s, val->s);
+                }
+            }
         } else if (stmt->let.pattern) {
             bind_pattern(i, stmt->let.pattern, val, i->env, mutable);
+        }
+        /* after_eval hooks for let/var nodes */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook && !i->cf.signal) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)stmt->tag) continue;
+                Value *node_map = node_to_xs_map(stmt);
+                Value *hargs[2] = { node_map, val };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+                if (i->cf.signal) { g_in_eval_hook = 0; break; }
+            }
+            g_in_eval_hook = 0;
         }
         value_decref(val);
         break;
@@ -8539,6 +9416,8 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         if (stmt->use_.is_plugin) {
+            fprintf(stderr, "warning: 'use plugin' is deprecated, use 'load' instead (at %s:%d)\n",
+                    stmt->span.file ? stmt->span.file : "<unknown>", stmt->span.line);
             struct stat pst;
             /* if file doesn't exist, try .xs_lib/<name> and xs_lib/<name> */
             if (stat(resolved, &pst) != 0) {
@@ -8617,6 +9496,365 @@ void interp_exec(Interp *i, Node *stmt) {
             }
         }
         value_decref(mod);
+        break;
+    }
+
+    case NODE_LOAD: {
+        exec_load_stmt(i, stmt);
+        break;
+    }
+
+    case NODE_PLUGIN_DECL: {
+        PluginPipeline *pp = (PluginPipeline *)i->pipeline;
+        if (!pp) break;
+
+        const char *plugin_id = stmt->plugin_decl.name ? stmt->plugin_decl.name : "";
+
+        /* register meta */
+        if (stmt->plugin_decl.meta && stmt->plugin_decl.meta->tag == NODE_LIT_MAP) {
+            Node *meta = stmt->plugin_decl.meta;
+            PluginMeta pm;
+            memset(&pm, 0, sizeof(pm));
+            pm.id = xs_strdup(plugin_id);
+            pm.priority = 50;
+            for (int j = 0; j < meta->lit_map.keys.len; j++) {
+                Node *k = meta->lit_map.keys.items[j];
+                Node *v = meta->lit_map.vals.items[j];
+                if (!k || k->tag != NODE_LIT_STRING || !k->lit_string.sval) continue;
+                const char *key = k->lit_string.sval;
+                if (strcmp(key, "version") == 0 && v && v->tag == NODE_LIT_STRING)
+                    pm.version = xs_strdup(v->lit_string.sval ? v->lit_string.sval : "");
+                else if (strcmp(key, "id") == 0 && v && v->tag == NODE_LIT_STRING) {
+                    free(pm.id);
+                    pm.id = xs_strdup(v->lit_string.sval ? v->lit_string.sval : "");
+                }
+                else if (strcmp(key, "priority") == 0 && v && v->tag == NODE_LIT_INT)
+                    pm.priority = (int)v->lit_int.ival;
+                else if (strcmp(key, "depends_on") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                    pm.ndepends = v->lit_array.elems.len;
+                    pm.depends_on = malloc(pm.ndepends * sizeof(char *));
+                    for (int d = 0; d < pm.ndepends; d++) {
+                        Node *e = v->lit_array.elems.items[d];
+                        pm.depends_on[d] = xs_strdup(
+                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            ? e->lit_string.sval : "");
+                    }
+                }
+                else if (strcmp(key, "provides") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                    pm.nprovides = v->lit_array.elems.len;
+                    pm.provides = malloc(pm.nprovides * sizeof(char *));
+                    for (int d = 0; d < pm.nprovides; d++) {
+                        Node *e = v->lit_array.elems.items[d];
+                        const char *prov = (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            ? e->lit_string.sval : "";
+                        pm.provides[d] = xs_strdup(apply_load_rename(prov));
+                    }
+                }
+                else if (strcmp(key, "conflicts_with") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                    pm.nconflicts = v->lit_array.elems.len;
+                    pm.conflicts_with = malloc(pm.nconflicts * sizeof(char *));
+                    for (int d = 0; d < pm.nconflicts; d++) {
+                        Node *e = v->lit_array.elems.items[d];
+                        pm.conflicts_with[d] = xs_strdup(
+                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            ? e->lit_string.sval : "");
+                    }
+                }
+                else if (strcmp(key, "modifies") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                    pm.nmodifies = v->lit_array.elems.len;
+                    pm.modifies = malloc(pm.nmodifies * sizeof(char *));
+                    for (int d = 0; d < pm.nmodifies; d++) {
+                        Node *e = v->lit_array.elems.items[d];
+                        pm.modifies[d] = xs_strdup(
+                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            ? e->lit_string.sval : "");
+                    }
+                }
+            }
+            if (!pm.version) pm.version = xs_strdup("0.0.0");
+            pipeline_register_meta(pp, &pm);
+            /* validate after each registration to catch dependency/conflict errors early */
+            if (pipeline_validate(pp) < 0) {
+                fprintf(stderr, "plugin '%s': pipeline validation failed\n", plugin_id);
+            }
+        }
+
+        /* process lexer section: register dynamic tokens */
+        if (stmt->plugin_decl.lexer_sec && stmt->plugin_decl.lexer_sec->tag == NODE_BLOCK) {
+            Node *blk = stmt->plugin_decl.lexer_sec;
+            for (int j = 0; j < blk->block.stmts.len; j++) {
+                Node *s = blk->block.stmts.items[j];
+                if (s->tag == NODE_LET && s->let.name && strncmp(s->let.name, "__lx_", 5) == 0) {
+                    const char *tok_name = apply_load_rename(s->let.name + 5);
+                    const char *tok_pattern = "";
+                    if (s->let.value && s->let.value->tag == NODE_LIT_STRING && s->let.value->lit_string.sval)
+                        tok_pattern = s->let.value->lit_string.sval;
+                    int kind = lexer_register_dyn_token(tok_name, tok_pattern);
+                    pipeline_register_token(pp, tok_name, tok_pattern, plugin_id);
+                    (void)kind;
+                    i->needs_reparse = 1;
+                }
+            }
+        }
+
+        /* process runtime section: register hook callbacks */
+        if (stmt->plugin_decl.runtime_sec && stmt->plugin_decl.runtime_sec->tag == NODE_BLOCK) {
+            Node *blk = stmt->plugin_decl.runtime_sec;
+            for (int j = 0; j < blk->block.stmts.len; j++) {
+                Node *s = blk->block.stmts.items[j];
+                if (s->tag != NODE_LET || !s->let.name) continue;
+                const char *nm = s->let.name;
+                /* parse __rt_KIND_TARGET */
+                RuntimeHookKind hk;
+                const char *target = NULL;
+                if (strncmp(nm, "__rt_before_", 12) == 0) {
+                    hk = RT_HOOK_BEFORE; target = nm + 12;
+                } else if (strncmp(nm, "__rt_after_", 11) == 0) {
+                    hk = RT_HOOK_AFTER; target = nm + 11;
+                } else if (strncmp(nm, "__rt_exec_", 10) == 0) {
+                    hk = RT_HOOK_EXEC; target = nm + 10;
+                } else continue;
+
+                /* evaluate the body to get a callback value */
+                Value *cb = NULL;
+                if (s->let.value) {
+                    cb = interp_eval(i, s->let.value);
+                    if (i->cf.signal) { if (cb) value_decref(cb); break; }
+                }
+                if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) {
+                    if (cb) value_decref(cb);
+                    continue;
+                }
+
+                /* also register into the old hook system for dispatch */
+                int tag_filter = node_tag_from_string(target);
+                if (hk == RT_HOOK_BEFORE && g_n_before_eval < 64) {
+                    int idx = g_n_before_eval++;
+                    g_before_eval[idx].callback = value_incref(cb);
+                    g_before_eval[idx].tag_filter = tag_filter;
+                    g_has_eval_hooks = 1;
+                } else if (hk == RT_HOOK_AFTER && g_n_after_eval < 64) {
+                    int idx = g_n_after_eval++;
+                    g_after_eval[idx].callback = value_incref(cb);
+                    g_after_eval[idx].tag_filter = tag_filter;
+                    g_has_eval_hooks = 1;
+                }
+
+                RuntimePluginHook hook;
+                memset(&hook, 0, sizeof(hook));
+                const char *rt_target = apply_load_rename(target);
+                hook.target = xs_strdup(rt_target);
+                hook.plugin_id = xs_strdup(plugin_id);
+                hook.kind = hk;
+                hook.priority = 50;
+                hook.callback = cb; /* pipeline takes ownership */
+                pipeline_register_runtime_hook(pp, &hook);
+                free(hook.target);
+                free(hook.plugin_id);
+            }
+        }
+
+        /* process sema section: register rules (stubs - no dispatch yet) */
+        if (stmt->plugin_decl.sema_sec && stmt->plugin_decl.sema_sec->tag == NODE_BLOCK) {
+            /* look up meta priority for this plugin */
+            int sema_priority = 50;
+            for (int mi = 0; mi < pp->nmetas; mi++) {
+                if (pp->metas[mi].id && strcmp(pp->metas[mi].id, plugin_id) == 0) {
+                    sema_priority = pp->metas[mi].priority;
+                    break;
+                }
+            }
+
+            Node *blk = stmt->plugin_decl.sema_sec;
+            for (int j = 0; j < blk->block.stmts.len; j++) {
+                Node *s = blk->block.stmts.items[j];
+                if (s->tag != NODE_LET || !s->let.name) continue;
+                const char *nm = s->let.name;
+                if (strncmp(nm, "__sema_", 7) != 0) continue;
+                /* parse __sema_KIND_TARGET */
+                SemaRuleKind sk;
+                const char *target = NULL;
+                if (strncmp(nm + 7, "new_", 4) == 0) {
+                    sk = SEMA_RULE_NEW; target = nm + 11;
+                } else if (strncmp(nm + 7, "override_", 9) == 0) {
+                    sk = SEMA_RULE_OVERRIDE; target = nm + 16;
+                } else if (strncmp(nm + 7, "exclusive_", 10) == 0) {
+                    sk = SEMA_RULE_EXCLUSIVE; target = nm + 17;
+                } else continue;
+
+                Value *cb = NULL;
+                if (s->let.value) {
+                    cb = interp_eval(i, s->let.value);
+                    if (i->cf.signal) { if (cb) value_decref(cb); break; }
+                }
+
+                SemaPluginRule rule;
+                memset(&rule, 0, sizeof(rule));
+                const char *sema_target = apply_load_rename(target);
+                rule.target = xs_strdup(sema_target);
+                rule.plugin_id = xs_strdup(plugin_id);
+                rule.kind = sk;
+                rule.priority = sema_priority;
+                rule.callback = value_incref(cb);
+                pipeline_register_sema_rule(pp, &rule);
+                free(rule.target);
+                free(rule.plugin_id);
+            }
+        }
+
+        /* process pass sections: extract phase, kind, visitors */
+        for (int pi = 0; pi < stmt->plugin_decl.passes.len; pi++) {
+            Node *pass_blk = stmt->plugin_decl.passes.items[pi];
+            if (!pass_blk || pass_blk->tag != NODE_BLOCK) continue;
+
+            CustomPass cp;
+            memset(&cp, 0, sizeof(cp));
+            cp.plugin_id = xs_strdup(plugin_id);
+            cp.phase_ref = xs_strdup("parser");
+            cp.is_after = 1;
+            cp.kind = PASS_ANALYZE;
+            cp.name = NULL;
+
+            /* temporary arrays for visitors */
+            int vcap = 8;
+            cp.visitors = malloc(vcap * sizeof(Value *));
+            cp.visitor_tags = malloc(vcap * sizeof(int));
+            cp.visitor_names = malloc(vcap * sizeof(char *));
+            cp.nvisitors = 0;
+
+            for (int pj = 0; pj < pass_blk->block.stmts.len; pj++) {
+                Node *ps = pass_blk->block.stmts.items[pj];
+                if (!ps || ps->tag != NODE_LET || !ps->let.name) continue;
+                const char *pnm = ps->let.name;
+                if (strcmp(pnm, "__pass_name") == 0 && ps->let.value &&
+                    ps->let.value->tag == NODE_LIT_STRING) {
+                    free(cp.name);
+                    const char *raw_name = ps->let.value->lit_string.sval ?
+                                        ps->let.value->lit_string.sval : "";
+                    cp.name = xs_strdup(apply_load_rename(raw_name));
+                } else if (strcmp(pnm, "__pass_phase") == 0 && ps->let.value &&
+                           ps->let.value->tag == NODE_LIT_STRING) {
+                    cp.is_after = (ps->let.value->lit_string.sval &&
+                                   strcmp(ps->let.value->lit_string.sval, "after") == 0) ? 1 : 0;
+                } else if (strcmp(pnm, "__pass_phase_ref") == 0 && ps->let.value &&
+                           ps->let.value->tag == NODE_LIT_STRING) {
+                    free(cp.phase_ref);
+                    cp.phase_ref = xs_strdup(ps->let.value->lit_string.sval ?
+                                             ps->let.value->lit_string.sval : "parser");
+                } else if (strcmp(pnm, "__pass_kind") == 0 && ps->let.value &&
+                           ps->let.value->tag == NODE_LIT_STRING) {
+                    const char *ks = ps->let.value->lit_string.sval;
+                    if (ks && strcmp(ks, "annotate") == 0) cp.kind = PASS_ANNOTATE;
+                    else if (ks && strcmp(ks, "transform") == 0) cp.kind = PASS_TRANSFORM;
+                    else cp.kind = PASS_ANALYZE;
+                } else if (strncmp(pnm, "__pass_visit_", 13) == 0) {
+                    const char *type_name = pnm + 13;
+                    Value *cb = NULL;
+                    if (ps->let.value) {
+                        cb = interp_eval(i, ps->let.value);
+                        if (i->cf.signal) { if (cb) value_decref(cb); break; }
+                    }
+                    if (cb && (cb->tag == XS_FUNC || cb->tag == XS_NATIVE)) {
+                        if (cp.nvisitors >= vcap) {
+                            vcap *= 2;
+                            cp.visitors = realloc(cp.visitors, vcap * sizeof(Value *));
+                            cp.visitor_tags = realloc(cp.visitor_tags, vcap * sizeof(int));
+                            cp.visitor_names = realloc(cp.visitor_names, vcap * sizeof(char *));
+                        }
+                        cp.visitors[cp.nvisitors] = value_incref(cb);
+                        int vtag = node_tag_from_string(type_name);
+                        cp.visitor_tags[cp.nvisitors] = vtag;
+                        cp.visitor_names[cp.nvisitors] = (vtag == -1) ? xs_strdup(type_name) : NULL;
+                        cp.nvisitors++;
+                    } else {
+                        if (cb) value_decref(cb);
+                    }
+                } else if (strcmp(pnm, "__pass_state") == 0 && ps->let.value) {
+                    Value *st = interp_eval(i, ps->let.value);
+                    if (i->cf.signal) { if (st) value_decref(st); break; }
+                    cp.state = st;
+                } else if (strcmp(pnm, "__pass_on_scope_exit") == 0) {
+                    Value *cb = NULL;
+                    if (ps->let.value) {
+                        cb = interp_eval(i, ps->let.value);
+                        if (i->cf.signal) { if (cb) value_decref(cb); break; }
+                    }
+                    cp.on_scope_exit = value_incref(cb);
+                }
+            }
+            if (!cp.name) cp.name = xs_strdup("unnamed");
+            pipeline_register_pass(pp, &cp);
+            /* free the local cp strings (pipeline made copies via dup_str) */
+            free(cp.name);
+            free(cp.plugin_id);
+            free(cp.phase_ref);
+            /* don't free visitors/visitor_tags - pipeline took ownership of these pointers */
+        }
+
+        /* process parser section: register extend/production callbacks */
+        if (stmt->plugin_decl.parser_sec && stmt->plugin_decl.parser_sec->tag == NODE_BLOCK) {
+            Node *blk = stmt->plugin_decl.parser_sec;
+            for (int j = 0; j < blk->block.stmts.len; j++) {
+                Node *s = blk->block.stmts.items[j];
+                if (s->tag != NODE_LET || !s->let.name) continue;
+                const char *nm = s->let.name;
+                if (strncmp(nm, "__parser_", 9) != 0) continue;
+                /* evaluate the callback */
+                Value *cb = NULL;
+                if (s->let.value) {
+                    cb = interp_eval(i, s->let.value);
+                    if (i->cf.signal) { if (cb) value_decref(cb); break; }
+                }
+                if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) {
+                    if (cb) value_decref(cb);
+                    continue;
+                }
+                /* register callback in the appropriate hook system */
+                if (strncmp(nm, "__parser_production_", 20) == 0) {
+                    /* new production: extract keyword and register */
+                    const char *prod_name = apply_load_rename(nm + 20);
+                    char kw[64];
+                    const char *us = strchr(prod_name, '_');
+                    if (us) {
+                        int klen = (int)(us - prod_name);
+                        if (klen > 63) klen = 63;
+                        memcpy(kw, prod_name, klen);
+                        kw[klen] = '\0';
+                    } else {
+                        strncpy(kw, prod_name, 63);
+                        kw[63] = '\0';
+                    }
+                    /* register keyword so parser recognizes it */
+                    int dup = 0;
+                    for (int k = 0; k < g_n_plugin_keywords; k++) {
+                        if (strcmp(g_plugin_keywords[k], kw) == 0) { dup = 1; break; }
+                    }
+                    if (!dup && g_n_plugin_keywords < MAX_PLUGIN_KEYWORDS) {
+                        g_plugin_keywords[g_n_plugin_keywords++] = xs_strdup(kw);
+                    }
+                    /* store production callback with its keyword and plugin id */
+                    if (g_n_parser_productions < 32) {
+                        int idx = g_n_parser_productions++;
+                        strncpy(g_parser_productions[idx].keyword, kw, 63);
+                        g_parser_productions[idx].keyword[63] = '\0';
+                        strncpy(g_parser_productions[idx].plugin_id, plugin_id, 63);
+                        g_parser_productions[idx].plugin_id[63] = '\0';
+                        g_parser_productions[idx].callback = value_incref(cb);
+                    }
+                    i->needs_reparse = 1;
+                } else if (strncmp(nm, "__parser_extend_", 16) == 0) {
+                    /* extend existing production: register as syntax handler with target */
+                    const char *ext_target = apply_load_rename(nm + 16);
+                    if (g_n_syntax_handlers < 16) {
+                        int eidx = g_n_syntax_handlers++;
+                        g_syntax_handlers[eidx] = value_incref(cb);
+                        g_syntax_handler_targets[eidx] = xs_strdup(ext_target);
+                    }
+                    i->needs_reparse = 1;
+                }
+                value_decref(cb);
+            }
+        }
         break;
     }
 
@@ -8721,6 +9959,21 @@ void interp_exec(Interp *i, Node *stmt) {
             value_decref(callee);
         }
         Value *val = stmt->ret.value ? EVAL(i, stmt->ret.value) : value_incref(XS_NULL_VAL);
+        /* after_eval hooks for return nodes */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != NODE_RETURN) continue;
+                Value *node_map = node_to_xs_map(stmt);
+                Value *hargs[2] = { node_map, val };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
         if (i->cf.value) value_decref(i->cf.value);
         i->cf.signal = CF_RETURN;
         i->cf.value  = val;
@@ -8761,6 +10014,21 @@ void interp_exec(Interp *i, Node *stmt) {
 
     case NODE_THROW: {
         Value *val = EVAL(i, stmt->throw_.value);
+        /* after_eval hooks for throw nodes (fire before signal so plugins can dump state) */
+        if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
+            g_in_eval_hook = 1;
+            for (int _h = 0; _h < g_n_after_eval; _h++) {
+                EvalHook *hook = &g_after_eval[_h];
+                if (!hook->callback) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != NODE_THROW) continue;
+                Value *node_map = node_to_xs_map(stmt);
+                Value *hargs[2] = { node_map, val };
+                Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
+                value_decref(node_map);
+                if (hresult) value_decref(hresult);
+            }
+            g_in_eval_hook = 0;
+        }
         if (i->cf.value) value_decref(i->cf.value);
         i->cf.signal = CF_THROW;
         i->cf.value  = val;
@@ -8989,6 +10257,7 @@ void interp_run(Interp *i, Node *program) {
     if (!program || program->tag != NODE_PROGRAM) return;
     g_current_interp = i;
     g_plugin_interp = i;
+    i->current_program = program;
     hoist_functions(i, &program->program.stmts);
     for (int j = 0; j < program->program.stmts.len; j++) {
         interp_exec(i, program->program.stmts.items[j]);
@@ -8998,7 +10267,7 @@ void interp_run(Interp *i, Node *program) {
         }
         if (i->needs_reparse && i->source && i->filename &&
             (g_n_syntax_handlers > 0 || g_n_plugin_keywords > 0 ||
-             g_n_parser_overrides > 0)) {
+             g_n_parser_overrides > 0 || g_n_parser_productions > 0)) {
             i->needs_reparse = 0;
             if (i->cf.signal) CF_CLEAR(i);
             Lexer rlex;
@@ -9009,9 +10278,48 @@ void interp_run(Interp *i, Node *program) {
             Node *reparsed = parser_parse(&rp);
             token_array_free(&rta);
             if (reparsed && !rp.had_error) {
+                i->current_program = reparsed;
                 hoist_functions(i, &reparsed->program.stmts);
                 for (int k = j + 1; k < reparsed->program.stmts.len; k++) {
                     interp_exec(i, reparsed->program.stmts.items[k]);
+                    /* nested re-parse: if another plugin registered syntax, re-parse again */
+                    if (i->needs_reparse && i->source && i->filename &&
+                        (g_n_syntax_handlers > 0 || g_n_plugin_keywords > 0 ||
+                         g_n_parser_overrides > 0 || g_n_parser_productions > 0)) {
+                        i->needs_reparse = 0;
+                        if (i->cf.signal) CF_CLEAR(i);
+                        Lexer rlex2;
+                        lexer_init(&rlex2, i->source, i->filename);
+                        TokenArray rta2 = lexer_tokenize(&rlex2);
+                        Parser rp2;
+                        parser_init(&rp2, &rta2, i->filename);
+                        Node *reparsed2 = parser_parse(&rp2);
+                        token_array_free(&rta2);
+                        if (reparsed2 && !rp2.had_error) {
+                            i->current_program = reparsed2;
+                            hoist_functions(i, &reparsed2->program.stmts);
+                            for (int m = k + 1; m < reparsed2->program.stmts.len; m++) {
+                                interp_exec(i, reparsed2->program.stmts.items[m]);
+                                if (i->cf.signal == CF_RETURN) { CF_CLEAR(i); }
+                                else if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC) {
+                                    goto run_done;
+                                } else if (i->cf.signal == CF_THROW) {
+                                    Value *exc = i->cf.value;
+                                    char *s = exc ? value_repr(exc) : xs_strdup("<error>");
+                                    Node *sn2 = reparsed2->program.stmts.items[m];
+                                    fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
+                                            sn2->span.file ? sn2->span.file : "<unknown>",
+                                            sn2->span.line, sn2->span.col, s);
+                                    free(s);
+                                    CF_CLEAR(i);
+                                } else if (i->cf.signal) {
+                                    CF_CLEAR(i);
+                                }
+                            }
+                        }
+                        if (reparsed2) { /* don't free -- AST may be referenced */ }
+                        goto run_done;
+                    }
                     if (i->cf.signal == CF_RETURN) { CF_CLEAR(i); }
                     else if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC) {
                         goto run_done;

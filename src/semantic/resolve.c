@@ -6,6 +6,8 @@
 #include "core/xs_utils.h"
 #include "semantic/resolve.h"
 
+#define RESOLVE_MAX_ERRORS 10
+
 static const char *find_similar_name(SymTab *st, const char *name) {
     if (!st || !st->current || !name) return NULL;
     const char *best = NULL;
@@ -53,7 +55,13 @@ static int is_builtin_name(const char *name) {
         "collections","random","json","log","fmt","test","csv","url",
         "re","process","os","async","net","crypto","thread","buf",
         "encode","db","cli","ffi","reflect","gc","reactive",
+        "fs","http","toml","msgpack","Promise",
         "argc","argv",
+        "provenance","provenance_chain","provenance_stats",
+        "provenance_trace","provenance_history",
+        "explain","explain_history","trace","history",
+        "cancel","emit_runtime_hook","default",
+        "__tracer_active","__tracer_write_prov",
         "i8","i16","i32","i64","i128","isize",
         "u8","u16","u32","u64","u128","usize",
         "f32","f64","void","byte","any","never",
@@ -192,6 +200,7 @@ static void resolve_list(NodeList *nl, SymTab *st, SemaCtx *ctx) {
 
 static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
     if (!n) return;
+    if (ctx->diag && diag_context_error_count(ctx->diag) >= RESOLVE_MAX_ERRORS) return;
     switch (n->tag) {
 
     case NODE_FN_DECL: {
@@ -320,7 +329,7 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
     case NODE_IDENT: {
         const char *name = n->ident.name;
         if (!name) break;
-        if (!is_builtin_name(name)) {
+        if (!is_builtin_name(name) && !(name[0] == '_' && name[1] == '_')) {
             Symbol *sym = sym_lookup(st, name);
             if (!sym) {
                 Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "T0002",
