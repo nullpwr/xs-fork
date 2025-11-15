@@ -14,6 +14,12 @@ typedef struct {
     int constants_propagated;
     int loop_invariants_hoisted;
     int unused_vars_eliminated;
+    int tail_calls_marked;
+    int const_fns_propagated;
+    int loops_unrolled;
+    int ssa_gvn_eliminated;
+    int ssa_sccp_folded;
+    int ssa_types_specialized;
 } OptStats;
 
 Node *optimize(Node *program, OptStats *stats);
@@ -27,5 +33,11 @@ Node *opt_algebraic_simplify(Node *node, int *count);
 Node *opt_constant_propagate(Node *node, int *count);
 Node *opt_loop_invariant_motion(Node *node, int *count);
 Node *opt_unused_var_elim(Node *node, int *count);
+Node *opt_tail_call_detect(Node *node, int *count);
+Node *opt_const_fn_propagate(Node *program, int *count);
+Node *opt_loop_unroll(Node *node, int *count);
+
+/* SSA-based optimization pipeline (per-function) */
+void opt_ssa_pipeline(Node *fn_decl, OptStats *stats);
 
 #endif /* OPTIMIZER_H */

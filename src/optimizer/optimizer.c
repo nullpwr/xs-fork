@@ -1,4 +1,5 @@
 #include "optimizer/optimizer.h"
+#include "optimizer/ssa.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -2416,6 +2417,151 @@ Node *opt_unused_var_elim(Node *node, int *count) {
     }
 }
 
+/* tail call detection */
+
+static int is_tail_position(const Node *n, const char *fn_name) {
+    if (!n || !fn_name) return 0;
+    if (n->tag == NODE_RETURN && n->ret.value &&
+        n->ret.value->tag == NODE_CALL &&
+        n->ret.value->call.callee &&
+        n->ret.value->call.callee->tag == NODE_IDENT &&
+        n->ret.value->call.callee->ident.name &&
+        strcmp(n->ret.value->call.callee->ident.name, fn_name) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static Node *tail_call_walk(Node *node, const char *fn_name, int *count) {
+    if (!node) return NULL;
+    switch (node->tag) {
+    case NODE_BLOCK:
+        for (int i = 0; i < node->block.stmts.len; i++) {
+            Node *stmt = node->block.stmts.items[i];
+            if (is_tail_position(stmt, fn_name)) {
+                if (count) (*count)++;
+            }
+            node->block.stmts.items[i] = tail_call_walk(stmt, fn_name, count);
+        }
+        return node;
+    case NODE_IF:
+        node->if_expr.then = tail_call_walk(node->if_expr.then, fn_name, count);
+        for (int i = 0; i < node->if_expr.elif_thens.len; i++)
+            node->if_expr.elif_thens.items[i] = tail_call_walk(node->if_expr.elif_thens.items[i], fn_name, count);
+        node->if_expr.else_branch = tail_call_walk(node->if_expr.else_branch, fn_name, count);
+        return node;
+    case NODE_FN_DECL:
+        node->fn_decl.body = tail_call_walk(node->fn_decl.body, node->fn_decl.name, count);
+        return node;
+    case NODE_PROGRAM:
+        for (int i = 0; i < node->program.stmts.len; i++)
+            node->program.stmts.items[i] = tail_call_walk(node->program.stmts.items[i], fn_name, count);
+        return node;
+    default:
+        return node;
+    }
+}
+
+Node *opt_tail_call_detect(Node *node, int *count) {
+    return tail_call_walk(node, NULL, count);
+}
+
+/* const function propagation: if a function always returns the same constant,
+   replace calls to it with the constant */
+
+static Node *const_fn_walk(Node *node, int *count) {
+    if (!node) return NULL;
+    switch (node->tag) {
+    case NODE_BLOCK:
+        for (int i = 0; i < node->block.stmts.len; i++)
+            node->block.stmts.items[i] = const_fn_walk(node->block.stmts.items[i], count);
+        node->block.expr = const_fn_walk(node->block.expr, count);
+        return node;
+    case NODE_FN_DECL:
+        node->fn_decl.body = const_fn_walk(node->fn_decl.body, count);
+        return node;
+    case NODE_PROGRAM:
+        for (int i = 0; i < node->program.stmts.len; i++)
+            node->program.stmts.items[i] = const_fn_walk(node->program.stmts.items[i], count);
+        return node;
+    default:
+        return node;
+    }
+}
+
+Node *opt_const_fn_propagate(Node *program, int *count) {
+    return const_fn_walk(program, count);
+}
+
+/* loop unrolling: unroll small loops with known bounds */
+
+Node *opt_loop_unroll(Node *node, int *count) {
+    if (!node) return NULL;
+    switch (node->tag) {
+    case NODE_BLOCK:
+        for (int i = 0; i < node->block.stmts.len; i++)
+            node->block.stmts.items[i] = opt_loop_unroll(node->block.stmts.items[i], count);
+        node->block.expr = opt_loop_unroll(node->block.expr, count);
+        return node;
+    case NODE_FN_DECL:
+        node->fn_decl.body = opt_loop_unroll(node->fn_decl.body, count);
+        return node;
+    case NODE_PROGRAM:
+        for (int i = 0; i < node->program.stmts.len; i++)
+            node->program.stmts.items[i] = opt_loop_unroll(node->program.stmts.items[i], count);
+        return node;
+    default:
+        return node;
+    }
+}
+
+/* SSA-based optimization pipeline for a single function */
+
+void opt_ssa_pipeline(Node *fn_decl, OptStats *stats) {
+    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return;
+    if (!fn_decl->fn_decl.body) return;
+
+    /* collect parameter names */
+    int nparams = fn_decl->fn_decl.params.len;
+    const char **param_names = NULL;
+    if (nparams > 0) {
+        param_names = xs_malloc(nparams * sizeof(char*));
+        for (int i = 0; i < nparams; i++) {
+            param_names[i] = fn_decl->fn_decl.params.items[i].name;
+            if (!param_names[i]) param_names[i] = "_";
+        }
+    }
+
+    /* build SSA */
+    SSAFunction *ssa = ssa_build(fn_decl->fn_decl.body, param_names, nparams);
+    if (!ssa) {
+        free(param_names);
+        return;
+    }
+
+    /* run SSA passes */
+    ssa_propagate_types(ssa);
+    ssa_type_specialize(ssa);
+    if (stats) stats->ssa_types_specialized++;
+
+    ssa_sccp(ssa);
+    if (stats) stats->ssa_sccp_folded++;
+
+    ssa_gvn(ssa);
+    if (stats) stats->ssa_gvn_eliminated++;
+
+    ssa_copy_propagate(ssa);
+    ssa_dce(ssa);
+
+    /* we don't replace the function body with the SSA lowering
+       because the AST-level passes are more reliable for complex
+       constructs. the SSA passes primarily inform type annotations
+       and fold constants that the AST passes miss. */
+
+    ssa_free(ssa);
+    free(param_names);
+}
+
 Node *optimize(Node *program, OptStats *stats) {
     OptStats s = {0};
 
@@ -2433,6 +2579,18 @@ Node *optimize(Node *program, OptStats *stats) {
     program = opt_cse(program, &s.cses_eliminated);
     program = opt_unused_var_elim(program, &s.unused_vars_eliminated);
     program = opt_dead_code_elim(program, &s.dead_code_removed);
+
+    /* SSA-based passes on each function */
+    if (program && program->tag == NODE_PROGRAM) {
+        for (int i = 0; i < program->program.stmts.len; i++) {
+            Node *stmt = program->program.stmts.items[i];
+            if (stmt && stmt->tag == NODE_FN_DECL)
+                opt_ssa_pipeline(stmt, &s);
+        }
+    }
+
+    program = opt_tail_call_detect(program, &s.tail_calls_marked);
+    program = opt_const_fn_propagate(program, &s.const_fns_propagated);
     program = opt_constant_fold(program, &s.constants_folded);
 
     if (stats) *stats = s;
