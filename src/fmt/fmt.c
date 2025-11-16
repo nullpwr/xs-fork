@@ -12,6 +12,15 @@
 
 static CommentList *fmt_comments = NULL;
 static int          fmt_comment_idx = 0;
+static int          fmt_indent_width = 4;
+static int          fmt_max_width = 100;
+static int          fmt_trailing_commas = 0;
+
+static void fmt_indent_n(SB *s, int depth) {
+    for (int i = 0; i < depth; i++)
+        for (int j = 0; j < fmt_indent_width; j++)
+            sb_addc(s, ' ');
+}
 
 static int fmt_emit_leading_comments(SB *s, int node_line, int depth) {
     int count = 0;
@@ -19,7 +28,7 @@ static int fmt_emit_leading_comments(SB *s, int node_line, int depth) {
     while (fmt_comment_idx < fmt_comments->len) {
         Comment *c = &fmt_comments->items[fmt_comment_idx];
         if (c->line >= node_line) break;
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, c->text);
         sb_addc(s, '\n');
         fmt_comment_idx++;
@@ -113,7 +122,7 @@ static void fmt_block_body(SB *s, Node *block, int depth) {
             fmt_stmt(s, block->block.stmts.items[i], depth);
         }
         if (block->block.expr) {
-            sb_indent(s, depth);
+            fmt_indent_n(s, depth);
             fmt_expr(s, block->block.expr, depth);
             sb_addc(s, '\n');
         }
@@ -125,7 +134,7 @@ static void fmt_block_body(SB *s, Node *block, int depth) {
 static void fmt_block(SB *s, Node *block, int depth) {
     sb_add(s, "{\n");
     fmt_block_body(s, block, depth + 1);
-    sb_indent(s, depth);
+    fmt_indent_n(s, depth);
     sb_addc(s, '}');
 }
 
@@ -272,32 +281,69 @@ static void fmt_expr(SB *s, Node *n, int depth) {
     case NODE_LIT_CHAR:
         sb_printf(s, "'%c'", n->lit_char.cval);
         break;
-    case NODE_LIT_ARRAY:
-        sb_addc(s, '[');
+    case NODE_LIT_ARRAY: {
+        /* check if multi-line is needed based on max_width */
+        SB tmp; sb_init(&tmp);
+        sb_addc(&tmp, '[');
         for (int i = 0; i < n->lit_array.elems.len; i++) {
-            if (i > 0) sb_add(s, ", ");
-            fmt_expr(s, n->lit_array.elems.items[i], depth);
+            if (i > 0) sb_add(&tmp, ", ");
+            fmt_expr(&tmp, n->lit_array.elems.items[i], depth);
         }
-        sb_addc(s, ']');
+        sb_addc(&tmp, ']');
+        int fits = (fmt_max_width == 0 || tmp.len + depth * fmt_indent_width < fmt_max_width);
+        if (fits || n->lit_array.elems.len <= 1) {
+            sb_addn(s, tmp.data, tmp.len);
+        } else {
+            sb_add(s, "[\n");
+            for (int i = 0; i < n->lit_array.elems.len; i++) {
+                fmt_indent_n(s, depth + 1);
+                fmt_expr(s, n->lit_array.elems.items[i], depth + 1);
+                sb_add(s, ",\n");
+            }
+            fmt_indent_n(s, depth);
+            sb_addc(s, ']');
+        }
+        sb_free(&tmp);
         break;
+    }
     case NODE_LIT_TUPLE:
         sb_addc(s, '(');
         for (int i = 0; i < n->lit_array.elems.len; i++) {
             if (i > 0) sb_add(s, ", ");
             fmt_expr(s, n->lit_array.elems.items[i], depth);
         }
+        if (fmt_trailing_commas && n->lit_array.elems.len > 0)
+            sb_addc(s, ',');
         sb_addc(s, ')');
         break;
-    case NODE_LIT_MAP:
-        sb_addc(s, '{');
+    case NODE_LIT_MAP: {
+        SB tmp; sb_init(&tmp);
+        sb_addc(&tmp, '{');
         for (int i = 0; i < n->lit_map.keys.len; i++) {
-            if (i > 0) sb_add(s, ", ");
-            fmt_expr(s, n->lit_map.keys.items[i], depth);
-            sb_add(s, ": ");
-            fmt_expr(s, n->lit_map.vals.items[i], depth);
+            if (i > 0) sb_add(&tmp, ", ");
+            fmt_expr(&tmp, n->lit_map.keys.items[i], depth);
+            sb_add(&tmp, ": ");
+            fmt_expr(&tmp, n->lit_map.vals.items[i], depth);
         }
-        sb_addc(s, '}');
+        sb_addc(&tmp, '}');
+        int fits = (fmt_max_width == 0 || tmp.len + depth * fmt_indent_width < fmt_max_width);
+        if (fits || n->lit_map.keys.len <= 1) {
+            sb_addn(s, tmp.data, tmp.len);
+        } else {
+            sb_add(s, "{\n");
+            for (int i = 0; i < n->lit_map.keys.len; i++) {
+                fmt_indent_n(s, depth + 1);
+                fmt_expr(s, n->lit_map.keys.items[i], depth + 1);
+                sb_add(s, ": ");
+                fmt_expr(s, n->lit_map.vals.items[i], depth + 1);
+                sb_add(s, ",\n");
+            }
+            fmt_indent_n(s, depth);
+            sb_addc(s, '}');
+        }
+        sb_free(&tmp);
         break;
+    }
     case NODE_IDENT:
         sb_add(s, n->ident.name);
         break;
@@ -424,7 +470,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
         sb_add(s, " {\n");
         for (int i = 0; i < n->match.arms.len; i++) {
             MatchArm *arm = &n->match.arms.items[i];
-            sb_indent(s, depth + 1);
+            fmt_indent_n(s, depth + 1);
             fmt_pattern(s, arm->pattern, depth + 1);
             if (arm->guard) {
                 sb_add(s, " if ");
@@ -439,7 +485,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
                 sb_addc(s, '\n');
             }
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_addc(s, '}');
         break;
     case NODE_BLOCK:
@@ -507,7 +553,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
         sb_add(s, " {\n");
         for (int i = 0; i < n->handle.arms.len; i++) {
             EffectArm *arm = &n->handle.arms.items[i];
-            sb_indent(s, depth + 1);
+            fmt_indent_n(s, depth + 1);
             sb_add(s, arm->effect_name);
             sb_addc(s, '.');
             sb_add(s, arm->op_name);
@@ -519,7 +565,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
                 fmt_expr(s, arm->body, depth + 1);
             sb_addc(s, '\n');
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_addc(s, '}');
         break;
     case NODE_RESUME:
@@ -602,13 +648,13 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
     if (!n) return;
     switch (n->tag) {
     case NODE_EXPR_STMT:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         fmt_expr(s, n->expr_stmt.expr, depth);
         sb_addc(s, '\n');
         break;
     case NODE_LET:
     case NODE_VAR:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, n->let.mutable ? "var " : "let ");
         if (n->let.pattern) {
             fmt_pattern(s, n->let.pattern, depth);
@@ -626,7 +672,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_CONST:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "const ");
         sb_add(s, n->const_.name);
         if (n->const_.type_ann) {
@@ -640,10 +686,10 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_FN_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         if (n->fn_decl.is_pub) sb_add(s, "pub ");
         if (n->fn_decl.is_async) sb_add(s, "async ");
-        if (n->fn_decl.is_pure) { sb_add(s, "@pure\n"); sb_indent(s, depth); }
+        if (n->fn_decl.is_pure) { sb_add(s, "@pure\n"); fmt_indent_n(s, depth); }
         sb_add(s, "fn ");
         if (n->fn_decl.is_generator) sb_addc(s, '*');
         sb_add(s, n->fn_decl.name);
@@ -665,7 +711,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_STRUCT_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "struct ");
         sb_add(s, n->struct_decl.name);
         if (n->struct_decl.n_type_params > 0) {
@@ -678,7 +724,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         }
         sb_add(s, " {\n");
         for (int i = 0; i < n->struct_decl.fields.len; i++) {
-            sb_indent(s, depth + 1);
+            fmt_indent_n(s, depth + 1);
             sb_add(s, n->struct_decl.fields.items[i].key);
             if (n->struct_decl.fields.items[i].val) {
                 sb_add(s, ": ");
@@ -686,11 +732,11 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
             }
             sb_addc(s, '\n');
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_ENUM_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "enum ");
         sb_add(s, n->enum_decl.name);
         if (n->enum_decl.n_type_params > 0) {
@@ -704,7 +750,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_add(s, " {\n");
         for (int i = 0; i < n->enum_decl.variants.len; i++) {
             EnumVariant *v = &n->enum_decl.variants.items[i];
-            sb_indent(s, depth + 1);
+            fmt_indent_n(s, depth + 1);
             sb_add(s, v->name);
             if (v->fields.len > 0) {
                 if (v->is_struct) {
@@ -728,11 +774,11 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
             }
             sb_addc(s, '\n');
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_TRAIT_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "trait ");
         sb_add(s, n->trait_decl.name);
         if (n->trait_decl.super_trait) {
@@ -741,16 +787,16 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         }
         sb_add(s, " {\n");
         for (int i = 0; i < n->trait_decl.n_methods; i++) {
-            sb_indent(s, depth + 1);
+            fmt_indent_n(s, depth + 1);
             sb_add(s, "fn ");
             sb_add(s, n->trait_decl.method_names[i]);
             sb_add(s, "()\n");
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_IMPL_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "impl ");
         if (n->impl_decl.trait_name) {
             sb_add(s, n->impl_decl.trait_name);
@@ -761,33 +807,33 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         for (int i = 0; i < n->impl_decl.members.len; i++) {
             fmt_stmt(s, n->impl_decl.members.items[i], depth + 1);
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_CLASS_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "class ");
         sb_add(s, n->class_decl.name);
         sb_add(s, " {\n");
         for (int i = 0; i < n->class_decl.members.len; i++) {
             fmt_stmt(s, n->class_decl.members.items[i], depth + 1);
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_MODULE_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "module ");
         sb_add(s, n->module_decl.name);
         sb_add(s, " {\n");
         for (int i = 0; i < n->module_decl.body.len; i++) {
             fmt_stmt(s, n->module_decl.body.items[i], depth + 1);
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_IMPORT:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         if (n->import.nitems > 0) {
             sb_add(s, "import { ");
             for (int i = 0; i < n->import.nitems; i++) {
@@ -809,7 +855,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_TYPE_ALIAS:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "type ");
         sb_add(s, n->type_alias.name);
         sb_add(s, " = ");
@@ -817,18 +863,18 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_EFFECT_DECL:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "effect ");
         sb_add(s, n->effect_decl.name);
         sb_add(s, " {\n");
         for (int i = 0; i < n->effect_decl.ops.len; i++) {
             fmt_stmt(s, n->effect_decl.ops.items[i], depth + 1);
         }
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "}\n");
         break;
     case NODE_WHILE:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         if (n->while_loop.label) sb_printf(s, "'%s: ", n->while_loop.label);
         sb_add(s, "while ");
         fmt_expr(s, n->while_loop.cond, depth);
@@ -837,7 +883,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_FOR:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         if (n->for_loop.label) sb_printf(s, "'%s: ", n->for_loop.label);
         sb_add(s, "for ");
         fmt_pattern(s, n->for_loop.pattern, depth);
@@ -848,14 +894,14 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_LOOP:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         if (n->loop.label) sb_printf(s, "'%s: ", n->loop.label);
         sb_add(s, "loop ");
         fmt_block(s, n->loop.body, depth);
         sb_addc(s, '\n');
         break;
     case NODE_TRY:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "try ");
         fmt_block(s, n->try_.body, depth);
         for (int i = 0; i < n->try_.catch_arms.len; i++) {
@@ -875,7 +921,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
         sb_addc(s, '\n');
         break;
     case NODE_DEFER:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         sb_add(s, "defer ");
         if (n->defer_.body && n->defer_.body->tag == NODE_BLOCK)
             fmt_block(s, n->defer_.body, depth);
@@ -888,23 +934,23 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
     case NODE_CONTINUE:
     case NODE_THROW:
     case NODE_YIELD:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         fmt_expr(s, n, depth);
         sb_addc(s, '\n');
         break;
     case NODE_IF:
     case NODE_MATCH:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         fmt_expr(s, n, depth);
         sb_addc(s, '\n');
         break;
     case NODE_ASSIGN:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         fmt_expr(s, n, depth);
         sb_addc(s, '\n');
         break;
     default:
-        sb_indent(s, depth);
+        fmt_indent_n(s, depth);
         fmt_expr(s, n, depth);
         sb_addc(s, '\n');
         break;
@@ -912,6 +958,69 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
 }
 
 static void fmt_node(SB *s, Node *n, int depth) { fmt_stmt(s, n, depth); }
+
+void fmt_config_default(FmtConfig *cfg) {
+    cfg->indent_width = 4;
+    cfg->max_line_width = 100;
+    cfg->trailing_commas = 0;
+    cfg->start_line = 0;
+    cfg->end_line = 0;
+}
+
+void fmt_config_from_toml(FmtConfig *cfg, const char *path) {
+    /* find xs.toml in the same directory as path */
+    char toml_path[1024];
+    const char *slash = strrchr(path, '/');
+    if (slash) {
+        int dirlen = (int)(slash - path);
+        snprintf(toml_path, sizeof toml_path, "%.*s/xs.toml", dirlen, path);
+    } else {
+        snprintf(toml_path, sizeof toml_path, "xs.toml");
+    }
+
+    FILE *f = fopen(toml_path, "r");
+    if (!f) return;
+
+    char line[256];
+    int in_format = 0;
+    while (fgets(line, sizeof line, f)) {
+        /* trim */
+        char *s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (strncmp(s, "[format]", 8) == 0) { in_format = 1; continue; }
+        if (s[0] == '[') { in_format = 0; continue; }
+        if (!in_format) continue;
+
+        if (strncmp(s, "indent", 6) == 0) {
+            char *eq = strchr(s, '=');
+            if (eq) { int v = atoi(eq + 1); if (v > 0 && v <= 16) cfg->indent_width = v; }
+        } else if (strncmp(s, "max_width", 9) == 0) {
+            char *eq = strchr(s, '=');
+            if (eq) { int v = atoi(eq + 1); if (v >= 0) cfg->max_line_width = v; }
+        } else if (strncmp(s, "trailing_commas", 15) == 0) {
+            char *eq = strchr(s, '=');
+            if (eq) {
+                char *val = eq + 1;
+                while (*val == ' ') val++;
+                cfg->trailing_commas = (strncmp(val, "true", 4) == 0) ? 1 : 0;
+            }
+        }
+    }
+    fclose(f);
+}
+
+char *fmt_format_ex(Node *program, const char *src, const FmtConfig *cfg) {
+    if (cfg) {
+        fmt_indent_width = cfg->indent_width;
+        fmt_max_width = cfg->max_line_width;
+        fmt_trailing_commas = cfg->trailing_commas;
+    } else {
+        fmt_indent_width = 4;
+        fmt_max_width = 100;
+        fmt_trailing_commas = 0;
+    }
+    return fmt_format(program, src);
+}
 
 char *fmt_format(Node *program, const char *src) {
     if (!program || program->tag != NODE_PROGRAM) return src ? xs_strdup(src) : NULL;
@@ -989,6 +1098,11 @@ int fmt_file(const char *path) {
         fprintf(stderr, "xs fmt: cannot open '%s'\n", path);
         return 1;
     }
+
+    FmtConfig cfg;
+    fmt_config_default(&cfg);
+    fmt_config_from_toml(&cfg, path);
+
     Lexer lex;
     lexer_init(&lex, src, path);
     TokenArray ta = lexer_tokenize(&lex);
@@ -1006,7 +1120,7 @@ int fmt_file(const char *path) {
         return 1;
     }
 
-    char *out = fmt_format(prog, src);
+    char *out = fmt_format_ex(prog, src, &cfg);
     node_free(prog);
     free(src);
     if (!out) {
@@ -1032,6 +1146,11 @@ int fmt_file_check(const char *path) {
         fprintf(stderr, "xs fmt: cannot open '%s'\n", path);
         return 1;
     }
+
+    FmtConfig cfg;
+    fmt_config_default(&cfg);
+    fmt_config_from_toml(&cfg, path);
+
     Lexer lex;
     lexer_init(&lex, src, path);
     TokenArray ta = lexer_tokenize(&lex);
@@ -1049,7 +1168,7 @@ int fmt_file_check(const char *path) {
         return 1;
     }
 
-    char *out = fmt_format(prog, src);
+    char *out = fmt_format_ex(prog, src, &cfg);
     node_free(prog);
     if (!out) {
         fprintf(stderr, "xs fmt: format failed for '%s'\n", path);
@@ -1065,4 +1184,53 @@ int fmt_file_check(const char *path) {
         return 1;
     }
     return 0;
+}
+
+char *fmt_range(const char *path, int start_line, int end_line) {
+    char *src = read_file_contents(path);
+    if (!src) return NULL;
+
+    /* extract original lines in range so we can splice back */
+    FmtConfig cfg;
+    fmt_config_default(&cfg);
+    fmt_config_from_toml(&cfg, path);
+
+    Lexer lex;
+    lexer_init(&lex, src, path);
+    TokenArray ta = lexer_tokenize(&lex);
+
+    Parser p;
+    parser_init(&p, &ta, path);
+    Node *prog = parser_parse(&p);
+    token_array_free(&ta);
+
+    if (!prog || p.had_error) {
+        if (prog) node_free(prog);
+        free(src);
+        return NULL;
+    }
+
+    char *full = fmt_format_ex(prog, src, &cfg);
+    node_free(prog);
+    free(src);
+    if (!full) return NULL;
+
+    /* extract lines in [start_line, end_line] from formatted output */
+    SB out;
+    sb_init(&out);
+    int line = 1;
+    const char *lp = full;
+    while (*lp) {
+        const char *eol = strchr(lp, '\n');
+        int linelen = eol ? (int)(eol - lp + 1) : (int)strlen(lp);
+        if (line >= start_line && (end_line == 0 || line <= end_line)) {
+            sb_addn(&out, lp, linelen);
+        }
+        line++;
+        if (!eol) break;
+        lp = eol + 1;
+    }
+
+    free(full);
+    return out.data ? out.data : xs_strdup("");
 }

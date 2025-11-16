@@ -155,6 +155,7 @@ fn head_tail(arr) {
     return match arr {
         [first, ..rest] => "head={first} rest={rest}"
         [] => "empty"
+        _ => "other"
     }
 }
 assert_eq(head_tail([1, 2, 3]), "head=1 rest=[2, 3]")

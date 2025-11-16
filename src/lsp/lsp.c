@@ -162,6 +162,11 @@ static void collect_idents(LspDocument *doc, Node *n) {
         if (n->const_.name) doc_add_ident(doc, n->const_.name);
         if (n->const_.value) collect_idents(doc, n->const_.value);
         break;
+    case NODE_CLASS_DECL:
+        if (n->class_decl.name) doc_add_ident(doc, n->class_decl.name);
+        for (int i = 0; i < n->class_decl.members.len; i++)
+            collect_idents(doc, n->class_decl.members.items[i]);
+        break;
     case NODE_STRUCT_DECL:
         if (n->struct_decl.name) doc_add_ident(doc, n->struct_decl.name);
         break;
@@ -574,6 +579,7 @@ static char *get_word_at(const char *text, int line, int character) {
 static const char *node_tag_name(NodeTag tag) {
     switch (tag) {
     case NODE_FN_DECL:     return "function";
+    case NODE_CLASS_DECL:  return "class";
     case NODE_STRUCT_DECL: return "struct";
     case NODE_ENUM_DECL:   return "enum";
     case NODE_TRAIT_DECL:  return "trait";
@@ -604,6 +610,13 @@ static Node *find_decl_in_ast(Node *n, const char *name) {
         return NULL;
     case NODE_CONST:
         if (n->const_.name && strcmp(n->const_.name, name) == 0) return n;
+        return NULL;
+    case NODE_CLASS_DECL:
+        if (n->class_decl.name && strcmp(n->class_decl.name, name) == 0) return n;
+        for (int i = 0; i < n->class_decl.members.len; i++) {
+            Node *r = find_decl_in_ast(n->class_decl.members.items[i], name);
+            if (r) return r;
+        }
         return NULL;
     case NODE_STRUCT_DECL:
         if (n->struct_decl.name && strcmp(n->struct_decl.name, name) == 0) return n;
@@ -669,6 +682,280 @@ static Node *find_decl_in_ast(Node *n, const char *name) {
     }
 }
 
+/* Collect all references (usages) of a name in the AST.
+ * Stores line/col pairs in refs array, returns count. */
+typedef struct {
+    int line;
+    int col;
+} LspRef;
+
+#define LSP_MAX_REFS 512
+
+static int find_refs_in_ast(Node *n, const char *name, LspRef *refs, int max_refs, int count) {
+    if (!n || count >= max_refs) return count;
+
+    switch (n->tag) {
+    case NODE_IDENT:
+        if (n->ident.name && strcmp(n->ident.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        break;
+    case NODE_FN_DECL:
+        if (n->fn_decl.name && strcmp(n->fn_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        for (int i = 0; i < n->fn_decl.params.len && count < max_refs; i++) {
+            if (n->fn_decl.params.items[i].name &&
+                strcmp(n->fn_decl.params.items[i].name, name) == 0) {
+                refs[count].line = n->span.line;
+                refs[count].col = n->span.col;
+                count++;
+            }
+        }
+        count = find_refs_in_ast(n->fn_decl.body, name, refs, max_refs, count);
+        break;
+    case NODE_LET: case NODE_VAR:
+        if (n->let.name && strcmp(n->let.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        count = find_refs_in_ast(n->let.value, name, refs, max_refs, count);
+        break;
+    case NODE_CONST:
+        if (n->const_.name && strcmp(n->const_.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        count = find_refs_in_ast(n->const_.value, name, refs, max_refs, count);
+        break;
+    case NODE_CLASS_DECL:
+        if (n->class_decl.name && strcmp(n->class_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        for (int i = 0; i < n->class_decl.members.len; i++)
+            count = find_refs_in_ast(n->class_decl.members.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_STRUCT_DECL:
+        if (n->struct_decl.name && strcmp(n->struct_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        break;
+    case NODE_ENUM_DECL:
+        if (n->enum_decl.name && strcmp(n->enum_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        break;
+    case NODE_TRAIT_DECL:
+        if (n->trait_decl.name && strcmp(n->trait_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        break;
+    case NODE_TAG_DECL:
+        if (n->tag_decl.name && strcmp(n->tag_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        count = find_refs_in_ast(n->tag_decl.body, name, refs, max_refs, count);
+        break;
+    case NODE_BIND:
+        if (n->bind_decl.name && strcmp(n->bind_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        count = find_refs_in_ast(n->bind_decl.expr, name, refs, max_refs, count);
+        break;
+    case NODE_ADAPT_FN:
+        if (n->adapt_fn.name && strcmp(n->adapt_fn.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        for (int i = 0; i < n->adapt_fn.nbranches; i++)
+            count = find_refs_in_ast(n->adapt_fn.bodies[i], name, refs, max_refs, count);
+        break;
+    case NODE_MODULE_DECL:
+        if (n->module_decl.name && strcmp(n->module_decl.name, name) == 0) {
+            refs[count].line = n->span.line;
+            refs[count].col = n->span.col;
+            count++;
+        }
+        for (int i = 0; i < n->module_decl.body.len; i++)
+            count = find_refs_in_ast(n->module_decl.body.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            count = find_refs_in_ast(n->program.stmts.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            count = find_refs_in_ast(n->block.stmts.items[i], name, refs, max_refs, count);
+        if (n->block.expr) count = find_refs_in_ast(n->block.expr, name, refs, max_refs, count);
+        break;
+    case NODE_EXPR_STMT:
+        count = find_refs_in_ast(n->expr_stmt.expr, name, refs, max_refs, count);
+        break;
+    case NODE_IF:
+        count = find_refs_in_ast(n->if_expr.cond, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->if_expr.then, name, refs, max_refs, count);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++) {
+            count = find_refs_in_ast(n->if_expr.elif_conds.items[i], name, refs, max_refs, count);
+            count = find_refs_in_ast(n->if_expr.elif_thens.items[i], name, refs, max_refs, count);
+        }
+        if (n->if_expr.else_branch)
+            count = find_refs_in_ast(n->if_expr.else_branch, name, refs, max_refs, count);
+        break;
+    case NODE_WHILE:
+        count = find_refs_in_ast(n->while_loop.cond, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->while_loop.body, name, refs, max_refs, count);
+        break;
+    case NODE_FOR:
+        count = find_refs_in_ast(n->for_loop.pattern, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->for_loop.iter, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->for_loop.body, name, refs, max_refs, count);
+        break;
+    case NODE_CALL:
+        count = find_refs_in_ast(n->call.callee, name, refs, max_refs, count);
+        for (int i = 0; i < n->call.args.len; i++)
+            count = find_refs_in_ast(n->call.args.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_BINOP:
+        count = find_refs_in_ast(n->binop.left, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->binop.right, name, refs, max_refs, count);
+        break;
+    case NODE_UNARY:
+        count = find_refs_in_ast(n->unary.expr, name, refs, max_refs, count);
+        break;
+    case NODE_ASSIGN:
+        count = find_refs_in_ast(n->assign.target, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->assign.value, name, refs, max_refs, count);
+        break;
+    case NODE_RETURN:
+        if (n->ret.value) count = find_refs_in_ast(n->ret.value, name, refs, max_refs, count);
+        break;
+    case NODE_LAMBDA:
+        if (n->lambda.body) count = find_refs_in_ast(n->lambda.body, name, refs, max_refs, count);
+        break;
+    case NODE_MATCH:
+        count = find_refs_in_ast(n->match.subject, name, refs, max_refs, count);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            count = find_refs_in_ast(n->match.arms.items[i].pattern, name, refs, max_refs, count);
+            count = find_refs_in_ast(n->match.arms.items[i].body, name, refs, max_refs, count);
+        }
+        break;
+    case NODE_INDEX:
+        count = find_refs_in_ast(n->index.obj, name, refs, max_refs, count);
+        count = find_refs_in_ast(n->index.index, name, refs, max_refs, count);
+        break;
+    case NODE_FIELD:
+        count = find_refs_in_ast(n->field.obj, name, refs, max_refs, count);
+        break;
+    case NODE_METHOD_CALL:
+        count = find_refs_in_ast(n->method_call.obj, name, refs, max_refs, count);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            count = find_refs_in_ast(n->method_call.args.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_LIT_ARRAY:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            count = find_refs_in_ast(n->lit_array.elems.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++) {
+            count = find_refs_in_ast(n->lit_map.keys.items[i], name, refs, max_refs, count);
+            count = find_refs_in_ast(n->lit_map.vals.items[i], name, refs, max_refs, count);
+        }
+        break;
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++)
+            count = find_refs_in_ast(n->impl_decl.members.items[i], name, refs, max_refs, count);
+        break;
+    case NODE_TRY:
+        count = find_refs_in_ast(n->try_.body, name, refs, max_refs, count);
+        if (n->try_.finally_block)
+            count = find_refs_in_ast(n->try_.finally_block, name, refs, max_refs, count);
+        break;
+    default:
+        break;
+    }
+    return count;
+}
+
+static void lsp_handle_references(int id, const char *json) {
+    int line = -1, character = -1;
+    const char *pos = strstr(json, "\"position\"");
+    if (pos) {
+        line = json_get_int(pos, "line");
+        character = json_get_int(pos, "character");
+    }
+
+    char *uri = NULL;
+    const char *td = strstr(json, "\"textDocument\"");
+    if (td) uri = json_get_string(td, "uri");
+
+    LspDocument *doc = doc_find(uri);
+    if (!doc || !doc->text || !doc->ast) {
+        lsp_send_response(id, "[]");
+        free(uri);
+        return;
+    }
+
+    char *word = get_word_at(doc->text, line, character);
+    if (!word || strlen(word) == 0) {
+        lsp_send_response(id, "[]");
+        free(word);
+        free(uri);
+        return;
+    }
+
+    LspRef refs[LSP_MAX_REFS];
+    int nrefs = find_refs_in_ast(doc->ast, word, refs, LSP_MAX_REFS, 0);
+    free(word);
+
+    if (nrefs == 0) {
+        lsp_send_response(id, "[]");
+        free(uri);
+        return;
+    }
+
+    size_t bufsz = LSP_BUF_HUGE;
+    char *buf = malloc(bufsz);
+    if (!buf) { lsp_send_response(id, "[]"); free(uri); return; }
+
+    int off = 0;
+    off += snprintf(buf + off, bufsz - (size_t)off, "[");
+
+    for (int i = 0; i < nrefs; i++) {
+        if (i > 0) off += snprintf(buf + off, bufsz - (size_t)off, ",");
+        int rl = refs[i].line > 0 ? refs[i].line - 1 : 0;
+        int rc = refs[i].col  > 0 ? refs[i].col  - 1 : 0;
+        off += snprintf(buf + off, bufsz - (size_t)off,
+            "{\"uri\":\"%s\","
+            "\"range\":{\"start\":{\"line\":%d,\"character\":%d},"
+            "\"end\":{\"line\":%d,\"character\":%d}}}",
+            uri ? uri : "", rl, rc, rl, rc + 1);
+    }
+
+    off += snprintf(buf + off, bufsz - (size_t)off, "]");
+    lsp_send_response(id, buf);
+    free(buf);
+    free(uri);
+}
+
 static void build_hover_text(Node *decl, const char *name, char *out, size_t outsz) {
     if (!decl) {
         for (int i = 0; xs_keywords[i]; i++) {
@@ -707,6 +994,9 @@ static void build_hover_text(Node *decl, const char *name, char *out, size_t out
             snprintf(out + off, outsz - (size_t)off, " -> %s", decl->fn_decl.ret_type->name);
         break;
     }
+    case NODE_CLASS_DECL:
+        snprintf(out, outsz, "class %s { %d member(s) }", name, decl->class_decl.members.len);
+        break;
     case NODE_STRUCT_DECL:
         snprintf(out, outsz, "struct %s { %d field(s) }", name, decl->struct_decl.fields.len);
         break;
@@ -769,6 +1059,7 @@ static void lsp_handle_initialize(int id) {
             "\"completionProvider\":{\"triggerCharacters\":[\".\",\":\"]},"
             "\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},"
             "\"definitionProvider\":true,"
+            "\"referencesProvider\":true,"
             "\"documentSymbolProvider\":true"
         "},"
         "\"serverInfo\":{\"name\":\"xs-lsp\",\"version\":\"0.2.0\"}"
@@ -1006,6 +1297,7 @@ static void lsp_handle_completions(int id, const char *json) {
                         case NODE_TAG_DECL: kind = 3; break;     /* Function */
                         case NODE_ADAPT_FN: kind = 3; break;     /* Function */
                         case NODE_BIND: kind = 6; break;         /* Variable */
+                        case NODE_CLASS_DECL: kind = 7; break;  /* Class */
                         case NODE_STRUCT_DECL: kind = 22; break; /* Struct */
                         case NODE_ENUM_DECL: kind = 13; break;   /* Enum */
                         case NODE_TRAIT_DECL: kind = 8; break;    /* Interface */
@@ -1272,6 +1564,13 @@ static void collect_symbols_json(Node *n, char *buf, size_t bufsz, int *off, int
         if (n->fn_decl.name)
             emit_symbol(buf, bufsz, off, first, n->fn_decl.name, 12, n->span);
         break;
+    case NODE_CLASS_DECL:
+        /* SymbolKind: Class = 5 */
+        if (n->class_decl.name)
+            emit_symbol(buf, bufsz, off, first, n->class_decl.name, 5, n->span);
+        for (int i = 0; i < n->class_decl.members.len; i++)
+            collect_symbols_json(n->class_decl.members.items[i], buf, bufsz, off, first, uri);
+        break;
     case NODE_STRUCT_DECL:
         /* SymbolKind: Struct = 23 */
         if (n->struct_decl.name)
@@ -1426,6 +1725,9 @@ int lsp_run(void) {
 
         } else if (strcmp(method, "textDocument/definition") == 0) {
             lsp_handle_definition(id, msg);
+
+        } else if (strcmp(method, "textDocument/references") == 0) {
+            lsp_handle_references(id, msg);
 
         } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
             lsp_handle_document_symbols(id, msg);
