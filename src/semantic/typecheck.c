@@ -3,7 +3,46 @@
 #include <stdlib.h>
 
 #include "core/xs.h"
+#include "core/xs_utils.h"
 #include "semantic/typecheck.h"
+
+#define TC_MAX_ERRORS 10
+
+/* find the closest matching field name in a struct declaration */
+static const char *find_similar_field(Node *struct_decl, const char *name) {
+    if (!struct_decl || struct_decl->tag != NODE_STRUCT_DECL || !name) return NULL;
+    NodePairList *fl = &struct_decl->struct_decl.fields;
+    const char *best = NULL;
+    int best_dist = 4;
+    for (int i = 0; i < fl->len; i++) {
+        if (!fl->items[i].key) continue;
+        int d = xs_edit_distance(name, fl->items[i].key);
+        if (d > 0 && d < best_dist) {
+            best_dist = d;
+            best = fl->items[i].key;
+        }
+    }
+    return best;
+}
+
+/* format a function signature for error messages */
+static char *format_fn_signature(const char *name, Node *fn_decl) {
+    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return NULL;
+    char buf[512];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof buf - pos, "fn %s(", name ? name : "?");
+    for (int i = 0; i < fn_decl->fn_decl.params.len && pos < (int)sizeof buf - 40; i++) {
+        Param *pm = &fn_decl->fn_decl.params.items[i];
+        if (i > 0) pos += snprintf(buf + pos, sizeof buf - pos, ", ");
+        if (pm->name) pos += snprintf(buf + pos, sizeof buf - pos, "%s", pm->name);
+        if (pm->type_ann && pm->type_ann->name)
+            pos += snprintf(buf + pos, sizeof buf - pos, ": %s", pm->type_ann->name);
+    }
+    pos += snprintf(buf + pos, sizeof buf - pos, ")");
+    if (fn_decl->fn_decl.ret_type && fn_decl->fn_decl.ret_type->name)
+        snprintf(buf + pos, sizeof buf - pos, " -> %s", fn_decl->fn_decl.ret_type->name);
+    return xs_strdup(buf);
+}
 
 static XsType *texpr_to_xstype(TypeExpr *te) {
     if (!te) return ty_unknown();
@@ -422,6 +461,7 @@ static void tc_walk_list(NodeList *nl, SymTab *st, SemaCtx *ctx) {
 
 static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
     if (!n) return;
+    if (ctx->diag && diag_context_error_count(ctx->diag) >= TC_MAX_ERRORS) return;
     switch (n->tag) {
 
     case NODE_FN_DECL: {
@@ -543,6 +583,7 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                 int nargs = n->call.args.len;
                 int nparams = params->len;
                 int limit = nargs < nparams ? nargs : nparams;
+                int had_mismatch = 0;
                 for (int i = 0; i < limit; i++) {
                     Param *pm = &params->items[i];
                     if (!pm->type_ann) continue;
@@ -551,9 +592,18 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                     XsType *expected = texpr_to_xstype(pm->type_ann);
                     if (expected->kind != TY_UNKNOWN) {
                         Node *arg = n->call.args.items[i];
-                        if (arg) tc_check(arg, expected, st, ctx);
+                        if (arg && !tc_check(arg, expected, st, ctx))
+                            had_mismatch = 1;
                     }
                     if (!expected->is_singleton) ty_free(expected);
+                }
+                if (had_mismatch && ctx->diag && ctx->diag->n_items > 0) {
+                    Diagnostic *last = &ctx->diag->items[ctx->diag->n_items - 1];
+                    char *sig = format_fn_signature(n->call.callee->ident.name, fn_sym->decl);
+                    if (sig) {
+                        diag_note(last, "function signature: %s", sig);
+                        free(sig);
+                    }
                 }
             }
         }
@@ -625,9 +675,11 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                     const char *fname = n->struct_init.fields.items[i].key;
                     Node *fval = n->struct_init.fields.items[i].val;
                     if (!fname || !fval) continue;
+                    int field_found = 0;
                     for (int j = 0; j < decl_fields->len; j++) {
                         if (!decl_fields->items[j].key ||
                             strcmp(decl_fields->items[j].key, fname) != 0) continue;
+                        field_found = 1;
                         /* check against field type annotation first */
                         if (field_types && j < n_ft && field_types[j]) {
                             XsType *ft = texpr_to_xstype(field_types[j]);
@@ -641,6 +693,15 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                                 tc_check(fval, field_ty, st, ctx);
                         }
                         break;
+                    }
+                    if (!field_found) {
+                        Diagnostic *diag = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "T0012",
+                            "no field '%s' on struct '%s'", fname, n->struct_init.path);
+                        diag_annotate(diag, fval->span, 1, "unknown field '%s'", fname);
+                        const char *similar = find_similar_field(sd, fname);
+                        if (similar)
+                            diag_hint(diag, "did you mean '%s'?", similar);
+                        diag_emit(ctx->diag, diag);
                     }
                 }
             }

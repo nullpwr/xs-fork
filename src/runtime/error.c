@@ -62,6 +62,25 @@ void xs_runtime_error(Span span, const char *label, const char *hint,
     if (g_current_interp && g_current_interp->call_stack_len > 0) {
         int n = g_current_interp->call_stack_len;
         #define MAX_FRAMES 10
+        /* collect local variable names from current env for innermost frame */
+        char locals_buf[256] = {0};
+        if (g_current_interp->env) {
+            Env *e = g_current_interp->env;
+            int pos = 0;
+            for (int k = 0; k < e->len && pos < (int)sizeof(locals_buf) - 1; k++) {
+                if (!e->bindings[k].name) continue;
+                if (pos > 0 && pos < (int)sizeof(locals_buf) - 3)
+                    pos += snprintf(locals_buf + pos, sizeof(locals_buf) - pos, ", ");
+                pos += snprintf(locals_buf + pos, sizeof(locals_buf) - pos,
+                                "%s", e->bindings[k].name);
+            }
+        }
+        if (locals_buf[0]) {
+            char hint_buf[300];
+            snprintf(hint_buf, sizeof hint_buf, "locals: %s", locals_buf);
+            diag_hint(d, "%s", hint_buf);
+        }
+
         if (n <= MAX_FRAMES) {
             for (int j = n - 1; j >= 0; j--) {
                 InterpFrame *f = &g_current_interp->call_stack[j];
@@ -70,7 +89,6 @@ void xs_runtime_error(Span span, const char *label, const char *hint,
                     f->call_span.line, f->call_span.col, f->func_name);
             }
         } else {
-            /* show top 5, elide middle, show bottom 5 */
             for (int j = n - 1; j >= n - 5; j--) {
                 InterpFrame *f = &g_current_interp->call_stack[j];
                 diag_push_frame(d,

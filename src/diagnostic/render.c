@@ -247,12 +247,28 @@ static void render_diagnostic(Diagnostic *d, const char *source,
         fprintf(out, " %sstack trace:%s\n", DIAG_COLOR(BLUE), rst);
         for (int i = 0; i < d->n_stack_frames; i++) {
             DiagStackFrame *f = &d->stack_frames[i];
-            fprintf(out, "   %s%s%s:%d:%d  in %s%s%s\n",
-                    mag, f->file, rst,
-                    f->line, f->col,
-                    DIAG_COLOR(BOLD),
-                    f->func_name ? f->func_name : "<main>",
-                    rst);
+            const char *fname = f->func_name ? f->func_name : "<main>";
+            if (f->line > 0 && f->file && f->file[0]) {
+                fprintf(out, "   at %s%s%s (%s%s%s:%d)\n",
+                        DIAG_COLOR(BOLD), fname, rst,
+                        mag, f->file, rst, f->line);
+                /* try to show the source line */
+                int line_len = 0;
+                const char *lp = get_line(source, f->line, &line_len);
+                if (lp && line_len > 0) {
+                    /* skip leading whitespace for display */
+                    const char *trimmed = lp;
+                    int tlen = line_len;
+                    while (tlen > 0 && (*trimmed == ' ' || *trimmed == '\t'))
+                        { trimmed++; tlen--; }
+                    if (tlen > 0 && tlen < 200) {
+                        fprintf(out, "      %s%.*s%s\n", gray, tlen, trimmed, rst);
+                    }
+                }
+            } else {
+                fprintf(out, "   at %s%s%s\n",
+                        DIAG_COLOR(BOLD), fname, rst);
+            }
         }
         fprintf(out, "\n");
     }

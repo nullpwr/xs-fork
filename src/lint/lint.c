@@ -181,6 +181,56 @@ static int block_ends_with_return(Node *n) {
     return 0;
 }
 
+typedef struct {
+    char   *name;
+    int     line;
+    int     used;
+    int     is_import;
+} ImportEntry;
+
+static ImportEntry *g_imports = NULL;
+static int g_nimports = 0;
+static int g_import_cap = 0;
+
+static void import_track(XSLint *l, const char *name, int line) {
+    (void)l;
+    if (!name || name[0] == '\0') return;
+    if (g_nimports >= g_import_cap) {
+        g_import_cap = g_import_cap ? g_import_cap * 2 : 16;
+        g_imports = (ImportEntry *)realloc(g_imports,
+            (size_t)g_import_cap * sizeof(ImportEntry));
+    }
+    ImportEntry *e = &g_imports[g_nimports++];
+    e->name = xs_strdup(name);
+    e->line = line;
+    e->used = 0;
+    e->is_import = 1;
+}
+
+static void import_mark_used(const char *name) {
+    if (!name) return;
+    for (int i = 0; i < g_nimports; i++) {
+        if (g_imports[i].name && strcmp(g_imports[i].name, name) == 0) {
+            g_imports[i].used = 1;
+            return;
+        }
+    }
+}
+
+static void import_check_unused(XSLint *l) {
+    for (int i = 0; i < g_nimports; i++) {
+        if (!g_imports[i].used && g_imports[i].name) {
+            lint_add(l, SEV_WARNING, g_imports[i].line,
+                     "unused import '%s'", g_imports[i].name);
+        }
+        free(g_imports[i].name);
+    }
+    free(g_imports);
+    g_imports = NULL;
+    g_nimports = 0;
+    g_import_cap = 0;
+}
+
 static void check_null_comparison(XSLint *l, Node *n) {
     if (!n || n->tag != NODE_BINOP) return;
     if (strcmp(n->binop.op, "==") != 0 && strcmp(n->binop.op, "!=") != 0) return;
@@ -190,6 +240,39 @@ static void check_null_comparison(XSLint *l, Node *n) {
         const char *suggest = strcmp(n->binop.op, "==") == 0 ? "is null" : "is not null";
         lint_add(l, SEV_STYLE, n->span.line,
                  "use '%s' instead of '%s null'", suggest, n->binop.op);
+    }
+}
+
+static void check_self_comparison(XSLint *l, Node *n) {
+    if (!n || n->tag != NODE_BINOP) return;
+    if (strcmp(n->binop.op, "==") != 0 && strcmp(n->binop.op, "!=") != 0) return;
+    Node *left = n->binop.left;
+    Node *right = n->binop.right;
+    if (!left || !right) return;
+    if (left->tag == NODE_IDENT && right->tag == NODE_IDENT &&
+        left->ident.name && right->ident.name &&
+        strcmp(left->ident.name, right->ident.name) == 0) {
+        lint_add(l, SEV_WARNING, n->span.line,
+                 "comparison of '%s' to itself is always %s",
+                 left->ident.name,
+                 strcmp(n->binop.op, "==") == 0 ? "true" : "false");
+    }
+}
+
+static int is_double_negation(Node *n) {
+    if (!n || n->tag != NODE_UNARY) return 0;
+    if (strcmp(n->unary.op, "!") != 0 && strcmp(n->unary.op, "not") != 0) return 0;
+    Node *inner = n->unary.expr;
+    if (!inner || inner->tag != NODE_UNARY) return 0;
+    if (strcmp(inner->unary.op, "!") != 0 && strcmp(inner->unary.op, "not") != 0) return 0;
+    return 1;
+}
+
+static void check_assignment_in_condition(XSLint *l, Node *cond) {
+    if (!cond) return;
+    if (cond->tag == NODE_ASSIGN) {
+        lint_add(l, SEV_WARNING, cond->span.line,
+                 "assignment in condition (did you mean '=='?)");
     }
 }
 
@@ -234,13 +317,19 @@ static void lint_expr(XSLint *l, Node *n) {
     switch (n->tag) {
     case NODE_IDENT:
         scope_mark_used(l, n->ident.name);
+        import_mark_used(n->ident.name);
         break;
     case NODE_BINOP:
         check_null_comparison(l, n);
+        check_self_comparison(l, n);
         lint_expr(l, n->binop.left);
         lint_expr(l, n->binop.right);
         break;
     case NODE_UNARY:
+        if (is_double_negation(n)) {
+            lint_add(l, SEV_WARNING, n->span.line,
+                     "double negation '!!x' is redundant, use the value directly");
+        }
         lint_expr(l, n->unary.expr);
         break;
     case NODE_ASSIGN:
@@ -256,6 +345,8 @@ static void lint_expr(XSLint *l, Node *n) {
         break;
     case NODE_METHOD_CALL:
         lint_expr(l, n->method_call.obj);
+        if (n->method_call.obj && n->method_call.obj->tag == NODE_IDENT)
+            import_mark_used(n->method_call.obj->ident.name);
         for (int i = 0; i < n->method_call.args.len; i++)
             lint_expr(l, n->method_call.args.items[i]);
         for (int i = 0; i < n->method_call.kwargs.len; i++)
@@ -267,6 +358,7 @@ static void lint_expr(XSLint *l, Node *n) {
         break;
     case NODE_FIELD:
         lint_expr(l, n->field.obj);
+        import_mark_used(n->field.obj && n->field.obj->tag == NODE_IDENT ? n->field.obj->ident.name : NULL);
         break;
     case NODE_IF:
         if (is_literal_bool(n->if_expr.cond)) {
@@ -545,6 +637,7 @@ static void lint_node(XSLint *l, Node *n) {
             lint_add(l, SEV_STYLE, n->span.line,
                      "constant condition in while; use 'loop' for infinite loops or remove dead code");
         }
+        check_assignment_in_condition(l, n->while_loop.cond);
         if (is_empty_block(n->while_loop.body)) {
             lint_add(l, SEV_WARNING, n->span.line, "empty while body");
         }
@@ -616,6 +709,10 @@ static void lint_node(XSLint *l, Node *n) {
         lint_block(l, n->try_.body);
         for (int i = 0; i < n->try_.catch_arms.len; i++) {
             MatchArm *arm = &n->try_.catch_arms.items[i];
+            if ((arm->body && is_empty_block(arm->body)) || !arm->body) {
+                lint_add(l, SEV_WARNING, arm->span.line > 0 ? arm->span.line : n->span.line,
+                         "empty catch block silently swallows errors");
+            }
             scope_push(l);
             if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT)
                 scope_add_var(l, arm->pattern->pat_ident.name, arm->span.line);
@@ -632,6 +729,24 @@ static void lint_node(XSLint *l, Node *n) {
         lint_block(l, n);
         break;
     case NODE_IMPORT:
+        if (n->import.alias) {
+            import_track(l, n->import.alias, n->span.line);
+        } else if (n->import.nparts > 0 && n->import.path[0]) {
+            import_track(l, n->import.path[0], n->span.line);
+        }
+        for (int ii = 0; ii < n->import.nitems; ii++) {
+            if (n->import.items[ii])
+                import_track(l, n->import.items[ii], n->span.line);
+        }
+        break;
+    case NODE_USE:
+        if (n->use_.alias) {
+            import_track(l, n->use_.alias, n->span.line);
+        }
+        for (int ii = 0; ii < n->use_.nnames; ii++) {
+            if (n->use_.name_aliases[ii])
+                import_track(l, n->use_.name_aliases[ii], n->span.line);
+        }
         break;
     case NODE_RETURN:
     case NODE_BREAK:
@@ -672,6 +787,7 @@ int lint_program(XSLint *l, Node *program, const char *filename) {
     l->filename = filename;
     l->depth = 0;
     l->nscopes = 0;
+    g_nimports = 0;
 
     scope_push(l);
     for (int i = 0; i < program->program.stmts.len; i++) {
@@ -681,6 +797,7 @@ int lint_program(XSLint *l, Node *program, const char *filename) {
         check_unreachable(l, &program->program.stmts);
     }
     scope_pop(l);
+    import_check_unused(l);
 
     return l->issues;
 }
