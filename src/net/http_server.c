@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <strings.h>
 /* http_server.c - HTTP/1.1 server with routing, middleware, and static files
  *
  * Features:
@@ -10,8 +12,6 @@
  *   - Chunked transfer encoding (reading)
  *   - Query string parsing with URL decoding
  */
-
-#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include "net/http_server.h"

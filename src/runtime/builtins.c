@@ -7,11 +7,13 @@
 #include "core/gc.h"
 #include "core/msgpack.h"
 #include "runtime/async.h"
+#ifndef __wasi__
 #include "bearssl_hash.h"
 #include "bearssl_hmac.h"
 #include "bearssl_kdf.h"
 #include "bearssl_block.h"
 #include "bearssl_aead.h"
+#endif
 #include <strings.h>
 #ifdef __MINGW32__
 #define re_nsub nsub
@@ -7582,7 +7584,11 @@ static Value *native_fs_abs(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
     char buf[4096];
+#ifdef _WIN32
+    if (_fullpath(buf, a[0]->s, sizeof(buf))) return xs_str(buf);
+#else
     if (realpath(a[0]->s, buf)) return xs_str(buf);
+#endif
     return value_incref((Value*)a[0]);
 }
 
@@ -7838,7 +7844,11 @@ static Value *native_fs_realpath(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
     char buf[4096];
+#ifdef _WIN32
+    if (_fullpath(buf, a[0]->s, sizeof(buf))) return xs_str(buf);
+#else
     if (realpath(a[0]->s, buf)) return xs_str(buf);
+#endif
     return value_incref(XS_NULL_VAL);
 }
 

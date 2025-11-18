@@ -568,12 +568,16 @@ int evloop_add_signal(EventLoop *ev, int signum,
     ev->nsig_handlers++;
 
     g_signal_loop = ev;
+#if !defined(__wasi__) && !defined(_WIN32)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
     sa.sa_flags = SA_RESTART;
     sigemptyset(&sa.sa_mask);
     sigaction(signum, &sa, NULL);
+#else
+    signal(signum, signal_handler);
+#endif
 
     return 0;
 }
