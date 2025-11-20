@@ -14,9 +14,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#else
+#include <winsock2.h>
+#include <io.h>
+#include <fcntl.h>
+#endif
 #include <time.h>
 
 #if defined(__linux__)
@@ -47,11 +53,18 @@ int64_t evloop_now_ms(void) {
  *  Internal: set fd non-blocking
  * ---------------------------------------------------------------- */
 
+#ifdef _WIN32
+static int set_nonblocking(int fd) {
+    unsigned long mode = 1;
+    return ioctlsocket(fd, FIONBIO, &mode);
+}
+#else
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
+#endif
 
 /* ----------------------------------------------------------------
  *  Timer min-heap operations
@@ -134,6 +147,7 @@ static int find_source(EventLoop *ev, int fd) {
  *  Signal pipe
  * ---------------------------------------------------------------- */
 
+#ifndef _WIN32
 static volatile sig_atomic_t g_signal_received[64];
 static EventLoop *g_signal_loop = NULL;
 
@@ -164,6 +178,9 @@ static void process_signals(EventLoop *ev) {
         }
     }
 }
+#else
+static void process_signals(EventLoop *ev) { (void)ev; }
+#endif
 
 /* ================================================================
  *  EPOLL BACKEND (Linux)
@@ -361,14 +378,61 @@ static int backend_remove_fd(EventLoop *ev, int fd) {
 static int backend_poll(EventLoop *ev, int timeout_ms) {
     if (ev->nsources == 0) {
         if (timeout_ms > 0) {
+#ifdef _WIN32
+            Sleep(timeout_ms);
+#else
             struct timespec ts;
             ts.tv_sec = timeout_ms / 1000;
             ts.tv_nsec = (timeout_ms % 1000) * 1000000L;
             nanosleep(&ts, NULL);
+#endif
         }
         return 0;
     }
 
+#ifdef _WIN32
+    /* Windows: use select instead of poll */
+    fd_set rfds, wfds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    int maxfd = 0;
+    int *idx_map = calloc(ev->nsources, sizeof(int));
+    int nfds = 0;
+
+    for (int i = 0; i < ev->nsources; i++) {
+        if (!ev->sources[i].active) continue;
+        int fd = ev->sources[i].fd;
+        if (ev->sources[i].events & EV_READ)  FD_SET(fd, &rfds);
+        if (ev->sources[i].events & EV_WRITE) FD_SET(fd, &wfds);
+        if (fd > maxfd) maxfd = fd;
+        idx_map[nfds++] = i;
+    }
+
+    struct timeval tv;
+    struct timeval *tvp = NULL;
+    if (timeout_ms >= 0) {
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        tvp = &tv;
+    }
+
+    int n = select(maxfd + 1, &rfds, &wfds, NULL, tvp);
+    if (n > 0) {
+        for (int i = 0; i < nfds; i++) {
+            int idx = idx_map[i];
+            int fd = ev->sources[idx].fd;
+            EventType fired = 0;
+            if (FD_ISSET(fd, &rfds)) fired |= EV_READ;
+            if (FD_ISSET(fd, &wfds)) fired |= EV_WRITE;
+            if (fired && ev->sources[idx].callback) {
+                ev->sources[idx].callback(fd, fired, ev->sources[idx].ctx);
+                ev->total_events++;
+            }
+        }
+    }
+    free(idx_map);
+    return n > 0 ? n : 0;
+#else
     struct pollfd *pfds = calloc(ev->nsources, sizeof(struct pollfd));
     int npfds = 0;
     int *idx_map = calloc(ev->nsources, sizeof(int));
@@ -412,6 +476,7 @@ static int backend_poll(EventLoop *ev, int timeout_ms) {
     free(pfds);
     free(idx_map);
     return n > 0 ? n : 0;
+#endif
 }
 
 #endif /* EVLOOP_POLL */
@@ -441,7 +506,11 @@ EventLoop *evloop_new(void) {
     ev->next_timer_id = 1;
 
     /* signal self-pipe */
+#ifdef _WIN32
+    if (_pipe(ev->signal_pipe, 256, _O_BINARY) == 0) {
+#else
     if (pipe(ev->signal_pipe) == 0) {
+#endif
         set_nonblocking(ev->signal_pipe[0]);
         set_nonblocking(ev->signal_pipe[1]);
         /* register read end with the backend */
@@ -465,11 +534,13 @@ EventLoop *evloop_new(void) {
 void evloop_free(EventLoop *ev) {
     if (!ev) return;
 
+#ifndef _WIN32
     /* restore default signal handlers */
     for (int i = 0; i < ev->nsig_handlers; i++) {
         signal(ev->sig_handlers[i].signum, SIG_DFL);
     }
     if (g_signal_loop == ev) g_signal_loop = NULL;
+#endif
 
     backend_destroy(ev);
 
@@ -570,8 +641,9 @@ int evloop_add_signal(EventLoop *ev, int signum,
     ev->sig_handlers[ev->nsig_handlers].ctx = ctx;
     ev->nsig_handlers++;
 
+#ifndef _WIN32
     g_signal_loop = ev;
-#if !defined(__wasi__) && !defined(_WIN32)
+#if !defined(__wasi__)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
@@ -581,6 +653,7 @@ int evloop_add_signal(EventLoop *ev, int signum,
 #else
     signal(signum, signal_handler);
 #endif
+#endif /* _WIN32 */
 
     return 0;
 }

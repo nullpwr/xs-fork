@@ -211,6 +211,8 @@ install: release
 WASM_SRCS = src/wasm_main.c \
             $(CORE_SRCS) $(RUNTIME_SRCS) $(TYPES_EXTRA_SRCS) $(EMBED_SRCS) \
             $(DIAG_SRCS) $(SEMA_SRCS) \
+            $(MSGPACK_SRCS) $(ASYNC_SRCS) $(REGEX_SRCS) \
+            $(COMPILER_SRCS) $(CHECKER_SRCS) $(DB_SRCS) $(NET_SRCS) \
             src/fmt/fmt.c src/doc/docgen.c src/lint/lint.c \
             src/pkg/pkg.c src/coverage/coverage.c \
             src/optimizer/optimizer.c src/optimizer/ssa.c src/optimizer/inline_cache.c \

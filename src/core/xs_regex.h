@@ -337,25 +337,34 @@ static void xr_tlist_init(xr_tlist *l) {
 }
 static void xr_tlist_free(xr_tlist *l) { free(l->threads); }
 
-static void xr_tlist_add(xr_tlist *l, xr_node *node, const int *saved,
-                          int nsub, int *gen, int curgen) {
+static void xr_tlist_add_ex(xr_tlist *l, xr_node *node, const int *saved,
+                            int nsub, int *gen, int curgen,
+                            const char *str, int sp, int slen) {
     if (!node) return;
     /* epsilon closure */
     switch (node->type) {
     case XR_JMP:
-        xr_tlist_add(l, node->out1, saved, nsub, gen, curgen);
+        xr_tlist_add_ex(l, node->out1, saved, nsub, gen, curgen, str, sp, slen);
         return;
     case XR_SPLIT:
-        xr_tlist_add(l, node->out1, saved, nsub, gen, curgen);
-        xr_tlist_add(l, node->out2, saved, nsub, gen, curgen);
+        xr_tlist_add_ex(l, node->out1, saved, nsub, gen, curgen, str, sp, slen);
+        xr_tlist_add_ex(l, node->out2, saved, nsub, gen, curgen, str, sp, slen);
         return;
     case XR_SAVE: {
         int s[XR_MAX_SUB];
         memcpy(s, saved, sizeof(s));
-        if (node->sub < XR_MAX_SUB) s[node->sub] = gen[0]; /* use gen[0] as current pos */
-        xr_tlist_add(l, node->out1, s, nsub, gen, curgen);
+        if (node->sub < XR_MAX_SUB) s[node->sub] = gen[0];
+        xr_tlist_add_ex(l, node->out1, s, nsub, gen, curgen, str, sp, slen);
         return;
     }
+    case XR_BOL:
+        if (sp == 0 || (sp > 0 && str[sp-1] == '\n'))
+            xr_tlist_add_ex(l, node->out1, saved, nsub, gen, curgen, str, sp, slen);
+        return;
+    case XR_EOL:
+        if (sp >= slen || str[sp] == '\n')
+            xr_tlist_add_ex(l, node->out1, saved, nsub, gen, curgen, str, sp, slen);
+        return;
     default:
         break;
     }
@@ -367,6 +376,11 @@ static void xr_tlist_add(xr_tlist *l, xr_node *node, const int *saved,
     xr_thread *t = &l->threads[l->n++];
     t->node = node;
     memcpy(t->saved, saved, sizeof(t->saved));
+}
+
+static void xr_tlist_add(xr_tlist *l, xr_node *node, const int *saved,
+                          int nsub, int *gen, int curgen) {
+    xr_tlist_add_ex(l, node, saved, nsub, gen, curgen, NULL, 0, 0);
 }
 
 static int xr_run_nfa(xr_node *start, const char *str, int pos, int nsub,
@@ -382,7 +396,7 @@ static int xr_run_nfa(xr_node *start, const char *str, int pos, int nsub,
     int matched = 0;
 
     gen_arr[0] = pos;
-    xr_tlist_add(&cur, start, saved, nsub, gen_arr, 0);
+    xr_tlist_add_ex(&cur, start, saved, nsub, gen_arr, 0, str, pos, slen);
 
     for (int sp = pos; ; sp++) {
         int ch = (sp < slen) ? (unsigned char)str[sp] : -1;
@@ -396,13 +410,13 @@ static int xr_run_nfa(xr_node *start, const char *str, int pos, int nsub,
             case XR_LIT:
                 if (ch == nd->ch) {
                     gen_arr[0] = sp + 1;
-                    xr_tlist_add(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1);
+                    xr_tlist_add_ex(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1, str, sp+1, slen);
                 }
                 break;
             case XR_DOT:
                 if (ch != -1 && ch != '\n') {
                     gen_arr[0] = sp + 1;
-                    xr_tlist_add(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1);
+                    xr_tlist_add_ex(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1, str, sp+1, slen);
                 }
                 break;
             case XR_CCLASS:
@@ -411,22 +425,8 @@ static int xr_run_nfa(xr_node *start, const char *str, int pos, int nsub,
                     if (nd->negated) in = !in;
                     if (in) {
                         gen_arr[0] = sp + 1;
-                        xr_tlist_add(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1);
+                        xr_tlist_add_ex(&nxt, nd->out1, t->saved, nsub, gen_arr, sp+1, str, sp+1, slen);
                     }
-                }
-                break;
-            case XR_BOL:
-                if (sp == 0 || str[sp-1] == '\n') {
-                    gen_arr[0] = sp;
-                    xr_tlist_add(&nxt, nd->out1, t->saved, nsub, gen_arr, sp);
-                    /* BOL doesn't consume, but we put it in nxt to not re-process.
-                       Actually we need to handle it differently -- put in cur at same sp. */
-                }
-                break;
-            case XR_EOL:
-                if (ch == -1 || ch == '\n') {
-                    gen_arr[0] = sp;
-                    xr_tlist_add(&nxt, nd->out1, t->saved, nsub, gen_arr, sp);
                 }
                 break;
             case XR_MATCH:
@@ -495,7 +495,7 @@ static inline int regcomp(regex_t *preg, const char *pattern, int cflags) {
     preg->nnodes = ps.nnodes;
     preg->cap = ps.cap;
     preg->start = save0_start;
-    preg->nsub = ps.nsub;
+    preg->nsub = ps.nsub - 1; /* POSIX: nsub = number of sub-groups, not counting group 0 */
     return 0;
 }
 

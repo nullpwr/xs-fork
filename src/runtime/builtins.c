@@ -15,7 +15,8 @@
 #include "bearssl_aead.h"
 #endif
 #include <strings.h>
-#ifdef __MINGW32__
+/* custom NFA engine uses 'nsub', POSIX uses 're_nsub' */
+#ifndef re_nsub
 #define re_nsub nsub
 #endif
 
@@ -57,18 +58,8 @@ void xs_set_argv(int argc, char **argv) {
 #  include <sys/stat.h>
 #  include <errno.h>
 #endif
-#if defined(__has_include)
-#  if __has_include(<regex.h>)
-#    include <regex.h>
-#    define XS_HAS_REGEX 1
-#  endif
-#elif !defined(__MINGW32__)
-#  include <regex.h>
-#  define XS_HAS_REGEX 1
-#endif
-#ifndef XS_HAS_REGEX
+/* always use the custom NFA regex engine for consistent cross-platform behavior */
 #include "core/xs_regex.h"
-#endif
 #include <errno.h>
 
 #ifndef M_PI
@@ -7601,6 +7592,10 @@ static Value *native_fs_temp_dir(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
     const char *t = getenv("TMPDIR");
     if (!t) t = "/tmp";
+#ifndef _WIN32
+    char buf[4096];
+    if (realpath(t, buf)) return xs_str(buf);
+#endif
     return xs_str(t);
 }
 
