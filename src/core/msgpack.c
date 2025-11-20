@@ -2,7 +2,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #endif
 
 /* msgpack.c - full MessagePack encoder/decoder for XS values.

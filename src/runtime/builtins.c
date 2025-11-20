@@ -5747,6 +5747,7 @@ static Value *native_crypto_base64_decode(Interp *ig, Value **a, int n) {
     r[ri] = '\0'; Value *v2 = xs_str(r); free(r); return v2;
 }
 
+#ifndef __wasi__
 /* crypto.sha1(data) -> hex string using BearSSL */
 static Value *native_crypto_sha1(Interp *ig, Value **a, int n) {
     (void)ig;
@@ -6031,6 +6032,8 @@ static Value *native_crypto_aes_decrypt(Interp *ig, Value **a, int n) {
     }
 }
 
+#endif /* __wasi__ */
+
 /* crypto.constant_time_eq(a, b) -> bool */
 static Value *native_crypto_constant_time_eq(Interp *ig, Value **a2, int n) {
     (void)ig;
@@ -6046,9 +6049,15 @@ static Value *native_crypto_constant_time_eq(Interp *ig, Value **a2, int n) {
 Value *make_crypto_module(void) {
     XSMap *m = map_new();
     map_set(m, "sha256",           xs_native(native_crypto_sha256));
+#ifndef __wasi__
     map_set(m, "sha1",             xs_native(native_crypto_sha1));
-    map_set(m, "md5",              xs_native(native_crypto_md5));
     map_set(m, "hmac_sha256",      xs_native(native_crypto_hmac_sha256));
+    map_set(m, "hkdf",             xs_native(native_crypto_hkdf));
+    map_set(m, "pbkdf2",           xs_native(native_crypto_pbkdf2));
+    map_set(m, "aes_encrypt",      xs_native(native_crypto_aes_encrypt));
+    map_set(m, "aes_decrypt",      xs_native(native_crypto_aes_decrypt));
+#endif
+    map_set(m, "md5",              xs_native(native_crypto_md5));
     map_set(m, "hash",             xs_native(native_crypto_hash));
     map_set(m, "hex_encode",       xs_native(native_crypto_hex_encode));
     map_set(m, "hex_decode",       xs_native(native_crypto_hex_decode));
@@ -6057,10 +6066,6 @@ Value *make_crypto_module(void) {
     map_set(m, "random_bytes",     xs_native(native_crypto_random_bytes));
     map_set(m, "random_int",       xs_native(native_crypto_random_int));
     map_set(m, "uuid4",            xs_native(native_crypto_uuid4));
-    map_set(m, "hkdf",             xs_native(native_crypto_hkdf));
-    map_set(m, "pbkdf2",           xs_native(native_crypto_pbkdf2));
-    map_set(m, "aes_encrypt",      xs_native(native_crypto_aes_encrypt));
-    map_set(m, "aes_decrypt",      xs_native(native_crypto_aes_decrypt));
     map_set(m, "constant_time_eq", xs_native(native_crypto_constant_time_eq));
     return xs_module(m);
 }

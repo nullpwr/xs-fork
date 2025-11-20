@@ -25,6 +25,9 @@
 #elif defined(__APPLE__)
 #  include <sys/event.h>
 #  define EVLOOP_KQUEUE 1
+#elif defined(_WIN32)
+#  include <winsock2.h>
+#  define EVLOOP_POLL 1
 #else
 #  include <poll.h>
 #  define EVLOOP_POLL 1
