@@ -20,16 +20,25 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <io.h>
+#include <direct.h>
+#define close closesocket
+#define ssize_t int
+#else
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#endif
+#include <sys/stat.h>
 #include <dirent.h>
 #include <time.h>
-#include <signal.h>
 
 /* ================================================================
  *  Status code table
@@ -1328,7 +1337,9 @@ int http_server_start(HTTPServer *s) {
 
     /* set socket options */
     int opt = 1;
+#ifdef SO_REUSEADDR
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#endif
 #ifdef SO_REUSEPORT
     setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif

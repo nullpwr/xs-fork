@@ -7601,10 +7601,22 @@ static Value *native_fs_temp_dir(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_temp_file(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
-    char tmpl[] = "/tmp/xs_tmp_XXXXXX";
+    const char *t = getenv("TMPDIR");
+    if (!t) t = "/tmp";
+    char resolved[4096];
+#ifndef _WIN32
+    if (realpath(t, resolved)) t = resolved;
+#endif
+    char tmpl[4096];
+    snprintf(tmpl, sizeof(tmpl), "%s/xs_tmp_XXXXXX", t);
+#ifdef _WIN32
+    if (_mktemp(tmpl)) { FILE *f = fopen(tmpl, "w"); if (f) fclose(f); }
+    else return xs_str("");
+#else
     int fd = mkstemp(tmpl);
     if (fd < 0) return xs_str("");
     close(fd);
+#endif
     return xs_str(tmpl);
 }
 
