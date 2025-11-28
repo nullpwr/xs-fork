@@ -1,5 +1,7 @@
 -- filesystem module tests
 import fs
+import os
+let is_windows = os.platform == "windows"
 
 -- write and read
 let tmp = fs.temp_file()
@@ -68,7 +70,11 @@ assert(fs.temp_dir().len() > 0)
 
 -- abs returns absolute path
 let abs_path = fs.abs(".")
-assert(abs_path.starts_with("/"))
+if is_windows {
+    assert(abs_path.len() >= 3)
+} else {
+    assert(abs_path.starts_with("/"))
+}
 
 -- read_bytes / write_bytes
 let btmp = fs.temp_file()
@@ -138,23 +144,27 @@ fs.rmdir(walk_dir)
 let glob_results = fs.glob("tests/test_*.xs")
 assert(glob_results.len() >= 10)
 
--- chmod
-let ch_tmp = fs.temp_file()
-fs.write(ch_tmp, "test")
-assert_eq(fs.chmod(ch_tmp, 0o644), true)
-fs.remove(ch_tmp)
+-- chmod (unix only, windows has limited permission model)
+if !is_windows {
+    let ch_tmp = fs.temp_file()
+    fs.write(ch_tmp, "test")
+    assert_eq(fs.chmod(ch_tmp, 0o644), true)
+    fs.remove(ch_tmp)
+}
 
--- symlink / readlink / realpath
-let sym_src = fs.temp_file()
-let sym_lnk = sym_src + ".link"
-fs.write(sym_src, "symlink test")
-fs.symlink(sym_src, sym_lnk)
-assert_eq(fs.exists(sym_lnk), true)
-let target = fs.readlink(sym_lnk)
-assert_eq(target, sym_src)
-let real = fs.realpath(sym_lnk)
-assert_eq(real, sym_src)
-fs.remove(sym_lnk)
-fs.remove(sym_src)
+-- symlink / readlink / realpath (unix only, mingw has no symlink support)
+if !is_windows {
+    let sym_src = fs.temp_file()
+    let sym_lnk = sym_src + ".link"
+    fs.write(sym_src, "symlink test")
+    fs.symlink(sym_src, sym_lnk)
+    assert_eq(fs.exists(sym_lnk), true)
+    let target = fs.readlink(sym_lnk)
+    assert_eq(target, sym_src)
+    let real = fs.realpath(sym_lnk)
+    assert_eq(real, sym_src)
+    fs.remove(sym_lnk)
+    fs.remove(sym_src)
+}
 
 print("test_fs: all passed")

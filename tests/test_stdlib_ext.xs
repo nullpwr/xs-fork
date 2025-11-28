@@ -116,7 +116,7 @@ assert(pid > 0)
 let cwd = process.cwd()
 assert(cwd.len() > 0)
 
-let rc = process.exec("true")
+let rc = process.exec("echo .")
 assert_eq(rc, 0)
 
 -- process.spawn with pipes

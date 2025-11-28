@@ -35,25 +35,21 @@ void xs_set_argv(int argc, char **argv) {
     g_xs_argc = argc;
     g_xs_argv = argv;
 }
-#if !defined(__MINGW32__) && !defined(__wasi__)
+#ifndef __wasi__
 #  include <unistd.h>
-#  if !defined(__wasi__)
-#    include <sys/select.h>
-#  endif
-#endif
-#if !defined(__MINGW32__) && !defined(__wasi__)
 #  include <sys/time.h>
 #  include <sys/stat.h>
-#  if !defined(__wasi__)
-#    include <dirent.h>
-#    include <glob.h>
+#  include <dirent.h>
+#  include <glob.h>
+#  include <signal.h>
+#  if !defined(__MINGW32__)
+#    include <sys/select.h>
+#    include <sys/wait.h>
+#    include <netinet/tcp.h>
 #  endif
 #  if defined(__linux__)
 #    include <sys/inotify.h>
 #  endif
-#  include <sys/wait.h>
-#  include <signal.h>
-#  include <netinet/tcp.h>
 #else
 #  include <sys/stat.h>
 #  include <errno.h>
@@ -61,6 +57,23 @@ void xs_set_argv(int argc, char **argv) {
 /* always use the custom NFA regex engine for consistent cross-platform behavior */
 #include "core/xs_regex.h"
 #include <errno.h>
+
+#ifdef _WIN32
+#include <windows.h>
+static void xs_clock_realtime(double *sec_out, int64_t *ms_out, int64_t *ns_out) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    /* FILETIME is 100ns intervals since 1601-01-01 */
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    t -= 116444736000000000ULL; /* epoch offset to 1970-01-01 */
+    if (sec_out) *sec_out = (double)t / 10000000.0;
+    if (ms_out) *ms_out = (int64_t)(t / 10000);
+    if (ns_out) *ns_out = (int64_t)(t * 100);
+}
+static double xs_clock_monotonic(void) {
+    return (double)GetTickCount64() / 1000.0;
+}
+#endif
 
 #ifndef M_PI
 #define M_PI   3.14159265358979323846
@@ -1261,27 +1274,41 @@ Value *make_math_module(void) {
 /* time module */
 static Value *native_time_now(Interp *i, Value **args, int argc) {
     (void)i; (void)args; (void)argc;
+#ifdef _WIN32
+    double s; xs_clock_realtime(&s, NULL, NULL);
+    return xs_float(s);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return xs_float((double)ts.tv_sec + (double)ts.tv_nsec/1e9);
+#endif
 }
 
 static Value *native_time_sleep(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return value_incref(XS_NULL_VAL);
     double secs = args[0]->tag==XS_FLOAT?args[0]->f:(double)args[0]->i;
+#ifdef _WIN32
+    Sleep((DWORD)(secs * 1000));
+#else
     struct timespec ts;
     ts.tv_sec  = (time_t)secs;
     ts.tv_nsec = (long)((secs - ts.tv_sec) * 1e9);
     nanosleep(&ts, NULL);
+#endif
     return value_incref(XS_NULL_VAL);
 }
 
 static Value *native_time_stopwatch(Interp *i, Value **args, int argc) {
     (void)i; (void)args; (void)argc;
+    double start;
+#ifdef _WIN32
+    xs_clock_realtime(&start, NULL, NULL);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    double start = (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
+    start = (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
+#endif
     Value *sw = xs_map_new();
     Value *sv = xs_float(start);
     map_set(sw->map, "_start", sv);
@@ -1292,8 +1319,13 @@ static Value *native_time_stopwatch(Interp *i, Value **args, int argc) {
 /* time module extra */
 static Value *native_time_millis(Interp *i, Value **a, int n) {
     (void)i;(void)a;(void)n;
+#ifdef _WIN32
+    int64_t ms; xs_clock_realtime(NULL, &ms, NULL);
+    return xs_int(ms);
+#else
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
     return xs_int((int64_t)(ts.tv_sec*1000 + ts.tv_nsec/1000000));
+#endif
 }
 #define TIME_COMPONENT(name, field) \
     static Value *native_time_##name(Interp *i, Value **a, int n) { \
@@ -1328,9 +1360,13 @@ static Value *native_time_format(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_monotonic(Interp *ig, Value **a, int n) {
     (void)ig;(void)a;(void)n;
+#ifdef _WIN32
+    return xs_float(xs_clock_monotonic());
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC,&ts);
     return xs_float((double)ts.tv_sec+(double)ts.tv_nsec/1e9);
+#endif
 }
 static Value *native_time_parse(Interp *ig, Value **a, int n) {
     (void)ig;
@@ -1364,8 +1400,13 @@ static Value *native_time_now_ms(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_now_ns(Interp *ig, Value **a, int n) {
     (void)ig;(void)a;(void)n;
+#ifdef _WIN32
+    int64_t ns; xs_clock_realtime(NULL, NULL, &ns);
+    return xs_int(ns);
+#else
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
     return xs_int((int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec);
+#endif
 }
 static Value *native_time_date(Interp *ig, Value **a, int n) {
     (void)ig;
@@ -2214,9 +2255,63 @@ static Value *native_process_spawn_kill(Interp *ig, Value **a, int n) {
 #endif
 }
 
+#if defined(__MINGW32__)
+/* Windows spawn via _popen - captures stdout, uses pclose for wait */
+static Value *native_process_spawn_stdout_read_win(Interp *ig, Value **a, int n) {
+    (void)ig;
+    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    Value *fpv = map_get(a[0]->map, "_fp");
+    if (!fpv || fpv->tag != XS_INT || fpv->i == 0) return value_incref(XS_NULL_VAL);
+    FILE *fp = (FILE*)(uintptr_t)fpv->i;
+    char buf[8192]; int total = 0;
+    while (total < (int)sizeof(buf)-1) {
+        int c = fgetc(fp);
+        if (c == EOF) break;
+        buf[total++] = (char)c;
+    }
+    buf[total] = '\0';
+    return xs_str(buf);
+}
+static Value *native_process_spawn_wait_win(Interp *ig, Value **a, int n) {
+    (void)ig;
+    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return xs_int(-1);
+    Value *fpv = map_get(a[0]->map, "_fp");
+    if (!fpv || fpv->tag != XS_INT || fpv->i == 0) return xs_int(-1);
+    FILE *fp = (FILE*)(uintptr_t)fpv->i;
+    int rc = _pclose(fp);
+    map_set(a[0]->map, "_fp", xs_int(0));
+    return xs_int(rc);
+}
+#endif
+
 static Value *native_process_spawn(Interp *ig, Value **a, int n) {
     (void)ig;
-#if !defined(__MINGW32__) && !defined(__wasi__)
+#if defined(__MINGW32__)
+    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    const char *cmd = a[0]->s;
+    char cmdline[4096];
+    if (n >= 2 && a[1]->tag == XS_ARRAY) {
+        int pos = snprintf(cmdline, sizeof(cmdline), "%s", cmd);
+        for (int j = 0; j < a[1]->arr->len && pos < (int)sizeof(cmdline)-2; j++) {
+            Value *av = a[1]->arr->items[j];
+            pos += snprintf(cmdline+pos, sizeof(cmdline)-pos, " %s",
+                           (av->tag == XS_STR) ? av->s : "");
+        }
+    } else {
+        snprintf(cmdline, sizeof(cmdline), "%s", cmd);
+    }
+    FILE *fp = _popen(cmdline, "r");
+    if (!fp) return value_incref(XS_NULL_VAL);
+    XSMap *proc = map_new();
+    map_set(proc, "pid", xs_int(0));
+    map_set(proc, "_fp", xs_int((int64_t)(uintptr_t)fp));
+    map_set(proc, "stdout_read", xs_native(native_process_spawn_stdout_read_win));
+    map_set(proc, "stderr_read", xs_native(native_process_spawn_stdout_read_win));
+    map_set(proc, "stdin_write", xs_native(native_process_spawn_stdin_write));
+    map_set(proc, "wait", xs_native(native_process_spawn_wait_win));
+    map_set(proc, "kill", xs_native(native_process_spawn_kill));
+    return xs_module(proc);
+#elif !defined(__wasi__)
     if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
     const char *cmd = a[0]->s;
 
@@ -7821,7 +7916,7 @@ static Value *native_fs_walk(Interp *ig, Value **a, int n) {
 /* fs.glob(pattern) - match files by glob pattern */
 static Value *native_fs_glob(Interp *ig, Value **a, int n) {
     (void)ig;
-#if !defined(__MINGW32__) && !defined(__wasi__)
+#if !defined(__wasi__)
     if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
     glob_t g;
     memset(&g, 0, sizeof(g));

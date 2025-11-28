@@ -3,28 +3,11 @@
 cd "$(dirname "$0")/.."
 pass=0
 fail=0
-skip=0
 fails=""
-
-# detect platform
-is_windows=0
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) is_windows=1 ;;
-esac
-
-# tests that need unix-specific features
-win_skip="test_async test_fs test_stdlib_ext"
 
 # language tests (.xs files)
 for f in tests/test_*.xs; do
     name=$(basename "$f" .xs)
-
-    # skip known windows-incompatible tests
-    if [ "$is_windows" -eq 1 ]; then
-        case " $win_skip " in
-            *" $name "*) skip=$((skip + 1)); echo "  skip  $name (windows)"; continue ;;
-        esac
-    fi
 
     if [ "$name" = "test_vm" ]; then
         output=$(./xs --vm "$f" 2>&1)
@@ -84,11 +67,7 @@ if [ -f tests/test_cli.sh ]; then
 fi
 
 echo ""
-if [ $skip -gt 0 ]; then
-    echo "results: $pass passed, $fail failed, $skip skipped"
-else
-    echo "results: $pass passed, $fail failed"
-fi
+echo "results: $pass passed, $fail failed"
 if [ -n "$fails" ]; then
     echo -e "\nfailed tests:$fails"
     exit 1

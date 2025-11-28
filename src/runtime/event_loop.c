@@ -43,10 +43,18 @@
  *  Time helpers
  * ---------------------------------------------------------------- */
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 int64_t evloop_now_ms(void) {
+#ifdef _WIN32
+    return (int64_t)GetTickCount64();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
 /* ----------------------------------------------------------------
@@ -544,8 +552,13 @@ void evloop_free(EventLoop *ev) {
 
     backend_destroy(ev);
 
+#ifdef _WIN32
+    if (ev->signal_pipe[0] >= 0) _close(ev->signal_pipe[0]);
+    if (ev->signal_pipe[1] >= 0) _close(ev->signal_pipe[1]);
+#else
     if (ev->signal_pipe[0] >= 0) close(ev->signal_pipe[0]);
     if (ev->signal_pipe[1] >= 0) close(ev->signal_pipe[1]);
+#endif
 
     free(ev->sources);
     free(ev->timers);
