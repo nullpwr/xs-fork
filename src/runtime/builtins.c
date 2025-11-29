@@ -35,45 +35,26 @@ void xs_set_argv(int argc, char **argv) {
     g_xs_argc = argc;
     g_xs_argv = argv;
 }
-#ifndef __wasi__
+#if !defined(__MINGW32__) && !defined(__wasi__)
 #  include <unistd.h>
+#  include <sys/select.h>
 #  include <sys/time.h>
 #  include <sys/stat.h>
 #  include <dirent.h>
 #  include <glob.h>
-#  include <signal.h>
-#  if !defined(__MINGW32__)
-#    include <sys/select.h>
-#    include <sys/wait.h>
-#    include <netinet/tcp.h>
-#  endif
 #  if defined(__linux__)
 #    include <sys/inotify.h>
 #  endif
-#else
+#  include <sys/wait.h>
+#  include <signal.h>
+#  include <netinet/tcp.h>
+#elif !defined(__MINGW32__)
 #  include <sys/stat.h>
 #  include <errno.h>
 #endif
 /* always use the custom NFA regex engine for consistent cross-platform behavior */
 #include "core/xs_regex.h"
 #include <errno.h>
-
-#ifdef _WIN32
-#include <windows.h>
-static void xs_clock_realtime(double *sec_out, int64_t *ms_out, int64_t *ns_out) {
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    /* FILETIME is 100ns intervals since 1601-01-01 */
-    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    t -= 116444736000000000ULL; /* epoch offset to 1970-01-01 */
-    if (sec_out) *sec_out = (double)t / 10000000.0;
-    if (ms_out) *ms_out = (int64_t)(t / 10000);
-    if (ns_out) *ns_out = (int64_t)(t * 100);
-}
-static double xs_clock_monotonic(void) {
-    return (double)GetTickCount64() / 1000.0;
-}
-#endif
 
 #ifndef M_PI
 #define M_PI   3.14159265358979323846
@@ -1274,41 +1255,27 @@ Value *make_math_module(void) {
 /* time module */
 static Value *native_time_now(Interp *i, Value **args, int argc) {
     (void)i; (void)args; (void)argc;
-#ifdef _WIN32
-    double s; xs_clock_realtime(&s, NULL, NULL);
-    return xs_float(s);
-#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return xs_float((double)ts.tv_sec + (double)ts.tv_nsec/1e9);
-#endif
 }
 
 static Value *native_time_sleep(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return value_incref(XS_NULL_VAL);
     double secs = args[0]->tag==XS_FLOAT?args[0]->f:(double)args[0]->i;
-#ifdef _WIN32
-    Sleep((DWORD)(secs * 1000));
-#else
     struct timespec ts;
     ts.tv_sec  = (time_t)secs;
     ts.tv_nsec = (long)((secs - ts.tv_sec) * 1e9);
     nanosleep(&ts, NULL);
-#endif
     return value_incref(XS_NULL_VAL);
 }
 
 static Value *native_time_stopwatch(Interp *i, Value **args, int argc) {
     (void)i; (void)args; (void)argc;
-    double start;
-#ifdef _WIN32
-    xs_clock_realtime(&start, NULL, NULL);
-#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    start = (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
-#endif
+    double start = (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
     Value *sw = xs_map_new();
     Value *sv = xs_float(start);
     map_set(sw->map, "_start", sv);
@@ -1319,13 +1286,8 @@ static Value *native_time_stopwatch(Interp *i, Value **args, int argc) {
 /* time module extra */
 static Value *native_time_millis(Interp *i, Value **a, int n) {
     (void)i;(void)a;(void)n;
-#ifdef _WIN32
-    int64_t ms; xs_clock_realtime(NULL, &ms, NULL);
-    return xs_int(ms);
-#else
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
     return xs_int((int64_t)(ts.tv_sec*1000 + ts.tv_nsec/1000000));
-#endif
 }
 #define TIME_COMPONENT(name, field) \
     static Value *native_time_##name(Interp *i, Value **a, int n) { \
@@ -1360,13 +1322,9 @@ static Value *native_time_format(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_monotonic(Interp *ig, Value **a, int n) {
     (void)ig;(void)a;(void)n;
-#ifdef _WIN32
-    return xs_float(xs_clock_monotonic());
-#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC,&ts);
     return xs_float((double)ts.tv_sec+(double)ts.tv_nsec/1e9);
-#endif
 }
 static Value *native_time_parse(Interp *ig, Value **a, int n) {
     (void)ig;
@@ -1400,13 +1358,8 @@ static Value *native_time_now_ms(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_now_ns(Interp *ig, Value **a, int n) {
     (void)ig;(void)a;(void)n;
-#ifdef _WIN32
-    int64_t ns; xs_clock_realtime(NULL, NULL, &ns);
-    return xs_int(ns);
-#else
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
     return xs_int((int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec);
-#endif
 }
 static Value *native_time_date(Interp *ig, Value **a, int n) {
     (void)ig;

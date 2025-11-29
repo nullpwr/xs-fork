@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
+#include "core/xs_compat.h"
 #include "runtime/event_loop.h"
 #include <stdlib.h>
 #include <string.h>
@@ -43,18 +44,10 @@
  *  Time helpers
  * ---------------------------------------------------------------- */
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 int64_t evloop_now_ms(void) {
-#ifdef _WIN32
-    return (int64_t)GetTickCount64();
-#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
 }
 
 /* ----------------------------------------------------------------

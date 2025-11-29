@@ -101,17 +101,27 @@ static inline int xs_glob(const char *pattern, int flags, void *unused,
     (void)flags; (void)unused;
     pglob->gl_pathc = 0;
     pglob->gl_pathv = NULL;
+    /* extract directory prefix from pattern for full path construction */
+    const char *last_sep = strrchr(pattern, '/');
+    if (!last_sep) last_sep = strrchr(pattern, '\\');
+    size_t prefix_len = last_sep ? (size_t)(last_sep - pattern + 1) : 0;
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
     size_t cap = 8;
     pglob->gl_pathv = (char**)malloc(cap * sizeof(char*));
     do {
+        if (fd.cFileName[0] == '.' && (fd.cFileName[1] == '\0' ||
+            (fd.cFileName[1] == '.' && fd.cFileName[2] == '\0'))) continue;
         if (pglob->gl_pathc >= cap) {
             cap *= 2;
             pglob->gl_pathv = (char**)realloc(pglob->gl_pathv, cap*sizeof(char*));
         }
-        pglob->gl_pathv[pglob->gl_pathc++] = _strdup(fd.cFileName);
+        size_t nlen = strlen(fd.cFileName);
+        char *full = (char*)malloc(prefix_len + nlen + 1);
+        if (prefix_len) memcpy(full, pattern, prefix_len);
+        memcpy(full + prefix_len, fd.cFileName, nlen + 1);
+        pglob->gl_pathv[pglob->gl_pathc++] = full;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return 0;
