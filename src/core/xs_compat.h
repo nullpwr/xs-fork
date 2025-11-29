@@ -50,6 +50,7 @@ static inline int xs_clock_gettime(int clk_id, struct timespec *ts) {
 #endif /* XS_CLOCK_GETTIME_DEFINED */
 
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include <stdio.h>
 #include <process.h>
