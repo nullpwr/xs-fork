@@ -11,6 +11,10 @@ typedef struct {
     int       strict;
     int       n_errors;
     SymTab   *st;
+    /* Set when the program contains a `use plugin "..."` or `load "..."`
+       statement. Plugins can inject arbitrary globals at load time, so
+       undefined-name errors (T0002) are downgraded to warnings in that case. */
+    int       has_plugin_load;
 } SemaCtx;
 
 void sema_init(SemaCtx *ctx, int lenient, int strict);

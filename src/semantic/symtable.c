@@ -98,16 +98,22 @@ void sym_mark_used(SymTab *st, const char *name) {
 
 Symbol **scope_unused_locals(SymTab *st, int *out_n) {
     Scope *sc = st->current;
+    /* A single leading underscore marks a binding as intentionally unused, so
+       skip those here (and treat names like "_server" as already suppressed). */
+    #define XS_UNUSED_SUPPRESSED(name) ((name) && (name)[0] == '_')
     int n = 0;
     for (int i = 0; i < sc->n_buckets; i++)
         for (Symbol *s = sc->buckets[i]; s; s = s->next)
-            if ((s->kind == SYM_LOCAL) && !s->is_used) n++;
+            if ((s->kind == SYM_LOCAL) && !s->is_used &&
+                !XS_UNUSED_SUPPRESSED(s->name)) n++;
     if (n == 0) { *out_n = 0; return NULL; }
     Symbol **arr = xs_malloc(sizeof(Symbol*) * n);
     int idx = 0;
     for (int i = 0; i < sc->n_buckets; i++)
         for (Symbol *s = sc->buckets[i]; s; s = s->next)
-            if ((s->kind == SYM_LOCAL) && !s->is_used) arr[idx++] = s;
+            if ((s->kind == SYM_LOCAL) && !s->is_used &&
+                !XS_UNUSED_SUPPRESSED(s->name)) arr[idx++] = s;
     *out_n = n;
+    #undef XS_UNUSED_SUPPRESSED
     return arr;
 }

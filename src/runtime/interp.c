@@ -674,7 +674,15 @@ Interp *interp_new(const char *filename) {
     Interp *i = xs_calloc(1, sizeof(Interp));
     i->globals   = env_new(NULL);
     i->env       = env_incref(i->globals);
-    i->max_depth = 1000;
+    /* Lowered from 1000: at ~700 C frames the default 8 MB stack starts to be
+       cramped by try/catch + diagnostic paths, which could segfault before this
+       guard fired. 500 leaves headroom for the diagnostic to render safely. */
+    i->max_depth = 500;
+    const char *md = getenv("XS_MAX_DEPTH");
+    if (md) {
+        int v = atoi(md);
+        if (v > 0) i->max_depth = v;
+    }
     i->filename  = filename ? filename : "<stdin>";
     i->call_stack     = NULL;
     i->call_stack_len = 0;
@@ -828,6 +836,23 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
                 array_push(rest_arr->arr, value_incref(arr->items[j]));
             env_define(env, pat->pat_slice.rest, rest_arr, 1);
             value_decref(rest_arr);
+        }
+        return 1;
+    }
+    case NODE_PAT_MAP: {
+        /* Accept any map-shaped value. Closed patterns (no `..`) require the
+           set of keys to match exactly; open patterns allow extra keys. */
+        XSMap *m = NULL;
+        if (val->tag == XS_MAP || val->tag == XS_MODULE) m = val->map;
+        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
+        else if (val->tag == XS_INST) m = val->inst->fields;
+        if (!m) return 0;
+        for (int j = 0; j < pat->pat_map.nfields; j++) {
+            const char *k = pat->pat_map.keys[j];
+            Value *fv = map_get(m, k);
+            if (!fv) return 0; /* key missing -> no match */
+            Node *sub = pat->pat_map.sub[j];
+            if (!bind_pattern(i, sub, fv, env, mutable)) return 0;
         }
         return 1;
     }
@@ -1019,6 +1044,21 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
         regfree(&re);
         return ok;
     }
+    case NODE_PAT_MAP: {
+        XSMap *m = NULL;
+        if (val->tag == XS_MAP || val->tag == XS_MODULE) m = val->map;
+        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
+        else if (val->tag == XS_INST) m = val->inst->fields;
+        if (!m) return 0;
+        for (int j = 0; j < pat->pat_map.nfields; j++) {
+            const char *k = pat->pat_map.keys[j];
+            Value *fv = map_get(m, k);
+            if (!fv) return 0;
+            Node *sub = pat->pat_map.sub[j];
+            if (!match_pattern(i, sub, fv, env)) return 0;
+        }
+        return 1;
+    }
     default: return 1;
     }
 }
@@ -1099,12 +1139,17 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
                     fn->name ? fn->name : "<anonymous>", fn->deprecated_msg);
         }
         if (i->depth >= i->max_depth) {
-            xs_runtime_error(i->current_span,
-                    "maximum call depth exceeded here",
-                    "consider using iteration instead of deep recursion",
-                    "stack overflow in '%s'",
-                    fn->name ? fn->name : "<anonymous>");
-            exit(1);
+            /* Raise as a catchable throw instead of exit() so that
+               try/catch around deep recursion can recover. */
+            char msg[160];
+            snprintf(msg, sizeof msg, "stack overflow in '%s' (depth %d)",
+                     fn->name ? fn->name : "<anonymous>", i->depth);
+            Value *err = xs_error_new("StackOverflow", msg, NULL);
+            if (i->cf.value) value_decref(i->cf.value);
+            i->cf.signal = CF_THROW;
+            i->cf.value  = err;
+            interp_pop_frame(i);
+            return value_incref(XS_NULL_VAL);
         }
         i->depth++;
 
@@ -4018,7 +4063,12 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
 
     Value *left  = EVAL(i, n->binop.left);
+    if (i->cf.signal) return left;
     Value *right = EVAL(i, n->binop.right);
+    if (i->cf.signal) {
+        value_decref(left);
+        return right;
+    }
     Value *result = NULL;
 
     if (strcmp(op, "<=>") == 0) {
@@ -4946,6 +4996,12 @@ Value *interp_eval(Interp *i, Node *n) {
                 args[j] = value_incref(XS_NULL_VAL);
             } else {
                 args[j] = EVAL(i, an);
+                if (i->cf.signal) {
+                    value_decref(callee);
+                    for (int k = 0; k <= j; k++) if (args[k]) value_decref(args[k]);
+                    free(args);
+                    return value_incref(XS_NULL_VAL);
+                }
             }
         }
 do_call: ;
@@ -5498,6 +5554,12 @@ do_call: ;
             value_decref(callee);
         }
         Value *val = n->ret.value ? EVAL(i, n->ret.value) : value_incref(XS_NULL_VAL);
+        /* If evaluating the return expression propagated a throw (or any
+           other signal), do not overwrite it with CF_RETURN. */
+        if (i->cf.signal) {
+            value_decref(val);
+            return value_incref(XS_NULL_VAL);
+        }
         if (i->cf.value) value_decref(i->cf.value);
         i->cf.signal = CF_RETURN;
         i->cf.value  = val;
@@ -8445,7 +8507,7 @@ static void exec_load_stmt(Interp *i, Node *stmt) {
     tmp_use.span = stmt->span;
     tmp_use.use_.path = stmt->load_.path;
     tmp_use.use_.is_plugin = 1;
-    tmp_use.use_.sandbox_flags = 0;
+    tmp_use.use_.sandbox_flags = stmt->load_.sandbox_flags;
     tmp_use.use_.alias = NULL;
     tmp_use.use_.names = NULL;
     tmp_use.use_.name_aliases = NULL;
@@ -9416,6 +9478,9 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         if (stmt->use_.is_plugin) {
+            /* `use plugin "path"` is deprecated in favor of the `load "path"`
+               syntax from the programmable-pipeline spec. Both still work,
+               but `load` is the canonical form going forward. */
             fprintf(stderr, "warning: 'use plugin' is deprecated, use 'load' instead (at %s:%d)\n",
                     stmt->span.file ? stmt->span.file : "<unknown>", stmt->span.line);
             struct stat pst;
@@ -9959,6 +10024,12 @@ void interp_exec(Interp *i, Node *stmt) {
             value_decref(callee);
         }
         Value *val = stmt->ret.value ? EVAL(i, stmt->ret.value) : value_incref(XS_NULL_VAL);
+        /* If evaluating the return expression propagated a throw (or any
+           other signal), do not overwrite it with CF_RETURN. */
+        if (i->cf.signal) {
+            value_decref(val);
+            break;
+        }
         /* after_eval hooks for return nodes */
         if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
             g_in_eval_hook = 1;
@@ -10400,6 +10471,9 @@ void interp_run(Interp *i, Node *program) {
                         sn->span.line, sn->span.col, s);
                 free(s);
                 CF_CLEAR(i);
+                /* Record that the program failed so the CLI can exit non-zero. */
+                i->had_unhandled_exception = 1;
+                break;
             }
         } else if (i->cf.signal) {
             CF_CLEAR(i);

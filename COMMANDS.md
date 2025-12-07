@@ -108,6 +108,7 @@ xs repl
 | `:modules` | List all available standard library modules |
 | `:tour` | Print a guided language tour |
 | `:theme dark\|light` | Switch color theme |
+| `:test [pattern]` | Run test files (glob on `test_*.xs` / `*_test.xs`) |
 | `:quit` / `:exit` | Exit the REPL |
 
 **Features:**
@@ -445,7 +446,7 @@ re-parsed and re-run with a fresh interpreter.
 
 ### `xs new <name>`
 
-Scaffold a new XS project.
+Scaffold a new XS project in a new directory.
 
 ```bash
 xs new myapp
@@ -455,10 +456,31 @@ Creates:
 
 ```
 myapp/
-|-- xs.toml          # package manifest
-|-- src/
-|   └-- main.xs      # hello world entry point
+|-- xs.toml                 # package manifest
+|-- src/main.xs             # hello world entry point
+|-- tests/test_main.xs      # starter test
+|-- README.md
 |-- .gitignore
+```
+
+### `xs init`
+
+Initialize an XS project in the current directory. Writes `xs.toml`, creates
+`src/main.xs` and `tests/`, and adds a `.gitignore` if none exists. Fails if
+`xs.toml` already exists.
+
+```bash
+xs init
+```
+
+### `xs add <name>`
+
+Add a dependency. Accepts a bare package name or a `user/repo` shortform.
+Updates `xs.toml` and installs to `xs_lib/`.
+
+```bash
+xs add http-client
+xs add user/repo
 ```
 
 ### `xs install [pkg]`
@@ -501,20 +523,32 @@ xs publish
 
 ### `xs search <query>`
 
-Search the package registry.
+Search the package registry. Requires `[registry]` in `xs.toml`; otherwise
+prints `xs search: no registry configured`.
 
 ```bash
 xs search json
 ```
 
+### `xs list`
+
+List packages installed in the current project (`xs_lib/`).
+
+```bash
+xs list
+```
+
 ### `xs pkg <subcommand>`
 
-Alternative package management interface. Subcommands: `install`, `remove`,
-`update`, `list`, `publish`, `search`.
+Alternative package management interface. Implemented subcommands:
+`install`, `remove`, `update`, `list`, `add`. (The usage string also mentions
+`publish` and `search`, but those are not wired up under `pkg`; use the
+top-level `xs publish` / `xs search` instead.)
 
 ```bash
 xs pkg list             # list installed packages
 xs pkg install foo      # install a package
+xs pkg add user/repo    # add a dependency
 ```
 
 ---
@@ -583,21 +617,26 @@ These flags work with any subcommand or when running scripts directly.
 | `--no-color` | Disable ANSI color output. |
 | `--check` | Run semantic analysis only, do not execute. |
 | `--lenient` | Downgrade semantic errors to warnings. |
+| `--strict` | Require type annotations on every binding and function. |
 | `--optimize` | Run AST optimizer before execution. |
 | `--watch` | Re-run on file change. |
 | `--vm` | Use bytecode VM backend. |
 | `--jit` | Use JIT compilation backend. |
 | `--backend <name>` | Select backend: `interp`, `vm`, or `jit`. |
+| `--lsp` | Start the LSP server (same as `xs lsp`). |
+| `--dap` | Start the DAP server (same as `xs dap`). |
 | `--emit <target>` | Dump IR or transpile: `ast`, `bytecode`, `ir`, `js`, `c`, `wasm`. |
 | `-e` / `--eval <code>` | Evaluate inline code. |
 | `--explain <code>` | Explain an error code. |
 | `--record <file>` | Record execution trace to `.xst` file. |
 | `--replay <file>` | Replay a `.xst` trace file. |
-| `--debug` | Run with DAP debug server. |
+| `--debug <file>` | Run with the DAP debug server attached. |
 | `--profile` | Enable sampling profiler. |
-| `--coverage` | Enable line/branch coverage tracking. |
+| `--coverage` | Enable line coverage tracking. |
+| `--trace` | Enable execution tracer (provenance recording). |
 | `--trace-sample <rate>` | Set profiler sampling rate (0.0-1.0). |
 | `--trace-deep` | Serialize complex values as JSON in execution traces. |
+| `--gc-debug` | Enable GC debug prints. |
 | `--plugin <path>` | Load native plugin before execution. |
 | `--sandbox` | Sandbox plugin execution. |
 

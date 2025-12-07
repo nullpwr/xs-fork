@@ -292,7 +292,19 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         break;
     }
-    case NODE_METHOD_CALL:
+    case NODE_METHOD_CALL: {
+        /* Map a handful of XS method names to their JS equivalents. JS arrays
+           and strings don't have `.len()` but they do have `.length`, and
+           `.push/pop/reverse/sort` exist on Array.prototype, etc. This is a
+           shim, not a faithful XS runtime, so it covers the common homepage
+           cases and leaves the rest as-is. */
+        const char *m = n->method_call.method;
+        if (m && strcmp(m, "len") == 0 && n->method_call.args.len == 0) {
+            sb_addc(s, '(');
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").length");
+            break;
+        }
         emit_expr(s, n->method_call.obj, depth);
         if (n->method_call.optional) sb_add(s, "?.");
         else sb_addc(s, '.');
@@ -304,6 +316,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         sb_addc(s, ')');
         break;
+    }
     case NODE_INDEX:
         emit_expr(s, n->index.obj, depth);
         sb_addc(s, '[');
@@ -462,7 +475,10 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_MATCH: {
-        /* IIFE with if/else chain */
+        /* IIFE: each arm gets its own block so pattern bindings are in scope
+           when the guard is evaluated. JS `const` is in TDZ, not hoisted, so
+           the old "if (cond && guard) { const x = __subject; ... }" form
+           referenced bindings before declaration. */
         sb_add(s, "(() => {\n");
         sb_indent(s, depth + 1);
         sb_add(s, "const __subject = ");
@@ -471,31 +487,40 @@ static void emit_expr(SB *s, Node *n, int depth) {
         for (int i = 0; i < n->match.arms.len; i++) {
             MatchArm *arm = &n->match.arms.items[i];
             sb_indent(s, depth + 1);
-            if (i == 0) sb_add(s, "if (");
-            else sb_add(s, "else if (");
-            emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-            if (arm->guard) {
-                sb_add(s, " && (");
-                emit_expr(s, arm->guard, depth + 1);
-                sb_addc(s, ')');
-            }
+            sb_add(s, "{\n");
+            sb_indent(s, depth + 2);
+            sb_add(s, "if (");
+            emit_pattern_cond(s, arm->pattern, "__subject", depth + 2);
             sb_add(s, ") {\n");
-            /* emit pattern bindings */
-            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
+            /* emit bindings inside the pattern-match block so the guard can use them */
+            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 3);
+            if (arm->guard) {
+                sb_indent(s, depth + 3);
+                sb_add(s, "if (");
+                emit_expr(s, arm->guard, depth + 3);
+                sb_add(s, ") {\n");
+            }
+            int body_depth = arm->guard ? depth + 4 : depth + 3;
             if (arm->body && arm->body->tag == NODE_BLOCK) {
-                emit_block_body(s, arm->body, depth + 2);
+                emit_block_body(s, arm->body, body_depth);
                 if (arm->body->block.expr) {
-                    sb_indent(s, depth + 2);
+                    sb_indent(s, body_depth);
                     sb_add(s, "return ");
-                    emit_expr(s, arm->body->block.expr, depth + 2);
+                    emit_expr(s, arm->body->block.expr, body_depth);
                     sb_add(s, ";\n");
                 }
             } else {
-                sb_indent(s, depth + 2);
+                sb_indent(s, body_depth);
                 sb_add(s, "return ");
-                emit_expr(s, arm->body, depth + 2);
+                emit_expr(s, arm->body, body_depth);
                 sb_add(s, ";\n");
             }
+            if (arm->guard) {
+                sb_indent(s, depth + 3);
+                sb_add(s, "}\n");
+            }
+            sb_indent(s, depth + 2);
+            sb_add(s, "}\n");
             sb_indent(s, depth + 1);
             sb_add(s, "}\n");
         }
@@ -880,12 +905,18 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "})()");
         break;
     case NODE_HANDLE: {
-        /* handle expr { arms } -> generator-based effect handler IIFE */
+        /* handle expr { arms } -> generator-based effect handler IIFE.
+           Wrap the handled expression in a generator function so that any
+           `perform` nodes inside it (which emit `(yield {...})`) have an
+           enclosing generator to yield into. This only fixes direct performs;
+           performs buried in non-generator helper functions still produce
+           broken JS, which is why the `perform`/`handle` story is called out
+           as partial in STATUS.md. */
         sb_add(s, "(() => {\n");
         sb_indent(s, depth + 1);
-        sb_add(s, "const __gen = ");
+        sb_add(s, "const __gen = (function*() { return ");
         emit_expr(s, n->handle.expr, depth + 1);
-        sb_add(s, ";\n");
+        sb_add(s, "; })();\n");
         sb_indent(s, depth + 1);
         sb_add(s, "let __result = __gen.next();\n");
         sb_indent(s, depth + 1);
@@ -1477,9 +1508,11 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, "}\n");
         break;
     case NODE_MATCH: {
-        /* match as statement -> if/else chain */
+        /* Each arm gets its own nested block so pattern bindings are in scope
+           when the guard is evaluated (JS `const` is in TDZ). Uses a labeled
+           block + break to skip the remaining arms once one matches. */
         sb_indent(s, depth);
-        sb_add(s, "{\n");
+        sb_add(s, "__match: {\n");
         sb_indent(s, depth + 1);
         sb_add(s, "const __subject = ");
         emit_expr(s, n->match.subject, depth + 1);
@@ -1487,28 +1520,39 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         for (int i = 0; i < n->match.arms.len; i++) {
             MatchArm *arm = &n->match.arms.items[i];
             sb_indent(s, depth + 1);
-            if (i == 0) sb_add(s, "if (");
-            else sb_add(s, "else if (");
-            emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-            if (arm->guard) {
-                sb_add(s, " && (");
-                emit_expr(s, arm->guard, depth + 1);
-                sb_addc(s, ')');
-            }
+            sb_add(s, "{\n");
+            sb_indent(s, depth + 2);
+            sb_add(s, "if (");
+            emit_pattern_cond(s, arm->pattern, "__subject", depth + 2);
             sb_add(s, ") {\n");
-            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
+            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 3);
+            if (arm->guard) {
+                sb_indent(s, depth + 3);
+                sb_add(s, "if (");
+                emit_expr(s, arm->guard, depth + 3);
+                sb_add(s, ") {\n");
+            }
+            int body_depth = arm->guard ? depth + 4 : depth + 3;
             if (arm->body && arm->body->tag == NODE_BLOCK) {
-                emit_block_body(s, arm->body, depth + 2);
+                emit_block_body(s, arm->body, body_depth);
                 if (arm->body->block.expr) {
-                    sb_indent(s, depth + 2);
-                    emit_expr(s, arm->body->block.expr, depth + 2);
+                    sb_indent(s, body_depth);
+                    emit_expr(s, arm->body->block.expr, body_depth);
                     sb_add(s, ";\n");
                 }
             } else if (arm->body) {
-                sb_indent(s, depth + 2);
-                emit_expr(s, arm->body, depth + 2);
+                sb_indent(s, body_depth);
+                emit_expr(s, arm->body, body_depth);
                 sb_add(s, ";\n");
             }
+            sb_indent(s, body_depth);
+            sb_add(s, "break __match;\n");
+            if (arm->guard) {
+                sb_indent(s, depth + 3);
+                sb_add(s, "}\n");
+            }
+            sb_indent(s, depth + 2);
+            sb_add(s, "}\n");
             sb_indent(s, depth + 1);
             sb_add(s, "}\n");
         }
@@ -1866,7 +1910,12 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         if (inner && (inner->tag == NODE_IF || inner->tag == NODE_MATCH ||
                       inner->tag == NODE_FOR || inner->tag == NODE_WHILE ||
                       inner->tag == NODE_LOOP || inner->tag == NODE_TRY ||
-                      inner->tag == NODE_BLOCK)) {
+                      inner->tag == NODE_BLOCK ||
+                      inner->tag == NODE_RETURN)) {
+            /* NODE_RETURN inside NODE_EXPR_STMT happens when the parser
+               desugars `fn name(...) = expr` into a one-statement block
+               wrapping a return. Emit it as a plain statement so the
+               enclosing function actually returns. */
             emit_stmt(s, inner, depth);
         } else {
             sb_indent(s, depth);

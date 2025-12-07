@@ -43,6 +43,18 @@ jobs:
         shell: msys2 {0}
         run: make test
 
+  sanitizers:
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with ASan + UBSan and run tests
+        run: |
+          make debug
+          bash tests/run.sh
+      - name: Run adversarial suite under sanitizers
+        run: bash tests/adversarial/run.sh
+
   build-wasm:
     if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest

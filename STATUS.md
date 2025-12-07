@@ -1,6 +1,6 @@
 # XS Status
 
-What works, what's partial, and what's planned. Updated for v0.3.7.
+What works, what's partial, and what's planned. Current release: v0.4.0.
 
 ## Tree-Walk Interpreter
 
@@ -44,7 +44,7 @@ The default backend. Handles the full language.
 | Named arguments | works |
 | Enum methods via impl | works |
 
-All 18 test suites pass on Linux, macOS, and Windows.
+Full test run: 35 test_*.xs files + examples sweep + test_cli.sh all pass on Linux, macOS, and MinGW Windows.
 
 ## Bytecode VM
 
@@ -82,7 +82,7 @@ Use `--vm` flag. Full feature parity with the interpreter (except reactive bindi
 
 | Growable stack and frames (no fixed limits) | works |
 
-All 18 test suites pass. Use `xs build file.xs` to compile, `xs run file.xsc` to execute.
+The VM test (`test_vm.xs`) is run through `--vm` automatically by `tests/run.sh`. Use `xs build file.xs` to compile, `xs run file.xsc` to execute.
 
 ## JIT Compiler
 
@@ -159,46 +159,70 @@ x86-64 only. Early stage, handles basic arithmetic and function calls.
 | Platform | Status |
 |----------|--------|
 | Linux (x86-64) | fully tested |
-| macOS (x86-64, ARM) | works, CI tested |
-| Windows (MinGW) | works, CI tested, static linked |
+| macOS (x86-64, ARM) | builds and tests pass |
+| Windows (MinGW) | builds and tests pass, statically linked (`-static` in Makefile) |
 
-## Recent Changes (v0.3.7)
+## Standard Library
 
-- Added: multi-line string literals with triple-quote syntax (`"""..."""`)
-- Added: `do` expressions for block-scoped computation (`let x = do { ... }`)
-- Added: `with` resource management (`with expr as name { ... }` calls `.close()` on exit)
-- Added: named arguments at call sites (`connect(host: "localhost", port: 8080)`)
-- Added: enum methods via `impl` blocks
-- Added: `.chars()` and `.bytes()` string methods, `.entries()` map method
-- Added: tuple destructuring in `for` loops over arrays
-- Added: growable VM stacks and frame arrays (no fixed limits)
-- Added: REPL `:test` command to run test files
-- Added: `xs init` for initializing projects in existing directories
-- Added: `xs test --watch` for auto-re-running tests on changes
-- Added: benchmark suite (fibonacci, sorting, string ops)
-- Added: negative test suite (error validation)
-- Added: transpiler integration tests (C backend)
-- Improved: JS transpiler (generators, structs/classes, pattern matching)
-- Improved: parser error suggestions (semicolons, `console.log`, `===`, etc.)
-- Updated: STATUS.md to current version
+36 modules are registered at interpreter startup (`stdlib_register` in `src/runtime/builtins.c`):
+`math`, `time`, `io`, `string`, `path`, `base64`, `hash`, `uuid`, `collections`, `process`,
+`random`, `os`, `json`, `log`, `fmt`, `test`, `csv`, `url`, `re`, `msgpack`, `Promise`,
+`async`, `net`, `crypto`, `thread`, `buf`, `encode`, `db`, `cli`, `ffi`, `reflect`, `gc`,
+`reactive`, `toml`, `http`, `fs`.
 
-## Changes in v0.3.0-v0.3.5
+## Known Footguns
 
-- Added: WASM playground build
-- Added: universal literals, temporal primitives, reactive bindings
-- Added: gradual contracts, adapt functions
-- Added: function overloading, tagged blocks, regex type
-- Added: execution tracer, HM type inference, bigint auto-promotion
-- Fixed: JS transpiler classes, builtins, dedup returns
-- Fixed: VM buffer overflows and strbuf realloc leak
+These are the sharp edges you are most likely to hit. They are here on
+purpose: the more users trip over silently, the more trust the project
+burns. Fix one, and this list gets shorter.
+
+- **Interpreter is the default, VM is faster.** `xs file.xs` uses the
+  tree-walk interpreter, which is ~10x slower on recursion than the
+  bytecode VM and more conservative about call depth (500 frames,
+  tunable via `XS_MAX_DEPTH`). For anything compute-heavy or
+  long-running, pass `--vm`. Pre-v1.0, we will not flip the default.
+- **Effect handlers don't cross non-generator JS function calls.** The
+  JS transpiler wraps the `handle` body in a generator so a direct
+  `perform` works, but performs inside helper functions that are plain
+  `function` become `yield` in a non-generator and crash at load time.
+  If you need algebraic effects on the JS target, keep all performs in
+  the handle's body or in generator-marked helpers.
+- **WASM backend only runs trivial programs.** Arithmetic and direct
+  function calls are fine; anything touching GC, strings, closures,
+  async, or effects does not yet work. Do not ship.
+- **Circular references leak.** The GC is refcount-only; a cycle between
+  two arrays or closures never frees. Avoid long-lived mutual references,
+  or break the cycle by hand before dropping the last external ref. A
+  cycle collector is on the roadmap.
+- **Regex is POSIX-extended, not PCRE.** No `\d`, `\w`, lookaround, or
+  backreferences. Use `[0-9]`, `[a-zA-Z_]`, etc.
+- **`http.serve` is blocking and single-request.** The async router in
+  `src/net/http_server.c` is not wired up. `http.serve` handles one
+  request at a time and shuts down on `Ctrl+C`. Fine for demos and
+  internal tools; not a production server.
+- **Unicode is byte-oriented.** `.len()`, `.slice()`, indexing all work
+  on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
+  `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
+  are not implemented.
+- **Package registry is a stub.** `xs publish` / `xs search` print
+  "no registry configured" unless `[registry]` is set in `xs.toml`.
+  `xsi` can install from local paths today; the hosted registry at
+  registry.xslang.org is not live yet.
+- **JIT is a toy.** x86-64 only, arithmetic + calls + loops; almost
+  everything else falls back to the VM. Use `--jit` if you want to
+  kick the tires, not if you want speed.
 
 ## Known Limitations
 
 - Struct operator overloading only works when both operands are structs (not mixed struct+int)
 - C transpiler closures break when the same variable name is captured in multiple functions in one file
-- JIT is x86-64 only and very early
+- JIT is x86-64 only and very early; most paths still fall back to the VM
 - WASM transpiler only handles basic programs
-- Package registry is not live: `xs install` works with local paths
+- `xs publish` and `xs search` print "no registry configured" unless `[registry]` is set in `xs.toml`
 - VM effects use snapshot/restore (single-shot only, no nested effects)
-- VM actors use flattened state (not full closure capture like interpreter)
-- Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand - use `[0-9]`, `[a-zA-Z_]`)
+- VM actors use flattened state (not full closure capture like the interpreter)
+- Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
+- Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
+- `match` does not support map patterns yet: destructure tuples, arrays, structs, and enums, but build a struct wrapper if you need to match map-shaped data.
+- JS transpiler's `perform`/`handle` story is partial: direct `perform` inside a `handle` works, but performs buried in helper functions that aren't marked as JS generators will produce broken JS.
+- `http` module exposes client methods (`get`, `post`, ...) only. `src/net/http_server.c` has routing and middleware code but no XS bindings are wired up yet, so `http.serve(...)` does not exist.

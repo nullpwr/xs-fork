@@ -258,10 +258,20 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
         char c = ladvance(l);
 
         if (interp_depth > 0) {
+            /* Inside `{...}` interpolation: if the user writes `\"` or `\'`
+               (a reflex carried from outer-string escaping), skip the
+               backslash and emit the bare quote. Do NOT enter the inner-string
+               consume path, since the user's intent is a single character,
+               not the start of a nested literal. */
+            int quote_was_escaped = 0;
+            if (c == '\\' && (lpeek(l, 0) == '"' || lpeek(l, 0) == '\'')) {
+                c = ladvance(l);
+                quote_was_escaped = 1;
+            }
             sb_push(&sb, c);
             if (c == '{') interp_depth++;
             else if (c == '}') { interp_depth--; }
-            else if (c == '"' || c == '\'') {
+            else if (!quote_was_escaped && (c == '"' || c == '\'')) {
                 /* consume inner string verbatim */
                 char iq = c;
                 while (l->pos < (int)strlen(l->source)) {

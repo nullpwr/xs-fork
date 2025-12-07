@@ -589,6 +589,21 @@ int sema_analyze(SemaCtx *ctx, Node *program, const char *filename) {
     g_ntraits = 0;
     g_in_pure = 0;
     g_ret_ann_depth = 0;
+    /* Detect any `use plugin "..."` or `load "..."` in the top-level program
+       so resolve_program can downgrade T0002 to a warning: plugins inject
+       globals at runtime that sema can't see. */
+    ctx->has_plugin_load = 0;
+    if (program && program->tag == NODE_PROGRAM) {
+        for (int i = 0; i < program->program.stmts.len; i++) {
+            Node *s = program->program.stmts.items[i];
+            if (!s) continue;
+            if (s->tag == NODE_LOAD) { ctx->has_plugin_load = 1; break; }
+            if (s->tag == NODE_USE && s->use_.is_plugin) {
+                ctx->has_plugin_load = 1; break;
+            }
+            if (s->tag == NODE_PLUGIN_DECL) { ctx->has_plugin_load = 1; break; }
+        }
+    }
     resolve_program(program, ctx->st, ctx);
     /* skip typecheck if resolve had errors to avoid cascading noise */
     int resolve_errors = ctx->diag ? diag_context_error_count(ctx->diag) : 0;

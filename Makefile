@@ -205,6 +205,43 @@ release: clean $(TARGET)
 test: $(TARGET)
 	@bash tests/run.sh
 
+# Cross-backend diff tests: run a program on the interpreter, VM, transpiled
+# C, and transpiled JS, and assert all four produce the same stdout. Not part
+# of `make test` because several known backend gaps still show up here; use
+# it when you change a backend to be sure you haven't diverged.
+test-diff: $(TARGET)
+	@bash tests/test_transpiler_diff.sh
+
+# Run the full test suite against an AddressSanitizer + UBSan build.
+# Catches memory and undefined-behavior bugs the default build can miss.
+test-asan: debug
+	@bash tests/run.sh
+
+# Focused AddressSanitizer-only build. Lower overhead than `debug` when
+# the goal is just catching out-of-bounds / use-after-free.
+asan: CFLAGS = -g -O1 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+               -fsanitize=address -fno-omit-frame-pointer \
+               $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
+asan: LDFLAGS += -fsanitize=address
+asan: clean $(TARGET)
+
+ubsan: CFLAGS = -g -O1 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+                -fsanitize=undefined -fno-omit-frame-pointer \
+                $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
+ubsan: LDFLAGS += -fsanitize=undefined
+ubsan: clean $(TARGET)
+
+# libFuzzer entrypoint against the parser. Needs clang with -fsanitize=fuzzer.
+# Build corpus by pointing fuzz_parser at tests/ and examples/.
+FUZZ_CC ?= clang
+fuzz-parser: tests/fuzz/fuzz_parser.c
+	$(FUZZ_CC) -g -O1 -fsanitize=fuzzer,address,undefined -std=c11 \
+	    -Isrc -Isrc/tls/bearssl \
+	    $(foreach f,VM PLUGINS SANDBOX EFFECTS TRANSPILER FMT PKG DOC,-DXSC_ENABLE_$(f)) \
+	    -o fuzz_parser tests/fuzz/fuzz_parser.c \
+	    $(CORE_SRCS) $(COMPILER_SRCS) $(DIAG_SRCS) \
+	    -lm -lpthread -ldl
+
 install: release
 	install -m 755 $(TARGET) /usr/local/bin/xs
 

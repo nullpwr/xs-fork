@@ -21,7 +21,7 @@ plugin.runtime.global.set("greet", fn(name) {
 
 ```xs
 -- main.xs
-use plugin "my_plugin.xs"
+load "my_plugin.xs"
 println(greet("world"))  -- Hello, world!
 ```
 
@@ -32,12 +32,29 @@ That's it. The plugin file runs in a temporary interpreter, but the hooks and gl
 ## Loading Plugins
 
 ```xs
-use plugin "path/to/plugin.xs"
+load "path/to/plugin.xs"
 ```
 
-The path is resolved relative to the file doing the loading. Plugins execute top-to-bottom at load time, before the rest of your program runs. If a plugin fails to load (syntax error, runtime error, missing dependency), the host program stops -- you won't get half-loaded state.
+Always use `load`. The older `use plugin "..."` form still parses for
+backward compatibility but emits a deprecation warning at runtime, and
+it will be removed before v1.0.
 
-Multiple plugins load in order. Later plugins can override globals set by earlier ones.
+The path is resolved relative to the file doing the loading. Plugins
+execute top-to-bottom at load time, before the rest of your program
+runs. If a plugin fails to load (syntax error, runtime error, missing
+dependency), the host program stops -- you won't get half-loaded state.
+
+Multiple plugins load in order. Later plugins can override globals set
+by earlier ones. If two plugins introduce colliding AST node names,
+tokens, or passes, use the `with { ... }` rename form:
+
+```xs
+load "plugin-a" with { ARROW: "pipe_arrow" }
+load "plugin-b"
+```
+
+Keys are the plugin's internal names; values are what they become in
+your project. Rename only when there is an actual conflict.
 
 ---
 
@@ -451,9 +468,9 @@ All of these return map representations of AST nodes that the interpreter knows 
 Don't trust a plugin? Restrict what it can do:
 
 ```xs
-use plugin "sketchy.xs" sandbox { inject_only }
-use plugin "another.xs" sandbox { no_override }
-use plugin "strict.xs" sandbox { inject_only, no_override, no_eval_hook }
+load "sketchy.xs" sandbox { inject_only }
+load "another.xs" sandbox { no_override }
+load "strict.xs" sandbox { inject_only, no_override, no_eval_hook }
 ```
 
 | Flag | Effect |
@@ -496,7 +513,7 @@ plugin.runtime.global.set("repeat_str", fn(s, n) {
 
 ```xs
 -- main.xs
-use plugin "utils_plugin.xs"
+load "utils_plugin.xs"
 println(clamp(15, 0, 10))       -- 10
 println(clamp(-5, 0, 10))       -- 0
 println(repeat_str("ha", 3))    -- hahaha
@@ -525,7 +542,7 @@ plugin.parser.on_unknown(fn(token) {
 
 ```xs
 -- main.xs
-use plugin "unless_plugin.xs"
+load "unless_plugin.xs"
 
 let x = 5
 unless x > 10 {
@@ -570,7 +587,7 @@ plugin.runtime.global.set("run_tests", fn() {
 
 ```xs
 -- test_math.xs
-use plugin "tester_plugin.xs"
+load "tester_plugin.xs"
 
 test("addition", fn() {
     expect_eq(1 + 1, 2)
@@ -649,7 +666,7 @@ plugin.runtime.resolve_import(fn(name, previous) {
 
 ```xs
 -- app.xs
-use plugin "showcase_plugin.xs"
+load "showcase_plugin.xs"
 
 route GET "/hello" {
     response(200, "Hello, World!")
@@ -674,4 +691,4 @@ println("{resp.status}: {resp.body}")  -- 200: Hello, World!
 
 **Syntax extensions trigger a re-parse.** When a plugin registers `on_unknown` handlers or adds keywords, the remaining source gets re-parsed to pick up the new syntax. This is automatic -- you don't need to do anything.
 
-**Hook limits.** There are internal limits on how many hooks you can register (64 eval hooks, 16 syntax handlers, 16 overrides, etc.). You'll get a stderr warning if you hit them. In practice you won't.
+**Hook limits.** There are fixed-size registries for every hook type. Current caps: 64 `before_eval` hooks, 64 `after_eval` hooks, 16 statement-level syntax handlers, 16 expression-level syntax handlers, 16 postfix handlers, 32 parser overrides, 32 parser productions, 16 lexer transforms, 16 resolve_import hooks, 16 on_error hooks, 64 plugin keywords. Hitting a limit prints a stderr warning and drops the hook. In practice you won't hit them.

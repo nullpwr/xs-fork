@@ -2,7 +2,7 @@
 #define _DEFAULT_SOURCE
 #endif
 
-#define XS_VERSION "0.3.9"
+#define XS_VERSION "0.4.0"
 #define XS_VERSION_TAG "xs " XS_VERSION
 
 #include "core/xs_compat.h"
@@ -355,17 +355,52 @@ static char *read_file(const char *path) {
         fprintf(stderr, "xs: cannot open '%s'\n", path);
         return NULL;
     }
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char *buf = (char *)xs_malloc((size_t)(sz + 1));
-    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
-        fprintf(stderr, "xs: read error on '%s'\n", path);
-        fclose(f);
-        free(buf);
-        return NULL;
+
+    /* Try the fast path first: seek to end, ftell, read once.
+       Pipes and character devices (like /dev/stdin under a shell pipe)
+       report -1 from ftell, so fall back to a chunked read in that case. */
+    long sz = -1;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        sz = ftell(f);
+        if (fseek(f, 0, SEEK_SET) != 0) sz = -1;
     }
-    buf[sz] = '\0';
+
+    if (sz >= 0) {
+        char *buf = (char *)xs_malloc((size_t)sz + 1);
+        size_t got = fread(buf, 1, (size_t)sz, f);
+        if (got != (size_t)sz) {
+            /* Short read on a seekable file is still a real error. */
+            fprintf(stderr, "xs: read error on '%s'\n", path);
+            fclose(f);
+            free(buf);
+            return NULL;
+        }
+        buf[sz] = '\0';
+        fclose(f);
+        return buf;
+    }
+
+    /* Non-seekable stream: grow buffer as we go. */
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)xs_malloc(cap);
+    for (;;) {
+        if (len + 4096 + 1 > cap) {
+            cap *= 2;
+            buf = (char *)xs_realloc(buf, cap);
+        }
+        size_t got = fread(buf + len, 1, 4096, f);
+        len += got;
+        if (got < 4096) {
+            if (ferror(f)) {
+                fprintf(stderr, "xs: read error on '%s'\n", path);
+                fclose(f);
+                free(buf);
+                return NULL;
+            }
+            break; /* EOF */
+        }
+    }
+    buf[len] = '\0';
     fclose(f);
     return buf;
 }
@@ -633,8 +668,16 @@ int main(int argc, char **argv) {
     int emit_ir_ssa = 0;
     int do_trace    = 0;
 #ifdef XSC_ENABLE_VM
+    /* Default backend. The VM is faster and is the long-term target, but
+       the tree-walk interpreter still has wider feature coverage (plugin
+       eval hooks, some universal literals, a few match patterns). Flip
+       this to 1 and set do_interp to 0 once the VM passes every test in
+       tests/ on its own. See ROADMAP.md v0.5. */
     int do_vm         = 0;
+    int do_interp     = 1;
     int emit_bytecode = 0;
+#else
+    int do_interp     = 1;
 #endif
 #ifdef XSC_ENABLE_JIT
     int do_jit = 0;
@@ -1753,7 +1796,7 @@ test_again: ;
             const char *be = argv[++i];
             if (strcmp(be, "vm") == 0) {
 #ifdef XSC_ENABLE_VM
-                do_vm = 1;
+                do_vm = 1; do_interp = 0;
 #else
                 fprintf(stderr, "xs: VM backend not built (rebuild with XSC_ENABLE_VM=1)\n");
                 return 1;
@@ -1765,13 +1808,25 @@ test_again: ;
                 fprintf(stderr, "xs: JIT backend not available (rebuild with XSC_ENABLE_JIT=1)\n");
                 return 1;
 #endif
-            } /* else interp = default, no-op */
+            } else if (strcmp(be, "interp") == 0) {
+                do_interp = 1;
+#ifdef XSC_ENABLE_VM
+                do_vm = 0;
+#endif
+            }
         }
         else if (strcmp(argv[i], "--vm")       == 0) {
 #ifdef XSC_ENABLE_VM
-            do_vm = 1;
+            do_vm = 1; do_interp = 0;
 #else
             fprintf(stderr, "xs: VM not built (rebuild with XSC_ENABLE_VM=1)\n"); return 1;
+#endif
+        }
+        else if (strcmp(argv[i], "--interp")   == 0) {
+            /* Explicit opt-in to the tree-walking interpreter. */
+            do_interp = 1;
+#ifdef XSC_ENABLE_VM
+            do_vm = 0;
 #endif
         }
         else if (strcmp(argv[i], "--jit")       == 0) {
@@ -2367,7 +2422,8 @@ run_file:;
             pipeline_dispatch_sema(pp, program, interp);
         }
 #endif
-        int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC);
+        int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
+                        || interp->had_unhandled_exception;
         interp_free(interp);
         diag_context_free(dctx);
         xs_error_set_source(NULL);

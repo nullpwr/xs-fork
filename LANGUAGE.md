@@ -691,7 +691,7 @@ x /= 4                           -- 6
 x %= 4                           -- 2
 ```
 
-Also available: `&=`, `|=`, `^=`, `<<=`, `>>=`.
+Also available: `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`.
 
 ### Operator Precedence (lowest to highest)
 
@@ -1913,7 +1913,7 @@ unsafe {
 
 ## Inline C
 
-`inline c { ... }` embeds raw C code inside an XS function. The C code is passed through verbatim to the C transpiler. In the interpreter and VM, inline C blocks are skipped with a warning.
+`inline c { ... }` embeds raw C code inside an XS function. The C code is passed through verbatim to the C transpiler. The interpreter errors out on inline C blocks (use `xs transpile --target c` instead), so give the enclosing XS function a fallback body if you want it to run under the interpreter.
 
 ```xs
 fn fast_hash(data) {
@@ -2779,16 +2779,15 @@ println(random.choice(["a", "b", "c"]))  -- random element
 | Function | Description |
 |----------|-------------|
 | `md5(data)` | MD5 hex digest |
-| `sha1(data)` | SHA-1 hex digest |
 | `sha256(data)` | SHA-256 hex digest |
-| `sha512(data)` | SHA-512 hex digest |
-| `hmac(key, data)` | HMAC-SHA256 hex digest |
 
 ```xs
 import hash
 println(hash.sha256("hello"))    -- 2cf24dba5fb0a30e...
 println(hash.md5("hello"))       -- 5d41402abc4b2a76...
 ```
+
+For SHA-1, HMAC-SHA256, HKDF, PBKDF2, and AES, see the `crypto` module below.
 
 ---
 
@@ -2797,15 +2796,25 @@ println(hash.md5("hello"))       -- 5d41402abc4b2a76...
 | Function | Description |
 |----------|-------------|
 | `sha256(data)` | SHA-256 hex digest |
+| `sha1(data)` | SHA-1 hex digest |
 | `md5(data)` | MD5 hex digest |
-| `random_bytes(n)` | n random bytes as hex string |
-| `random_int(min, max)` | Cryptographically random integer |
+| `hash(algo, data)` | Generic hash by algorithm name |
+| `hmac_sha256(key, data)` | HMAC-SHA256 hex digest |
+| `hkdf(key, salt, info, len)` | HKDF key derivation |
+| `pbkdf2(pw, salt, iters, len)` | PBKDF2 key derivation |
+| `aes_encrypt(key, iv, data)` | AES encryption |
+| `aes_decrypt(key, iv, data)` | AES decryption |
+| `hex_encode(data)` / `hex_decode(s)` | Hex codec |
+| `base64_encode(data)` / `base64_decode(s)` | Base64 codec |
+| `random_bytes(n)` | n random bytes |
+| `random_int(min, max)` | Random integer |
 | `uuid4()` | Generate UUID v4 |
+| `constant_time_eq(a, b)` | Timing-safe string comparison |
 
 ```xs
 import crypto
 println(crypto.uuid4())          -- e.g. 8cbe806c-cd27-4d93-afd1-dbfa3f1b4f93
-println(crypto.random_bytes(16)) -- 32 hex chars
+println(crypto.sha256("hi"))
 ```
 
 ---
@@ -3065,10 +3074,9 @@ Reactive state primitives.
 |----------|-------------|
 | `signal(val)` | Create a reactive signal (observable value) |
 | `derived(fn)` | Create a derived signal computed from others |
-| `effect(fn)` | Run side effect when dependencies change |
-| `batch(fn)` | Batch multiple signal updates |
+| `effect(fn, ...signals)` | Run side effect immediately, re-run when passed signals change |
 
-These are also available as top-level builtins: `signal(val)` and `derived(fn)`.
+`signal(val)` and `derived(fn)` are also available as top-level builtins.
 
 ---
 
@@ -3299,7 +3307,7 @@ XS can be compiled to WebAssembly using wasi-sdk, allowing the full interpreter 
 make wasm    # produces xs.wasm
 ```
 
-The WASM build includes the interpreter, VM, semantic analysis, type checking, effects, pattern matching, generators, closures, enums, structs, classes, universal literals, temporal primitives, and the JS/C transpiler. It passes 14 out of 15 test suites with output identical to the native binary.
+The WASM build includes the interpreter, VM, semantic analysis, type checking, effects, pattern matching, generators, closures, enums, structs, classes, universal literals, temporal primitives, and the JS/C transpiler. Output matches the native binary on the suites that don't require networking, real filesystem access, signals, or native plugins.
 
 Not available in WASM:
 - Networking (HTTP, sockets, TLS) - no raw sockets in browser

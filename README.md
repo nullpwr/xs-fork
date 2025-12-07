@@ -89,27 +89,36 @@ This downloads the XS installer (xsi), which sets up `/usr/local/xs/` (or `C:\xs
 Or build from source:
 
 ```bash
-make            # produces ./xs
-make test       # 17 test suites
-make release    # optimized build (-O3, LTO, stripped)
-make install    # install to /usr/local/bin/xs
+make            # produces ./xs (or xs.exe on Windows)
+make debug      # -g -O0 with AddressSanitizer + UBSan
+make release    # -O3 with LTO, stripped
+make test       # runs tests/run.sh (all tests/test_*.xs + examples + test_cli.sh)
+make install    # install release build to /usr/local/bin/xs
+make wasm       # produces xs.wasm via wasi-sdk (needs WASI_SDK env var)
 ```
 
-Needs gcc or clang. No other dependencies. The binary is ~1.5MB and includes everything (HTTPS via embedded BearSSL, no runtime deps).
+Needs gcc or clang and GNU make. No other build or runtime dependencies. HTTPS is handled by the bundled BearSSL tree under src/tls/bearssl/.
 
 ## Run
 
 ```bash
-xs file.xs              # run a script
+xs file.xs              # run a script (tree-walk interpreter, default)
 xs                      # interactive REPL
 xs -e 'println(42)'     # eval one-liner
-xs --vm file.xs         # bytecode VM backend
-xs --jit file.xs        # JIT backend (x86-64)
+xs --vm file.xs         # bytecode VM backend (faster for compute, recommended)
+xs --jit file.xs        # JIT backend (x86-64, early stage)
 xs --emit js file.xs    # transpile to JavaScript
 xs --emit c file.xs     # transpile to C
 xs --check file.xs      # static type check without running
 xs --strict file.xs     # require type annotations everywhere
 ```
+
+> **Which backend:** the tree-walk interpreter is the default so small
+> one-off scripts start instantly and REPL/debug sessions behave
+> predictably. For anything compute-heavy or long-running, pass `--vm`:
+> the bytecode VM is consistently faster and handles deep recursion
+> on its own growable stack. See [STATUS.md](STATUS.md) for the full
+> backend matrix.
 
 ## What's in the box
 
@@ -147,8 +156,8 @@ xs --strict file.xs     # require type annotations everywhere
 - Package manager (`xs install`, `xs remove`)
 - Doc generator (`xs doc`)
 
-**Standard library** (14 modules, all built in):
-math, string, time, io, fs, path, random, json, os, collections, re, crypto, fmt, net
+**Standard library** (36 built-in modules, all registered at startup):
+math, time, io, string, path, base64, hash, uuid, collections, process, random, os, json, log, fmt, test, csv, url, re, msgpack, Promise, async, net, crypto, thread, buf, encode, db, cli, ffi, reflect, gc, reactive, toml, http, fs
 
 **Plugin system:**
 Plugins are XS scripts with direct access to the lexer, parser, and runtime. Add keywords, inject globals, hook evaluation, override syntax, intercept imports -- written in XS, not C.
@@ -187,20 +196,40 @@ let nums: [int] = [1, 2, "oops"]  -- runtime error: expected '[int]', got '[mixe
 ## Project layout
 
 ```
-src/            compiler and runtime (C)
-src/tls/        embedded BearSSL for HTTPS
-tests/          14 test suites
-examples/       working examples and plugins
+src/            compiler and runtime (348 .c files across 27 subsystems)
+src/tls/        bundled BearSSL for HTTPS
+tests/          35 test_*.xs files + test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh
+examples/       15 .xs examples + examples/plugins/
+benchmarks/     benchmark programs
+editors/        VS Code extension (editors/vscode/)
 Makefile        build system
-LANGUAGE.md     complete language reference
-COMMANDS.md     CLI commands and flags
-PLUGINS.md      plugin system guide
 xs.toml         project config
 ```
 
+## Benchmarks
+
+Wall-clock numbers from a single Linux x86_64 machine, O2 release build,
+warm caches. Treat as indicative, not authoritative.
+
+| Program          | Python 3 | Node.js  | xs (interp) | xs (--vm) |
+|------------------|----------|----------|-------------|-----------|
+| Hello world (startup) | ~15 ms | ~54 ms | **~4 ms** | ~4 ms |
+| `fib(25)` recursion   | ~21 ms | ~54 ms | ~101 ms | **~20 ms** |
+| `fib(30)` recursion   | ~160 ms | ~60 ms | ~2.2 s  | **~170 ms** |
+
+Startup time is the flagship number: `xs file.xs` spins up about **10x
+faster than Node** and **3-4x faster than Python**, which makes it
+practical for small CLI tools. For compute, the VM backend is roughly
+on par with CPython; the tree-walk interpreter is ~10x slower on hot
+recursion and should not be used for compute-heavy work.
+
+Reproduce with `benchmarks/bench_fibonacci.xs`, `benchmarks/bench_sort.xs`,
+`benchmarks/bench_strings.xs` and `xs bench` (runs each 10 times and
+reports min/max/avg).
+
 ## Docs
 
-- [LANGUAGE.md](LANGUAGE.md) -- full language reference (~2000 lines, covers everything)
+- [LANGUAGE.md](LANGUAGE.md) -- full language reference
 - [COMMANDS.md](COMMANDS.md) -- every CLI command, flag, and subcommand
 - [PLUGINS.md](PLUGINS.md) -- plugin system guide with working examples
 - [STATUS.md](STATUS.md) -- what works, what's partial, what's planned

@@ -95,6 +95,10 @@ struct Interp {
        The void* is the opaque DAP state pointer. */
     int         (*debug_hook)(void *dap_state, Interp *interp, Node *stmt);
     void        *debug_hook_data;
+
+    /* Set when interp_run surfaced an unhandled exception at top level.
+       Consulted by the CLI to return a non-zero exit code. */
+    int          had_unhandled_exception;
 };
 
 Interp *interp_new(const char *filename);

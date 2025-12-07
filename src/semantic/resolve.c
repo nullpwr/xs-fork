@@ -121,6 +121,12 @@ static void define_pattern_bindings(Node *pat, SymTab *st) {
         break;
     case NODE_PAT_REGEX:
         break;
+    case NODE_PAT_MAP:
+        for (int i = 0; i < pat->pat_map.nfields; i++) {
+            Node *sub = pat->pat_map.sub[i];
+            if (sub) define_pattern_bindings(sub, st);
+        }
+        break;
     default:
         break;
     }
@@ -332,12 +338,20 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
         if (!is_builtin_name(name) && !(name[0] == '_' && name[1] == '_')) {
             Symbol *sym = sym_lookup(st, name);
             if (!sym) {
-                Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "T0002",
+                /* If the program loads any plugins, the name might be
+                   injected at plugin init, which sema can't see. Downgrade
+                   to a warning so legit typos still surface but plugin
+                   users aren't drowned in false positives. */
+                DiagSeverity sev = (ctx && ctx->has_plugin_load)
+                                    ? DIAG_WARNING : DIAG_ERROR;
+                Diagnostic *d = diag_new(sev, DIAG_PHASE_SEMANTIC, "T0002",
                     "undefined name '%s'", name);
                 diag_annotate(d, n->span, 1, "not found in this scope");
                 const char *similar = find_similar_name(st, name);
                 if (similar) {
                     diag_hint(d, "did you mean '%s'?", similar);
+                } else if (sev == DIAG_WARNING) {
+                    diag_hint(d, "a loaded plugin may inject this name at runtime");
                 }
                 diag_emit(ctx->diag, d);
             } else {
