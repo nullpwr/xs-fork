@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include "core/utf8.h"
 #include "optimizer/inline_cache.h"
+#include "runtime/async.h"
 #include <time.h>
 #include <limits.h>
 #ifndef PATH_MAX
@@ -714,6 +715,23 @@ void interp_free(Interp *i) {
     /* run plugin teardown callbacks only for the main interpreter */
     if (i == g_current_interp) {
         plugin_run_teardowns();
+        /* release eval hooks the main interpreter registered so the next
+           interpreter (e.g. the next test file under `xs test`) does not
+           fire callbacks that close over the freed env. */
+        for (int _h = 0; _h < g_n_before_eval; _h++) {
+            if (g_before_eval[_h].callback) value_decref(g_before_eval[_h].callback);
+            g_before_eval[_h].callback = NULL;
+        }
+        g_n_before_eval = 0;
+        for (int _h = 0; _h < g_n_after_eval; _h++) {
+            if (g_after_eval[_h].callback) value_decref(g_after_eval[_h].callback);
+            g_after_eval[_h].callback = NULL;
+        }
+        g_n_after_eval = 0;
+        g_has_eval_hooks = 0;
+        /* drop the process-wide async runtime too: any promise callbacks
+           it holds reference closures from this interpreter's env. */
+        async_shutdown();
     }
     CF_CLEAR(i);
     env_decref(i->env);

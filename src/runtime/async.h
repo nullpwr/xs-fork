@@ -57,6 +57,11 @@ typedef struct AsyncRuntime {
 /* runtime lifecycle */
 AsyncRuntime *async_runtime_new(void);
 void          async_runtime_free(AsyncRuntime *rt);
+/* free the process-wide async runtime if one was lazily allocated. Call
+   when an interpreter instance is being torn down so pending promises
+   and their callback closures (which may reference the interpreter's
+   env) do not outlive it. */
+void          async_shutdown(void);
 void          async_runtime_drain(AsyncRuntime *rt);
 void          async_runtime_tick(AsyncRuntime *rt);
 void          async_runtime_run_until_done(AsyncRuntime *rt);

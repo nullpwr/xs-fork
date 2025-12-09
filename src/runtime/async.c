@@ -93,6 +93,12 @@ void async_runtime_free(AsyncRuntime *rt) {
     free(rt);
 }
 
+void async_shutdown(void) {
+    if (g_async_rt) async_runtime_free(g_async_rt);
+    g_async_rt = NULL;
+    g_async_interp = NULL;
+}
+
 void async_runtime_tick(AsyncRuntime *rt) {
     async_drain_microtasks(rt);
     if (rt->evloop)

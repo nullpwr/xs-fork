@@ -1557,20 +1557,18 @@ test_again: ;
                             continue; /* skip the whole-file pass/fail below */
                         }
 
-                        /* No #[test] functions -- run the whole file */
-                        Interp *interp = interp_new(tpath);
-                        {
-                            Value *argv_val = xs_array_new();
-                            env_define(interp->globals, "argv", argv_val, 0);
-                            value_decref(argv_val);
-                        }
-                        interp_run(interp, prog);
-                        if (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC) {
+                        /* No #[test] functions: run each file in a fresh
+                           subprocess so global plugin/async/hook state
+                           from one test cannot taint the next. */
+                        node_free(prog);
+                        char cmd[PATH_MAX + 64];
+                        snprintf(cmd, sizeof cmd, "\"%s\" \"%s\"",
+                                 argv[0], tpath);
+                        int rc_sys = system(cmd);
+                        if (rc_sys != 0) {
                             test_failed = 1;
                             err_msg = "runtime error";
                         }
-                        interp_free(interp);
-                        node_free(prog);
                     }
 
                     clock_t t_end = clock();
