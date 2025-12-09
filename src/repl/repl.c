@@ -25,7 +25,7 @@
 #include <sys/ioctl.h>
 #endif
 
-#define XS_REPL_VERSION "0.2.0"
+#define XS_REPL_VERSION "0.5.0"
 #define XS_HISTORY_MAX 1000
 #define XS_LINE_MAX    8192
 

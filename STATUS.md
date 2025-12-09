@@ -1,10 +1,18 @@
 # XS Status
 
-What works, what's partial, and what's planned. Current release: v0.4.0.
+What works, what's partial, and what's planned. Current release: v0.5.0.
+
+## Bytecode VM
+
+The default backend since v0.5.0. Passes the full test suite and is
+~4-9x faster than the tree-walk interpreter on compute-heavy code.
+Programs that register `plugin.runtime.after_eval` hooks auto-fall
+back to the interpreter.
 
 ## Tree-Walk Interpreter
 
-The default backend. Handles the full language.
+Reserved for debugging and for the handful of plugins that rely on
+AST-level runtime hooks. Pass `--interp` to force it.
 
 | Feature | Status |
 |---------|--------|

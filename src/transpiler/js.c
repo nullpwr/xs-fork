@@ -14,6 +14,7 @@ static void emit_expr(SB *s, Node *n, int depth);
 static void emit_stmt(SB *s, Node *n, int depth);
 static void emit_block_body(SB *s, Node *block, int depth);
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth);
+static int node_has_perform(Node *n);
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth);
 
 /* state: are we inside a class method body? */
@@ -1329,10 +1330,10 @@ static int node_has_perform(Node *n) {
             if (node_has_perform(n->if_expr.elif_thens.items[j])) return 1;
         if (node_has_perform(n->if_expr.else_branch)) return 1;
         return 0;
-    case NODE_WHILE:      return node_has_perform(n->while_.cond) ||
-                                 node_has_perform(n->while_.body);
-    case NODE_FOR:        return node_has_perform(n->for_.iter) ||
-                                 node_has_perform(n->for_.body);
+    case NODE_WHILE:      return node_has_perform(n->while_loop.cond) ||
+                                 node_has_perform(n->while_loop.body);
+    case NODE_FOR:        return node_has_perform(n->for_loop.iter) ||
+                                 node_has_perform(n->for_loop.body);
     case NODE_BINOP:      return node_has_perform(n->binop.left) ||
                                  node_has_perform(n->binop.right);
     case NODE_UNARY:      return node_has_perform(n->unary.expr);
@@ -1348,11 +1349,10 @@ static int node_has_perform(Node *n) {
         return 0;
     case NODE_TRY:
         if (node_has_perform(n->try_.body)) return 1;
-        if (node_has_perform(n->try_.catch_block)) return 1;
         if (node_has_perform(n->try_.finally_block)) return 1;
         return 0;
     case NODE_HANDLE:
-        return node_has_perform(n->handle.body);
+        return node_has_perform(n->handle.expr);
     default:
         return 0;
     }
