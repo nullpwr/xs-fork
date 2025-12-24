@@ -216,7 +216,11 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
             if (pm->name)
                 sym_define(st, pm->name, SYM_PARAM, NULL, NULL, 0);
         }
+        int saved_gen = ctx->in_generator;
+        if (n->fn_decl.is_generator) ctx->in_generator++;
+        else                         ctx->in_generator = 0;
         if (n->fn_decl.body) resolve_node(n->fn_decl.body, st, ctx);
+        ctx->in_generator = saved_gen;
         scope_pop(st);
         break;
     }
@@ -229,7 +233,10 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
                 sym_define(st, pm->name, SYM_PARAM, NULL, NULL, 0);
         }
         sym_define(st, "__block", SYM_PARAM, NULL, NULL, 0);
+        int saved_gen = ctx->in_generator;
+        ctx->in_generator++;  /* tag bodies use yield to run the caller block */
         if (n->tag_decl.body) resolve_node(n->tag_decl.body, st, ctx);
+        ctx->in_generator = saved_gen;
         scope_pop(st);
         break;
     }
@@ -407,6 +414,14 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
         break;
 
     case NODE_YIELD:
+        if (ctx->in_generator == 0) {
+            Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "S0040",
+                                     "yield outside generator");
+            diag_annotate(d, n->span, 1, "yield is only valid inside fn*");
+            diag_hint(d, "declare the enclosing function as fn* or drop the yield");
+            diag_emit(ctx->diag, d);
+            ctx->n_errors++;
+        }
         if (n->yield_.value) resolve_node(n->yield_.value, st, ctx);
         break;
 
@@ -485,7 +500,11 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
             if (pm->name)
                 sym_define(st, pm->name, SYM_PARAM, NULL, NULL, 0);
         }
+        int saved_gen = ctx->in_generator;
+        if (n->lambda.is_generator) ctx->in_generator++;
+        else                        ctx->in_generator = 0;
         if (n->lambda.body) resolve_node(n->lambda.body, st, ctx);
+        ctx->in_generator = saved_gen;
         scope_pop(st);
         break;
     }

@@ -4580,6 +4580,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(t, "null") == 0) match = (left->tag == XS_NULL);
                 else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (left->tag == XS_FUNC || left->tag == XS_NATIVE || left->tag == XS_CLOSURE);
                 else if (strcmp(t, "tuple") == 0) match = (left->tag == XS_TUPLE);
+                /* shape predicates used by the match-pattern compiler */
+                else if (strcmp(t, "<array-like>") == 0)
+                    match = (left->tag == XS_ARRAY || left->tag == XS_TUPLE);
+                else if (strcmp(t, "<map-like>") == 0)
+                    match = (left->tag == XS_MAP || left->tag == XS_MODULE ||
+                             left->tag == XS_STRUCT_VAL || left->tag == XS_INST);
                 else if (left->tag == XS_STRUCT_VAL && left->st) match = (strcmp(left->st->type_name, t) == 0);
                 else if (left->tag == XS_ENUM_VAL && left->en) match = (strcmp(left->en->type_name, t) == 0);
                 else if (left->tag == XS_INST && left->inst && left->inst->class_) match = (strcmp(left->inst->class_->name, t) == 0);

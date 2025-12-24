@@ -1394,16 +1394,23 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     patch_jump(c, hit_jumps[hi]);
             } else if (pat->tag == NODE_PAT_SLICE) {
                 int head_n = pat->pat_slice.elems.len;
-                /* If there's a rest binding, the subject must have at least
-                   head_n elements. Without rest we accept any length >= head_n
-                   (matches interp semantic). */
-                if (pat->pat_slice.rest) {
-                    emit_a(c, OP_LOAD_LOCAL, subj_slot);
-                    emit(c, MAKE_A(OP_ITER_LEN, 0, 0));
-                    emit_const(c, xs_int(head_n));
-                    emit(c, MAKE_A(OP_GTE, 0, 0));
-                    j_next = emit_jump(c, OP_JUMP_IF_FALSE);
-                }
+                /* Guard: subject must actually be array-like. Without this
+                   an int like 99 would sail through because ITER_LEN returns
+                   0 for it and the pattern [] would spuriously match. */
+                emit_a(c, OP_LOAD_LOCAL, subj_slot);
+                emit_const(c, xs_str("<array-like>"));
+                emit(c, MAKE_A(OP_IS, 0, 0));
+                j_next = emit_jump(c, OP_JUMP_IF_FALSE);
+                /* Closed pattern (no rest): require exact length. Open
+                   pattern: require at least head_n. */
+                emit_a(c, OP_LOAD_LOCAL, subj_slot);
+                emit(c, MAKE_A(OP_ITER_LEN, 0, 0));
+                emit_const(c, xs_int(head_n));
+                emit(c, pat->pat_slice.rest
+                        ? MAKE_A(OP_GTE, 0, 0)
+                        : MAKE_A(OP_EQ, 0, 0));
+                if (n_tuple_jumps < 16)
+                    tuple_jumps[n_tuple_jumps++] = emit_jump(c, OP_JUMP_IF_FALSE);
                 for (int si = 0; si < head_n; si++) {
                     Node *elem_pat = pat->pat_slice.elems.items[si];
                     if (elem_pat->tag == NODE_PAT_IDENT) {
@@ -1506,6 +1513,14 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     /* no binding needed */
                 }
             } else if (pat->tag == NODE_PAT_MAP) {
+                /* Guard: subject must be map-like. Without this the
+                   pattern #{} would spuriously match any value, including
+                   ints, because the field loop below has nothing to check
+                   on an empty pattern. */
+                emit_a(c, OP_LOAD_LOCAL, subj_slot);
+                emit_const(c, xs_str("<map-like>"));
+                emit(c, MAKE_A(OP_IS, 0, 0));
+                j_next = emit_jump(c, OP_JUMP_IF_FALSE);
                 compile_map_pattern_at(c, pat, subj_slot,
                                        tuple_jumps, &n_tuple_jumps, 16);
             } else if (pat->tag == NODE_PAT_REGEX) {
@@ -1540,8 +1555,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             arm_jumps[n_arm_jumps++] = emit_jump(c, OP_JUMP);
             if (j_next >= 0)  patch_jump(c, j_next);
             if (j_guard >= 0) patch_jump(c, j_guard);
-            /* patch per-element fail jumps from tuple / map patterns */
+            /* patch per-element fail jumps from tuple / slice / map patterns */
             if (pat && (pat->tag == NODE_PAT_TUPLE ||
+                        pat->tag == NODE_PAT_SLICE ||
                         pat->tag == NODE_PAT_MAP)) {
                 for (int tj = 0; tj < n_tuple_jumps; tj++)
                     patch_jump(c, tuple_jumps[tj]);
