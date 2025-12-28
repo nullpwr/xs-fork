@@ -1481,6 +1481,14 @@ static int db_col_index(XSDBTable *tbl, const char *name) {
     for (int i = 0; i < tbl->ncols; i++) {
         if (strcasecmp(tbl->columns[i].name, name) == 0) return i;
     }
+    /* Positional aliases: c0, c1, ... map to column index N. We accept
+       these alongside real column names so legacy queries keep working. */
+    if (name[0] == 'c' && name[1] >= '0' && name[1] <= '9') {
+        char *endp = NULL;
+        long idx = strtol(name + 1, &endp, 10);
+        if (endp && *endp == '\0' && idx >= 0 && idx < tbl->ncols)
+            return (int)idx;
+    }
     return -1;
 }
 

@@ -6728,6 +6728,33 @@ static const char *xs_strcasestr_fn(const char *h, const char *n) {
     return NULL;
 }
 
+/* Resolve a user-written column name to the positional 'cN' key that
+   rows are stored under. Falls back to the name itself if the column
+   was already in positional form or the schema is missing. */
+static void db_resolve_col(Value *db_val, const char *tname,
+                            const char *user_name, char *out, size_t outsz) {
+    snprintf(out, outsz, "%s", user_name);
+    if (!user_name[0]) return;
+    /* already positional (c0, c1, ...) */
+    if (user_name[0] == 'c' && user_name[1] >= '0' && user_name[1] <= '9') {
+        int all_digits = 1;
+        for (const char *q = user_name + 1; *q; q++)
+            if (*q < '0' || *q > '9') { all_digits = 0; break; }
+        if (all_digits) return;
+    }
+    Value *sch = map_get(db_val->map, "_schemas");
+    if (!sch || (sch->tag != XS_MAP && sch->tag != XS_MODULE)) return;
+    Value *cols = map_get(sch->map, tname);
+    if (!cols || cols->tag != XS_ARRAY) return;
+    for (int i = 0; i < cols->arr->len; i++) {
+        Value *cn = cols->arr->items[i];
+        if (cn && cn->tag == XS_STR && strcasecmp(cn->s, user_name) == 0) {
+            snprintf(out, outsz, "c%d", i);
+            return;
+        }
+    }
+}
+
 static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
     if (!db_val || (db_val->tag != XS_MAP && db_val->tag != XS_MODULE) || !db_val->map)
         return xs_str("error: invalid db handle");
@@ -6740,18 +6767,39 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
     const char *rest;
     char tname[256];
 
-    /* CREATE TABLE name */
+    /* CREATE TABLE name (col1, col2, ...) */
     if ((rest = db_match_kw(p, "CREATE")) != NULL) {
         rest = db_match_kw(rest, "TABLE");
         if (!rest) return xs_str("error: expected TABLE after CREATE");
         rest = db_read_ident(rest, tname, sizeof tname);
-        (void)rest;
         if (tname[0] == '\0') return xs_str("error: missing table name");
-        /* Check if table already exists */
         if (map_get(tables, tname)) return xs_str("error: table already exists");
         Value *tbl = xs_array_new();
         map_set(tables, tname, tbl);
         value_decref(tbl);
+        /* Parse optional column list, store names under _schemas[tname]. */
+        Value *cols = xs_array_new();
+        rest = db_skip_ws(rest);
+        if (*rest == '(') {
+            rest++;
+            while (*rest && *rest != ')') {
+                rest = db_skip_ws(rest);
+                char cbuf[128];
+                rest = db_read_ident(rest, cbuf, sizeof cbuf);
+                if (cbuf[0]) {
+                    Value *cs = xs_str(cbuf);
+                    array_push(cols->arr, cs);
+                    value_decref(cs);
+                }
+                /* skip any per-column type/constraint tokens to the next , or ) */
+                while (*rest && *rest != ',' && *rest != ')') rest++;
+                if (*rest == ',') rest++;
+            }
+        }
+        Value *sch = map_get(db_val->map, "_schemas");
+        if (sch && (sch->tag == XS_MAP || sch->tag == XS_MODULE))
+            map_set(sch->map, tname, cols);
+        value_decref(cols);
         return xs_str("ok");
     }
 
@@ -6872,13 +6920,17 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
             where_val[wi] = '\0';
         }
 
+        char resolved_key[256];
+        if (where_key[0])
+            db_resolve_col(db_val, tname, where_key, resolved_key, sizeof resolved_key);
+        else resolved_key[0] = '\0';
+
         Value *results = xs_array_new();
         for (int i = 0; i < tbl->arr->len; i++) {
             Value *row = tbl->arr->items[i];
             if (!row || (row->tag != XS_MAP && row->tag != XS_MODULE)) continue;
-            /* Apply WHERE filter if present */
-            if (where_key[0]) {
-                Value *fv = map_get(row->map, where_key);
+            if (resolved_key[0]) {
+                Value *fv = map_get(row->map, resolved_key);
                 if (!fv) continue;
                 char *fs = value_str(fv);
                 int match = (strcmp(fs, where_val) == 0);
@@ -6924,13 +6976,16 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         }
         where_val[wi] = '\0';
 
+        char resolved_key[256];
+        db_resolve_col(db_val, tname, where_key, resolved_key, sizeof resolved_key);
+
         /* Remove matching rows (compact in-place) */
         int dst = 0;
         for (int i = 0; i < tbl->arr->len; i++) {
             Value *row = tbl->arr->items[i];
             int keep = 1;
             if (row && (row->tag == XS_MAP || row->tag == XS_MODULE) && row->map) {
-                Value *fv = map_get(row->map, where_key);
+                Value *fv = map_get(row->map, resolved_key);
                 if (fv) {
                     char *fs = value_str(fv);
                     if (strcmp(fs, where_val) == 0) keep = 0;
@@ -6959,6 +7014,13 @@ static Value *native_db_open(Interp *ig, Value **a, int n) {
     Value *tv = xs_module(tables);
     map_set(db, "_tables", tv);
     value_decref(tv);
+    /* _schemas maps table name -> array of column names, so WHERE/SELECT
+       can resolve real column identifiers instead of only positional
+       c0/c1/... names. */
+    XSMap *schemas = map_new();
+    Value *sv = xs_module(schemas);
+    map_set(db, "_schemas", sv);
+    value_decref(sv);
     return xs_module(db);
 }
 
