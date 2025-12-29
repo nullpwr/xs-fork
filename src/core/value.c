@@ -18,12 +18,45 @@ Value *XS_NULL_VAL = NULL;
 Value *XS_TRUE_VAL  = NULL;
 Value *XS_FALSE_VAL = NULL;
 
+/* Thread-local freelist for Value structs. Arithmetic-heavy code
+   (fib, loop_sum) allocates millions of short-lived ints; going
+   through malloc each time costs 20-40 ns. Keeping a per-thread
+   freelist of ~256 recycled Values cuts that to ~3 ns. The list is
+   capped so long-running programs don't accumulate memory. */
+#define VAL_FREELIST_MAX 256
+static __thread Value *g_val_freelist = NULL;
+static __thread int    g_val_freelist_len = 0;
+
 static Value *val_alloc(ValueTag tag) {
-    Value *v = xs_malloc(sizeof(Value));
-    memset(v, 0, sizeof(Value));
+    Value *v;
+    if (g_val_freelist) {
+        v = g_val_freelist;
+        /* The freed Value's union member slot stashes the next pointer.
+           Read it via v->fn (any 8-byte union member works). */
+        g_val_freelist = (Value *)v->fn;
+        g_val_freelist_len--;
+        memset(v, 0, sizeof(Value));
+    } else {
+        v = xs_malloc(sizeof(Value));
+        memset(v, 0, sizeof(Value));
+    }
     v->tag      = tag;
     v->refcount = 1;
     return v;
+}
+
+static void val_free(Value *v) {
+    /* Only recycle XS_INT Values through the freelist. Other tags
+       have complex union members and we'd risk tripping up code that
+       holds stale references. Ints (the dominant arithmetic output)
+       are simple enough to recycle safely. */
+    if (v->tag == XS_INT && g_val_freelist_len < VAL_FREELIST_MAX) {
+        v->fn = (XSFunc *)g_val_freelist;
+        g_val_freelist = v;
+        g_val_freelist_len++;
+    } else {
+        free(v);
+    }
 }
 
 void value_init_singletons(void) {
@@ -280,7 +313,7 @@ static void free_value(Value *v) {
 #endif
         default: break;
     }
-    free(v);
+    val_free(v);
 }
 
 void value_decref(Value *v) {
