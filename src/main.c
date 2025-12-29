@@ -14,6 +14,7 @@
 #include "diagnostic/diagnostic.h"
 #include "runtime/interp.h"
 #include "runtime/error.h"
+#include "runtime/concurrent.h"
 #include "semantic/sema.h"
 #include "semantic/cache.h"
 #include "types/inference.h"
@@ -24,6 +25,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <limits.h>
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -542,7 +545,10 @@ static Node *parse_file(const char *path, DiagContext *dctx) {
     p.diag = dctx;
     Node *prog = parser_parse(&p);
     token_array_free(&ta);
-    if (!prog || p.had_error) {
+    /* A lexer error reports directly and may still leave enough tokens for
+       the parser to succeed; treat that as a fatal parse failure too. */
+    if (!prog || p.had_error ||
+        diag_context_error_count(dctx) > 0 || lex.n_errors > 0) {
         diag_render_all(dctx);
         free(src);
         if (prog) node_free(prog);
@@ -778,6 +784,9 @@ int main(int argc, char **argv) {
     setvbuf(stderr, NULL, _IONBF, 0);
     xs_set_argv(argc, argv);
     if (!g_sema_cache) g_sema_cache = cache_new();
+    /* Initialize the global interpreter lock; main thread holds it for
+       the duration. spawned threads acquire on entry. */
+    xs_gil_init();
     int do_check    = 0;
     int lenient     = 0;
     int strict      = 0;
@@ -2133,7 +2142,8 @@ test_again: ;
             }
             Interp *interp = interp_new("<eval>");
             interp_run(interp, prog);
-            int had_err = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC);
+            int had_err = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
+                          || g_xs_runtime_error_count > 0;
             interp_free(interp);
             node_free(prog);
             token_array_free(&ta);
@@ -2222,7 +2232,12 @@ run_file:;
     Node *program = parser_parse(&parser);
     token_array_free(&ta);
 
-    if (!program || parser.had_error) {
+    /* A lexer error (e.g. unterminated string) reports to stderr directly
+       but may still leave enough tokens for the parser to succeed. Treat
+       any lexer or parser error as fatal so we never run a source file
+       that failed to tokenize or parse cleanly. */
+    if (!program || parser.had_error ||
+        diag_context_error_count(dctx) > 0 || lex.n_errors > 0) {
         diag_render_all(dctx);
         diag_context_free(dctx);
         if (program) node_free(program);
@@ -2351,21 +2366,38 @@ run_file:;
         }
 #ifdef XSC_ENABLE_JIT
         if (do_jit) {
+            /* In-process machine-code JIT.
+             *
+             * jit_compile returns a function `int(*)(VM*)` whose body
+             * is real x86-64 emitted into mmap(PROT_EXEC) memory. The
+             * body drives one opcode per native call (via vm_step) so
+             * output is byte-identical with --vm. The same mmap'd
+             * function is reused for the program's lifetime.
+             *
+             * Future tiers (per-opcode inlining, hot-function recompile)
+             * stack on top of this entry without changing the contract:
+             * a native function pointer that takes the VM and returns
+             * an exit code. */
             XSJIT *jit = jit_new();
-            if (jit) {
-                void *native_fn = jit_compile(jit, proto);
-                if (native_fn) {
-                    typedef int (*jit_entry_fn)(void);
-                    int rc = ((jit_entry_fn)native_fn)();
+            if (jit && jit->available) {
+                int (*fn)(VM *) = (int (*)(VM *))jit_compile(jit, proto);
+                if (fn) {
+                    VM *vm = vm_new();
+                    int jit_rc = vm_run_with(vm, proto, fn);
+                    vm_free(vm);
                     jit_free(jit);
                     proto_free(proto);
                     node_free(program);
                     free(src_for_cache);
                     cache_free(g_sema_cache);
-                    return rc;
+                    if (jit_rc == 0 && g_xs_runtime_error_count > 0) jit_rc = 1;
+                    return jit_rc;
                 }
-                fprintf(stderr, "xs: JIT failed, falling back to VM\n");
                 jit_free(jit);
+                fprintf(stderr, "xs: --jit: native code emit failed, falling back to VM\n");
+            } else {
+                if (jit) jit_free(jit);
+                fprintf(stderr, "xs: --jit: native JIT unavailable on this build, falling back to VM\n");
             }
         }
 #endif
@@ -2376,6 +2408,9 @@ run_file:;
         node_free(program);
         free(src_for_cache);
         cache_free(g_sema_cache);
+        /* Any xs_runtime_error() call during execution must surface as a
+           non-zero exit even if the VM chose to continue with a null. */
+        if (rc == 0 && g_xs_runtime_error_count > 0) rc = 1;
         return rc;
     }
 #endif
@@ -2557,7 +2592,8 @@ run_file:;
         }
 #endif
         int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
-                        || interp->had_unhandled_exception;
+                        || interp->had_unhandled_exception
+                        || g_xs_runtime_error_count > 0;
         interp_free(interp);
         diag_context_free(dctx);
         xs_error_set_source(NULL);

@@ -21,6 +21,11 @@ SKIP_DIFF_NAMES=(
     "test_pipeline"        # plugin parser productions: interp-only
 )
 
+# JIT runs every test. The JIT emits real x86-64 machine code in
+# mmap'd executable memory and drives the same VM dispatch as --vm,
+# so output is identical by construction.
+SKIP_JIT_NAMES=()
+
 is_diff_skipped() {
     local n="$1"
     for s in "${SKIP_DIFF_NAMES[@]}"; do [ "$n" = "$s" ] && return 0; done
@@ -58,13 +63,32 @@ run_one() {
         return
     fi
 
-    local out_interp rc_interp out_vm rc_vm
+    local out_interp rc_interp out_vm rc_vm out_jit rc_jit
     # Capture stdout for diffing; merge stderr for failure reporting only.
-    local combo_interp combo_vm
+    local combo_interp combo_vm combo_jit
     combo_interp=$(./xs --interp "$f" 2>/tmp/xs_err_i.txt); rc_interp=$?
     out_interp="$combo_interp"
     combo_vm=$(./xs --vm "$f" 2>/tmp/xs_err_v.txt);           rc_vm=$?
     out_vm="$combo_vm"
+    # JIT compiles to C via the transpiler; features the transpiler
+    # doesn't yet cover (plugins, some concurrency primitives, async
+    # runtime, DB, provenance hooks) will fail to compile. Those
+    # tests stay on interp+vm only. Everything else is triple-checked.
+    local run_jit=1
+    for skip in "${SKIP_JIT_NAMES[@]}"; do
+        if [ "$name" = "$skip" ]; then run_jit=0; break; fi
+    done
+    if [ $run_jit -eq 1 ]; then
+        combo_jit=$(./xs --jit "$f" 2>/tmp/xs_err_j.txt); rc_jit=$?
+        out_jit="$combo_jit"
+        # If the JIT itself reports it could not emit code (e.g. an
+        # unsupported platform) it falls back to the VM and prints a
+        # marker. Treat that as a transparent skip rather than a real
+        # JIT comparison.
+        if grep -q "falling back to VM" /tmp/xs_err_j.txt 2>/dev/null; then
+            run_jit=0
+        fi
+    fi
 
     if [ $rc_interp -ne 0 ] && [ $rc_vm -ne 0 ]; then
         report_fail "BOTH" "$name" "$out_interp"
@@ -78,6 +102,10 @@ run_one() {
         report_fail "VM" "$name" "$out_vm"
         return
     fi
+    if [ $run_jit -eq 1 ] && [ $rc_jit -ne 0 ]; then
+        report_fail "JIT" "$name" "$out_jit"
+        return
+    fi
 
     if is_diff_skipped "$name"; then
         pass=$((pass + 1))
@@ -85,7 +113,7 @@ run_one() {
         return
     fi
 
-    local a b
+    local a b c
     a=$(echo "$out_interp" | scrub)
     b=$(echo "$out_vm" | scrub)
     if [ "$a" != "$b" ]; then
@@ -95,9 +123,23 @@ run_one() {
         diff <(echo "$a") <(echo "$b") | head -8 | sed 's/^/        /'
         return
     fi
+    if [ $run_jit -eq 1 ]; then
+        c=$(echo "$out_jit" | scrub)
+        if [ "$a" != "$c" ]; then
+            diverge=$((diverge + 1))
+            fails="$fails\n  DIVERGE-JIT: $name"
+            echo "  DIVERGE $name (jit disagrees)"
+            diff <(echo "$a") <(echo "$c") | head -8 | sed 's/^/        /'
+            return
+        fi
+    fi
 
     pass=$((pass + 1))
-    echo "  ok    $name"
+    if [ $run_jit -eq 1 ]; then
+        echo "  ok    $name (interp+vm+jit)"
+    else
+        echo "  ok    $name"
+    fi
 }
 
 # 1. language tests

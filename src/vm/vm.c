@@ -4,6 +4,7 @@
 #include "core/xs_bigint.h"
 #include "core/utf8.h"
 #include "runtime/builtins.h"
+#include "runtime/error.h"
 #include "optimizer/inline_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1047,6 +1048,7 @@ VM *vm_new(void) {
     vm->stack      = xs_malloc(vm->stack_cap * sizeof(Value *));
     memset(vm->stack, 0, vm->stack_cap * sizeof(Value *));
     vm->sp         = vm->stack;
+    vm->stack_soft_limit = vm->stack + (vm->stack_cap - 16);
     vm->frames_cap = VM_FRAMES_INIT;
     vm->frames     = xs_malloc(vm->frames_cap * sizeof(CallFrame));
     memset(vm->frames, 0, vm->frames_cap * sizeof(CallFrame));
@@ -1066,7 +1068,7 @@ void vm_free(VM *vm) {
     free(vm);
 }
 
-static void vm_grow_stack(VM *vm) {
+void vm_grow_stack(VM *vm) {
     int sp_off = (int)(vm->sp - vm->stack);
     /* save frame base offsets before realloc */
     int base_offs[vm->frame_count];
@@ -1078,6 +1080,7 @@ static void vm_grow_stack(VM *vm) {
     vm->stack = realloc(vm->stack, new_cap * sizeof(Value *));
     memset(vm->stack + vm->stack_cap, 0, (new_cap - vm->stack_cap) * sizeof(Value *));
     vm->sp = vm->stack + sp_off;
+    vm->stack_soft_limit = vm->stack + (new_cap - 16);
     /* fix frame base pointers and try_stack stack_top pointers */
     for (int i = 0; i < vm->frame_count; i++) {
         vm->frames[i].base = vm->stack + base_offs[i];
@@ -1219,7 +1222,15 @@ static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc) {
     }
     value_decref(fn);
 
-    if (vm_dispatch(vm, saved_fc) != 0) return value_incref(XS_NULL_VAL);
+    /* Run the callee to completion regardless of the JIT's single-step
+       mode. Otherwise a JIT-driven step that triggers a callback (e.g.
+       array.map) would only run one opcode of the callback before
+       unwinding back to native code. */
+    int saved_step = vm->single_step;
+    vm->single_step = 0;
+    int rc = vm_dispatch(vm, saved_fc);
+    vm->single_step = saved_step;
+    if (rc != 0) return value_incref(XS_NULL_VAL);
     return POP();
 }
 
@@ -1295,6 +1306,39 @@ int vm_run(VM *vm, XSProto *proto) {
 static int vm_dispatch(VM *vm, int stop_frame) {
     CallFrame *frame = FRAME;
     for (;;) {
+        /* If xs_runtime_error queued a throw (e.g. from an arithmetic
+           op or builtin), drain it before fetching the next opcode and
+           run the same unwind logic OP_THROW would. */
+        if (g_xs_pending_throw) {
+            Value *exc = g_xs_pending_throw;
+            g_xs_pending_throw = NULL;
+            int handled = 0;
+            while (vm->frame_count > 0) {
+                CallFrame *cf = &vm->frames[vm->frame_count - 1];
+                if (cf->try_depth > 0) {
+                    TryEntry *te = &cf->try_stack[--cf->try_depth];
+                    if (g_xs_in_try > 0) g_xs_in_try--;
+                    while (vm->sp > te->stack_top) value_decref(POP());
+                    PUSH(exc);
+                    frame = cf;
+                    frame->ip = te->catch_ip;
+                    handled = 1;
+                    break;
+                }
+                upvalue_close_all(&vm->open_upvalues, cf->base);
+                while (vm->sp > cf->base) value_decref(POP());
+                value_decref(cf->closure_val);
+                vm->frame_count--;
+            }
+            if (!handled) {
+                char *s = value_str(exc);
+                fprintf(stderr, "uncaught: %s\n", s);
+                free(s);
+                value_decref(exc);
+                return 1;
+            }
+            continue; /* re-enter loop at catch handler */
+        }
         Instruction instr = *frame->ip++;
         Opcode op = INSTR_OPCODE(instr);
 
@@ -1342,6 +1386,31 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_STORE_GLOBAL: {
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *v = POP();
+            /* Overload accumulation: if a user function with the same
+               name is already bound and the new value is also a user
+               function, merge them into an XS_OVERLOAD wrapper. We
+               deliberately do NOT pull XS_NATIVE built-ins into the
+               overload set: a user `fn sum(...)` should shadow the
+               built-in `sum`, not co-exist with it (otherwise the
+               arity-pick would route some calls back to the builtin). */
+            if (v->tag == XS_CLOSURE || v->tag == XS_FUNC) {
+                Value *existing = map_get(vm->globals, name);
+                if (existing && existing->tag == XS_OVERLOAD) {
+                    array_push(existing->overload, value_incref(v));
+                    value_decref(v);
+                    break;
+                }
+                if (existing && (existing->tag == XS_FUNC ||
+                                 existing->tag == XS_CLOSURE)) {
+                    Value *oset = xs_overload_new();
+                    array_push(oset->overload, value_incref(existing));
+                    array_push(oset->overload, value_incref(v));
+                    map_set(vm->globals, name, oset);
+                    value_decref(oset);
+                    value_decref(v);
+                    break;
+                }
+            }
             map_set(vm->globals, name, v);
             value_decref(v);
             break;
@@ -1361,13 +1430,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 strcpy(buf, as); strcat(buf, bs);
                 free(as); free(bs);
                 r = xs_str(buf); free(buf);
+            } else if (a->tag == XS_ARRAY && b->tag == XS_ARRAY) {
+                r = xs_array_new();
+                for (int ai = 0; ai < a->arr->len; ai++) array_push(r->arr, a->arr->items[ai]);
+                for (int bi = 0; bi < b->arr->len; bi++) array_push(r->arr, b->arr->items[bi]);
             } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__add__", b)) != NULL) {
             } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "+", b)) != NULL) {
             } else if (a->tag == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "+", b)) != NULL) {
-            } else {
+            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
+                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
                 double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
                 double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av + bv);
+            } else {
+                Span s = {0};
+                xs_runtime_error(s, "type mismatch", NULL,
+                    "cannot add values of tag %d and %d",
+                    (int)a->tag, (int)b->tag);
+                r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
@@ -1381,10 +1461,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 /* dunder */
             } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "-", b)) != NULL) {
             } else if (a->tag == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "-", b)) != NULL) {
-            } else {
+            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
+                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
                 double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
                 double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av - bv);
+            } else {
+                Span s = {0};
+                xs_runtime_error(s, "type mismatch", NULL,
+                    "cannot subtract values of tag %d and %d",
+                    (int)a->tag, (int)b->tag);
+                r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
@@ -1409,18 +1496,28 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     buf[slen * (size_t)count] = '\0';
                     r = xs_str(buf); free(buf);
                 }
-            } else {
+            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
+                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
                 double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
                 double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av * bv);
+            } else {
+                Span s = {0};
+                xs_runtime_error(s, "type mismatch", NULL,
+                    "cannot multiply values of tag %d and %d",
+                    (int)a->tag, (int)b->tag);
+                r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
         case OP_DIV: {
             Value *b=POP(), *a=POP(); Value *r;
             if (a->tag==XS_INT && b->tag==XS_INT) {
-                if (b->i == 0) { r = value_incref(XS_NULL_VAL); }
-                else r = xs_int(a->i / b->i);
+                if (b->i == 0) {
+                    Span s = {0};
+                    xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
+                    r = value_incref(XS_NULL_VAL);
+                } else r = xs_int(a->i / b->i);
             } else if ((a->tag==XS_INT||a->tag==XS_BIGINT) && (b->tag==XS_INT||b->tag==XS_BIGINT)) {
                 r = xs_numeric_div(a, b);
             } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__div__", b)) != NULL) {
@@ -1428,9 +1525,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "/", b)) != NULL) {
             } else {
                 double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
-                if (bv == 0.0) { r = value_incref(XS_NULL_VAL); } else {
-                double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                r = xs_float(av / bv);
+                if (bv == 0.0) {
+                    Span s = {0};
+                    xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
+                    r = value_incref(XS_NULL_VAL);
+                } else {
+                    double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                    r = xs_float(av / bv);
                 }
             }
             value_decref(a); value_decref(b); PUSH(r); break;
@@ -1439,8 +1540,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *b=POP(), *a=POP();
             Value *r;
             if (a->tag==XS_INT && b->tag==XS_INT) {
-                if (b->i == 0) r = value_incref(XS_NULL_VAL);
-                else r = xs_int(a->i % b->i);
+                if (b->i == 0) {
+                    Span s = {0};
+                    xs_runtime_error(s, "modulo by zero", NULL, "cannot take modulo with zero divisor");
+                    r = value_incref(XS_NULL_VAL);
+                } else {
+                    /* Math modulo (sign of divisor), matches interp. */
+                    int64_t m = a->i % b->i;
+                    if (m != 0 && ((m ^ b->i) < 0)) m += b->i;
+                    r = xs_int(m);
+                }
             } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__mod__", b)) != NULL) {
                 /* dunder */
             } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "%", b)) != NULL) {
@@ -1583,7 +1692,21 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     r = xs_str(buf);
                     free(buf);
                 }
+            } else if (col->tag==XS_NULL) {
+                Span s = {0};
+                xs_runtime_error(s, "null index", NULL,
+                    "cannot index a null value");
+                r = value_incref(XS_NULL_VAL);
+            } else if (col->tag==XS_INT || col->tag==XS_FLOAT ||
+                       col->tag==XS_BOOL || col->tag==XS_BIGINT) {
+                Span s = {0};
+                xs_runtime_error(s, "not indexable", NULL,
+                    "cannot index a value of tag %d (only arrays, tuples, maps, strings, ranges)",
+                    (int)col->tag);
+                r = value_incref(XS_NULL_VAL);
             } else {
+                /* Unknown collection/key combo: keep null fallback for
+                   user-defined types so dunder lookups stay open-ended. */
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(idx); value_decref(col); PUSH(r); break;
@@ -1691,6 +1814,42 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_CALL: {
             int argc   = (int)INSTR_C(instr);
             Value *callee = vm->sp[-argc - 1];
+            /* Overload set: pick a candidate whose arity matches argc.
+               If multiple match, the one whose declared arity equals
+               argc wins; otherwise fall back to the last candidate
+               whose min_arity <= argc <= max_arity. Mirrors interp. */
+            if (callee->tag == XS_OVERLOAD && callee->overload) {
+                XSArray *cs = callee->overload;
+                Value *best = NULL;
+                for (int oi = 0; oi < cs->len; oi++) {
+                    Value *cand = cs->items[oi];
+                    int min_a = 0, max_a = 0;
+                    if (cand->tag == XS_FUNC) {
+                        max_a = cand->fn->nparams;
+                        min_a = max_a;
+                        if (cand->fn->default_vals) {
+                            for (int pi = 0; pi < max_a; pi++)
+                                if (cand->fn->default_vals[pi]) min_a--;
+                        }
+                    } else if (cand->tag == XS_CLOSURE) {
+                        max_a = cand->cl->proto->arity;
+                        min_a = max_a;
+                    } else {
+                        min_a = 0; max_a = argc;
+                    }
+                    if (argc == max_a) { best = cand; break; }
+                    if (argc >= min_a && argc <= max_a) best = cand;
+                }
+                if (best) {
+                    /* Replace the overload value on the stack with the
+                       chosen candidate so the existing dispatch arms
+                       handle it directly. */
+                    value_incref(best);
+                    value_decref(callee);
+                    vm->sp[-argc - 1] = best;
+                    callee = best;
+                }
+            }
             if (callee->tag == XS_NATIVE) {
                 Value **args = vm->sp - argc;
                 Value *result = callee->native(NULL, args, argc);
@@ -3601,6 +3760,38 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else mc_result=value_incref(XS_NULL_VAL);
                 (void)num_f; (void)num_i;
             }
+            else if (mc_obj->tag == XS_RANGE && mc_obj->range) {
+                XSRange *rr = mc_obj->range;
+                int64_t len = rr->inclusive ? (rr->end - rr->start + 1)
+                                            : (rr->end - rr->start);
+                if (len < 0) len = 0;
+                if (strcmp(mc_name,"len")==0 || strcmp(mc_name,"size")==0)
+                    mc_result = xs_int(len);
+                else if (strcmp(mc_name,"start")==0)
+                    mc_result = xs_int(rr->start);
+                else if (strcmp(mc_name,"end")==0)
+                    mc_result = xs_int(rr->end);
+                else if (strcmp(mc_name,"is_empty")==0)
+                    mc_result = xs_bool(len == 0);
+                else if (strcmp(mc_name,"contains")==0 && mc_argc>=1 && mc_args[0]->tag==XS_INT) {
+                    int64_t v = mc_args[0]->i;
+                    int ok = rr->inclusive
+                        ? (v >= rr->start && v <= rr->end)
+                        : (v >= rr->start && v <  rr->end);
+                    mc_result = xs_bool(ok);
+                }
+                else if (strcmp(mc_name,"to_array")==0 || strcmp(mc_name,"collect")==0) {
+                    Value *arr = xs_array_new();
+                    int64_t stop = rr->inclusive ? rr->end + 1 : rr->end;
+                    for (int64_t v = rr->start; v < stop; v++) {
+                        Value *iv = xs_int(v);
+                        array_push(arr->arr, iv);
+                        value_decref(iv);
+                    }
+                    mc_result = arr;
+                }
+                else mc_result = value_incref(XS_NULL_VAL);
+            }
             else if (mc_obj->tag == XS_REGEX && mc_obj->s) {
                 /* Regex methods: .test/.is_match, .match/.find, .replace,
                    .source/.pattern. Mirrors interp.c. */
@@ -3757,11 +3948,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 TryEntry *te = &frame->try_stack[frame->try_depth++];
                 te->catch_ip  = frame->ip + INSTR_sBx(instr);
                 te->stack_top = vm->sp;
+                g_xs_in_try++;
             }
             break;
         }
         case OP_TRY_END: {
-            if (frame->try_depth > 0) frame->try_depth--;
+            if (frame->try_depth > 0) {
+                frame->try_depth--;
+                if (g_xs_in_try > 0) g_xs_in_try--;
+            }
             break;
         }
         case OP_THROW: {
@@ -3771,6 +3966,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 CallFrame *cf = &vm->frames[vm->frame_count - 1];
                 if (cf->try_depth > 0) {
                     TryEntry *te = &cf->try_stack[--cf->try_depth];
+                    if (g_xs_in_try > 0) g_xs_in_try--;
                     while (vm->sp > te->stack_top) value_decref(POP());
                     PUSH(exc);
                     frame = cf;
@@ -4621,9 +4817,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(t, "null") == 0) match = (left->tag == XS_NULL);
                 else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (left->tag == XS_FUNC || left->tag == XS_NATIVE || left->tag == XS_CLOSURE);
                 else if (strcmp(t, "tuple") == 0) match = (left->tag == XS_TUPLE);
-                /* shape predicates used by the match-pattern compiler */
+                /* shape predicates used by the match-pattern compiler.
+                   Slice patterns ([a, b]) only match arrays; tuple
+                   patterns ((a, b)) only match tuples. Without this
+                   strictness `match (1,2) { [a,b] => ... }` would
+                   spuriously fire on a tuple subject. */
                 else if (strcmp(t, "<array-like>") == 0)
-                    match = (left->tag == XS_ARRAY || left->tag == XS_TUPLE);
+                    match = (left->tag == XS_ARRAY);
+                else if (strcmp(t, "<tuple-like>") == 0)
+                    match = (left->tag == XS_TUPLE);
                 else if (strcmp(t, "<map-like>") == 0)
                     match = (left->tag == XS_MAP || left->tag == XS_MODULE ||
                              left->tag == XS_STRUCT_VAL || left->tag == XS_INST);
@@ -4652,10 +4854,72 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             PUSH(dst);
             break;
         }
+        case OP_CLOSE_UPVALUES: {
+            int slot = (int)INSTR_Bx(instr);
+            upvalue_close_all(&vm->open_upvalues, frame->base + slot);
+            break;
+        }
 
         default:
             fprintf(stderr, "bad opcode %d\n", (int)op);
             return 1;
         }
+        /* Cooperative single-step exit for the JIT: when the JIT-emitted
+           machine code wants to drive one opcode per call, it sets
+           vm->single_step before invoking and we bail out right here.
+           step_yielded distinguishes "paused after one op" from
+           "program completed". */
+        if (vm->single_step) {
+            vm->step_yielded = 1;
+            return 0;
+        }
     }
+}
+
+int vm_step(VM *vm) {
+    if (!vm || vm->frame_count == 0) return 1;
+    int saved = vm->single_step;
+    vm->single_step = 1;
+    vm->step_yielded = 0;
+    int rc = vm_dispatch(vm, 0);
+    vm->single_step = saved;
+    if (rc != 0) return -1; /* error / uncaught throw */
+    if (vm->step_yielded) return 0; /* one op done, more to do */
+    return 1; /* program finished */
+}
+
+/* JIT-only fast variant: assumes single_step is already 1 (set once
+   by the JIT prologue) so we skip the save/restore. Avoids three
+   memory writes per step in the hottest path. */
+int vm_step_jit(VM *vm) {
+    if (vm->frame_count == 0) return 1;
+    vm->step_yielded = 0;
+    int rc = vm_dispatch(vm, 0);
+    if (rc != 0) return -1;
+    if (vm->step_yielded) return 0;
+    return 1;
+}
+
+int vm_run_with(VM *vm, XSProto *proto, int (*entry)(VM *)) {
+    if (!vm || !proto || !entry) return 1;
+    g_vm_for_invoke = vm;
+    g_plugin_vm = vm;
+    XSClosure *top_cl = xs_malloc(sizeof *top_cl);
+    top_cl->proto    = proto; proto->refcount++;
+    top_cl->upvalues = NULL;
+    top_cl->refcount = 1;
+    Value *top_val = xs_malloc(sizeof *top_val);
+    top_val->tag      = XS_CLOSURE;
+    top_val->refcount = 1;
+    top_val->cl       = top_cl;
+
+    if (vm->frame_count >= vm->frames_cap) vm_grow_frames(vm);
+    CallFrame *frame   = &vm->frames[vm->frame_count++];
+    frame->closure_val = top_val;
+    frame->ip          = proto->chunk.code;
+    frame->base        = vm->sp;
+    frame->try_depth   = 0;
+    for (int i = 0; i < proto->nlocals; i++) PUSH(xs_null());
+
+    return entry(vm);
 }

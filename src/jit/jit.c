@@ -832,420 +832,882 @@ void jit_free(XSJIT *j) {
 
 #if JIT_ARCH_X86_64 && JIT_HAS_MMAP
 
-/* Jump-patch record */
-typedef struct { size_t native_offset; int target_pc; } JitPatch;
+#include "vm/vm.h"
+#include "core/xs_bigint.h"
 
+/* Real x86-64 JIT (tier 1: per-opcode inlining).
+ *
+ * Calling convention: int jit_entry(VM *vm)
+ *
+ * Register layout:
+ *   r12 = VM*                       (callee-saved, set in prologue)
+ *   r13 = current CallFrame*        (refreshed after every call)
+ *
+ * Per-instruction strategy:
+ *   - For "hot" simple opcodes we inline the body in machine code and
+ *     manually advance frame->ip. No vm_step round trip.
+ *   - For everything else we set frame->ip back to point at the current
+ *     instruction (so the dispatcher fetches it as if it had not been
+ *     pre-decoded) and call vm_step. After the call we refresh r13 in
+ *     case the opcode swapped frames (CALL / RETURN / THROW catch).
+ *
+ * Output equality with --vm is preserved by construction: inlined ops
+ * call the same xs_int / value_incref / value_decref helpers as the VM,
+ * and any opcode we don't recognize delegates to vm_step verbatim. */
+
+/* VM struct field offsets (kept in sync via tests/regression bug025). */
+#define VM_OFF_SP            16
+#define VM_OFF_FRAMES        24
+#define VM_OFF_FRAME_COUNT   36
+#define FRAME_OFF_IP          8
+#define FRAME_OFF_BASE       16
+#define FRAME_SIZE         1608
+#define VAL_OFF_REFCOUNT      4
+
+/* mov rdi, r12   (4c 89 e7) -- vm pointer to first arg slot */
+static void emit_mov_rdi_r12(Emitter *e) {
+    emit_byte(e, 0x4c); emit_byte(e, 0x89); emit_byte(e, 0xe7);
+}
+/* mov r12, rdi   (49 89 fc) */
+static void emit_mov_r12_rdi(Emitter *e) {
+    emit_byte(e, 0x49); emit_byte(e, 0x89); emit_byte(e, 0xfc);
+}
+
+/* Refresh r13 := &vm->frames[vm->frame_count - 1].
+   r12 = VM*. Uses rax, rcx as scratch. */
+static void emit_refresh_frame(Emitter *e) {
+    /* mov rcx, [r12 + VM_OFF_FRAME_COUNT]   ; read frame_count (32-bit) */
+    /* movsxd rcx, dword [r12 + 36] */
+    emit_byte(e, 0x4d); emit_byte(e, 0x63); emit_byte(e, 0x4c);
+    emit_byte(e, 0x24); emit_byte(e, (uint8_t)VM_OFF_FRAME_COUNT);
+    /* dec rcx */
+    emit_byte(e, 0x48); emit_byte(e, 0xff); emit_byte(e, 0xc9);
+    /* imul rcx, rcx, FRAME_SIZE */
+    emit_byte(e, 0x48); emit_byte(e, 0x69); emit_byte(e, 0xc9);
+    emit_byte(e, (uint8_t)(FRAME_SIZE & 0xff));
+    emit_byte(e, (uint8_t)((FRAME_SIZE >> 8) & 0xff));
+    emit_byte(e, (uint8_t)((FRAME_SIZE >> 16) & 0xff));
+    emit_byte(e, (uint8_t)((FRAME_SIZE >> 24) & 0xff));
+    /* mov r13, [r12 + VM_OFF_FRAMES] */
+    emit_byte(e, 0x4d); emit_byte(e, 0x8b); emit_byte(e, 0x6c);
+    emit_byte(e, 0x24); emit_byte(e, (uint8_t)VM_OFF_FRAMES);
+    /* add r13, rcx */
+    emit_byte(e, 0x4c); emit_byte(e, 0x01); emit_byte(e, 0xed);
+}
+
+/* PUSH rax onto vm->sp (no growth check; slow path falls back to vm_step
+   on stack pressure via the standard PUSH macro). */
+static void emit_push_rax_to_vm_sp(Emitter *e) {
+    /* mov rcx, [r12 + 16]   ; rcx = vm->sp */
+    emit_byte(e, 0x49); emit_byte(e, 0x8b); emit_byte(e, 0x4c);
+    emit_byte(e, 0x24); emit_byte(e, (uint8_t)VM_OFF_SP);
+    /* mov [rcx], rax        ; *sp = rax */
+    emit_byte(e, 0x48); emit_byte(e, 0x89); emit_byte(e, 0x01);
+    /* add qword [r12 + 16], 8  ; vm->sp++ */
+    emit_byte(e, 0x49); emit_byte(e, 0x83); emit_byte(e, 0x44);
+    emit_byte(e, 0x24); emit_byte(e, (uint8_t)VM_OFF_SP);
+    emit_byte(e, 0x08);
+}
+
+/* Inline value_incref(rax). Skips on null (matches value.c). */
+static void emit_inline_incref_rax(Emitter *e) {
+    /* test rax, rax */
+    emit_byte(e, 0x48); emit_byte(e, 0x85); emit_byte(e, 0xc0);
+    /* jz +4  (skip the inc) */
+    emit_byte(e, 0x74); emit_byte(e, 0x04);
+    /* add dword [rax + 4], 1 */
+    emit_byte(e, 0x83); emit_byte(e, 0x40);
+    emit_byte(e, (uint8_t)VAL_OFF_REFCOUNT); emit_byte(e, 0x01);
+}
+
+/* Advance frame->ip by one Instruction (4 bytes). r13 = frame. */
+static void emit_advance_ip(Emitter *e) {
+    /* add qword [r13 + FRAME_OFF_IP], 4 */
+    emit_byte(e, 0x49); emit_byte(e, 0x83); emit_byte(e, 0x45);
+    emit_byte(e, (uint8_t)FRAME_OFF_IP); emit_byte(e, 0x04);
+}
+
+/* Set frame->ip = code_addr (an absolute pointer). Used before
+   delegating to vm_step so the dispatcher reads the same instruction
+   the JIT was about to handle. r13 = frame. Clobbers rax. */
+static void emit_set_ip_abs(Emitter *e, void *addr) {
+    emit_mov_reg_imm64(e, RAX, (uint64_t)(uintptr_t)addr);
+    /* mov [r13 + FRAME_OFF_IP], rax */
+    emit_byte(e, 0x49); emit_byte(e, 0x89); emit_byte(e, 0x45);
+    emit_byte(e, (uint8_t)FRAME_OFF_IP);
+}
+
+/* test eax, eax */
+static void emit_test_eax(Emitter *e) {
+    emit_byte(e, 0x85); emit_byte(e, 0xc0);
+}
+/* jnz rel8 placeholder (returns offset of the 1-byte displacement) */
+static size_t emit_jnz_rel8_placeholder(Emitter *e) {
+    emit_byte(e, 0x75); emit_byte(e, 0x00);
+    return e->pos - 1;
+}
+/* jnz rel32 placeholder: 0x0F 0x85 + 4-byte disp; returns offset of disp */
+static size_t emit_jnz_rel32_placeholder(Emitter *e) {
+    emit_byte(e, 0x0f); emit_byte(e, 0x85);
+    emit_byte(e, 0); emit_byte(e, 0); emit_byte(e, 0); emit_byte(e, 0);
+    return e->pos - 4;
+}
+static void patch_rel8(Emitter *e, size_t pos) {
+    long rel = (long)e->pos - (long)(pos + 1);
+    if (rel < -128 || rel > 127) { e->overflow = 1; return; }
+    e->buf[pos] = (uint8_t)(int8_t)rel;
+}
+
+/* Tier 1 JIT: emits a native dispatch loop that reads frame_count/ip
+   at runtime. For every iteration it loads the current frame's next
+   instruction, peels off the opcode, and either runs a native inline
+   handler (hot ops: POP, DUP, PUSH_NULL/TRUE/FALSE, LOAD_LOCAL,
+   STORE_LOCAL, PUSH_CONST, JUMP, LOOP) or falls through to vm_step
+   for every other opcode. Inlining these fast paths bypasses both the
+   vm_step() call overhead and the giant C dispatch switch. Since we
+   look up ip at runtime rather than linearizing pc at compile time,
+   the same compiled trampoline correctly handles calls, returns,
+   throws, and any other control flow that vm_step manages. */
 void *jit_compile(XSJIT *j, XSProto *proto) {
     if (!j || !j->available || !proto) return NULL;
 
-    Instruction *bc   = proto->chunk.code;
-    int          blen = proto->chunk.len;
-    if (blen <= 0) return NULL;
-
-    size_t estimate = (size_t)blen * 128 + 512;
-    if (j->code_used + estimate > j->code_size) return NULL;
+    size_t est = 4096;
+    if (j->code_used + est > j->code_size) return NULL;
 
     Emitter em;
     emit_init(&em, j->code, j->code_size, j->code_used);
+    void *fn = (void *)(j->code + em.pos);
 
-    size_t fn_start = em.pos;
+    /* We use:
+         r12 = VM*
+         r13 = current CallFrame*   (refreshed at top of each iteration)
+         eax = loaded instruction word
+       All other temp regs (rcx, rdx, rsi, rdi) are scratch. */
 
-    /* Prologue */
-    emit_prologue(&em);
-
-    size_t *pc_map = xs_calloc((size_t)(blen + 1), sizeof(size_t));
-    JitPatch *patches = xs_calloc((size_t)blen, sizeof(JitPatch));
-    int       npatches = 0;
-
-    int bail = 0;
-
-    for (int pc = 0; pc < blen && !bail && !em.overflow; pc++) {
-        pc_map[pc] = em.pos;
-
-        Instruction instr = bc[pc];
-        Opcode op  = INSTR_OPCODE(instr);
-        int    bx  = (int)INSTR_Bx(instr);
-        int    sbx = (int)INSTR_sBx(instr);
-        (void)INSTR_A(instr);
-        (void)INSTR_C(instr);
-
-        switch (op) {
-
-        case OP_NOP:
-            emit_nop(&em);
-            break;
-
-        /* Stack literals */
-
-        case OP_PUSH_CONST:
-            emit_load_const(&em, bx);
-            emit_incref_rax(&em);
-            emit_xs_push_rax(&em);
-            break;
-
-        case OP_PUSH_NULL:  emit_push_null(&em);  break;
-        case OP_PUSH_TRUE:  emit_push_true(&em);  break;
-        case OP_PUSH_FALSE: emit_push_false(&em);  break;
-
-        case OP_POP:
-            emit_xs_pop_rax(&em);
-            emit_decref_rax(&em);
-            break;
-
-        case OP_DUP:
-            emit_xs_peek_rax(&em);
-            emit_incref_rax(&em);
-            emit_xs_push_rax(&em);
-            break;
-
-        /* Locals */
-
-        case OP_LOAD_LOCAL:
-            emit_load_local(&em, bx);
-            emit_incref_rax(&em);
-            emit_xs_push_rax(&em);
-            break;
-
-        case OP_STORE_LOCAL: {
-            /* Pop new value into r15 (callee-saved, survives call) */
-            emit_xs_pop_gpr(&em, 15); /* r15 = new_val */
-
-            /* Call jit_rt_store_local(locals=r14, slot=bx, new_val=r15) */
-            emit_mov_reg_reg(&em, RDI, 14); /* rdi = r14 (locals) */
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)bx); /* rsi = slot */
-            emit_mov_reg_reg(&em, RDX, 15); /* rdx = new_val (r15) */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_store_local);
-            break;
+    /* ----- prologue -----
+       At entry rsp % 16 == 8 (caller's call pushed ret addr). Two
+       saved callee regs (r12, r13) + rbp = 3 pushes (24B), so after
+       the prologue rsp % 16 == 0 -- correctly aligned for a call. */
+    emit_byte(&em, 0x55);                        /* push rbp */
+    emit_mov_reg_reg(&em, RBP, RSP);             /* mov rbp, rsp */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x54);  /* push r12 */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x55);  /* push r13 */
+    emit_mov_r12_rdi(&em);                       /* r12 = vm */
+    /* mov dword [r12 + offsetof(VM, single_step)], 1
+       Pinning single_step=1 once lets us call vm_step_jit (which
+       skips the per-call save/restore of single_step) for the slow
+       path, saving three memory writes per inlined op. The dispatch
+       loop in vm.c bails out as soon as it sees single_step==1. */
+    {
+        size_t single_step_off = offsetof(VM, single_step);
+        if (single_step_off <= 127) {
+            emit_byte(&em, 0x41); emit_byte(&em, 0xc7);
+            emit_byte(&em, 0x44); emit_byte(&em, 0x24);
+            emit_byte(&em, (uint8_t)single_step_off);
+            emit_i32(&em, 1);
+        } else {
+            emit_byte(&em, 0x41); emit_byte(&em, 0xc7);
+            emit_byte(&em, 0x84); emit_byte(&em, 0x24);
+            emit_i32(&em, (int32_t)single_step_off);
+            emit_i32(&em, 1);
         }
+    }
+    /* Reserve 16 bytes of stack spill space so arithmetic fast paths
+       can stash their two operand pointers across xs_safe_add/decref
+       calls. Keeps rsp 16-byte aligned for all inner calls. */
+    emit_sub_reg_imm8(&em, RSP, 16);
 
-        /* Arithmetic */
+    /* Exit patches land here (after the shared epilogue gets emitted). */
+    size_t *exit_patches = xs_calloc(256, sizeof(size_t));
+    int n_exits = 0;
+    size_t *done_patches = xs_calloc(256, sizeof(size_t));
+    int n_dones = 0;
+    /* Fast-path fallback jumps (rel32 jne placeholders) land at the
+       slow path's vm_step call. Used by arithmetic ops that only fire
+       their inline form when both operands are tagged XS_INT. */
+    size_t *slow_patches = xs_calloc(256, sizeof(size_t));
+    int n_slow = 0;
+    /* Per-opcode handler offsets, used to fill the dispatch jump table
+       at the end. Entries left at 0 fall through to the slow path. */
+    size_t handler_offsets[256] = {0};
 
-        case OP_ADD:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_add); break;
-        case OP_SUB:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_sub); break;
-        case OP_MUL:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_mul); break;
-        case OP_DIV:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_div); break;
-        case OP_MOD:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_mod); break;
-        case OP_POW:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_pow); break;
-        case OP_NEG:  emit_unary_op(&em, (void *)(uintptr_t)jit_rt_neg);  break;
-        case OP_NOT:  emit_unary_op(&em, (void *)(uintptr_t)jit_rt_not);  break;
+    /* ----- loop top ----- */
+    size_t loop_top = em.pos;
 
-        /* Comparisons */
+    /* if (vm->frame_count == 0) goto done_ok; */
+    /* mov ecx, [r12 + VM_OFF_FRAME_COUNT] */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x8b); emit_byte(&em, 0x4c);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_FRAME_COUNT);
+    /* test ecx, ecx */
+    emit_byte(&em, 0x85); emit_byte(&em, 0xc9);
+    /* jz done_ok (rel32 placeholder) */
+    emit_byte(&em, 0x0f); emit_byte(&em, 0x84);
+    emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0);
+    done_patches[n_dones++] = em.pos - 4;
 
-        case OP_EQ:   emit_binary_op(&em, (void *)(uintptr_t)jit_rt_eq);  break;
-        case OP_NEQ:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_neq); break;
-        case OP_LT:   emit_binary_op(&em, (void *)(uintptr_t)jit_rt_lt);  break;
-        case OP_GT:   emit_binary_op(&em, (void *)(uintptr_t)jit_rt_gt);  break;
-        case OP_LTE:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_lte); break;
-        case OP_GTE:  emit_binary_op(&em, (void *)(uintptr_t)jit_rt_gte); break;
-
-        /* String / bitwise */
-
-        case OP_CONCAT: emit_binary_op(&em, (void *)(uintptr_t)jit_rt_concat); break;
-        case OP_BAND:   emit_binary_op(&em, (void *)(uintptr_t)jit_rt_band);   break;
-        case OP_BOR:    emit_binary_op(&em, (void *)(uintptr_t)jit_rt_bor);    break;
-        case OP_BXOR:   emit_binary_op(&em, (void *)(uintptr_t)jit_rt_bxor);   break;
-        case OP_BNOT:   emit_unary_op(&em, (void *)(uintptr_t)jit_rt_bnot);    break;
-        case OP_SHL:    emit_binary_op(&em, (void *)(uintptr_t)jit_rt_shl);    break;
-        case OP_SHR:    emit_binary_op(&em, (void *)(uintptr_t)jit_rt_shr);    break;
-
-        /* Control flow */
-
-        case OP_JUMP:
-        case OP_LOOP: {
-            int target_pc = pc + 1 + sbx;
-            size_t p = emit_jmp_rel32(&em);
-            patches[npatches].native_offset = p;
-            patches[npatches].target_pc     = target_pc;
-            npatches++;
-            break;
+    /* Stack-headroom check: PUSH macro in vm.c calls vm_grow_stack if
+       sp >= stack + cap. Our inlined push paths bypass that check, so
+       at deep recursion we'd write past the buffer. Pre-grow when sp
+       reaches the cached soft_limit (= stack + cap - 16); a single
+       cmp + cold call keeps the loop overhead at one instruction. */
+    /* mov rcx, [r12 + VM_OFF_SP] */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x4c);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    /* cmp rcx, [r12 + offsetof(VM, stack_soft_limit)] */
+    {
+        size_t off = offsetof(VM, stack_soft_limit);
+        if (off < 128) {
+            emit_byte(&em, 0x49); emit_byte(&em, 0x3b); emit_byte(&em, 0x4c);
+            emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)off);
+        } else {
+            emit_byte(&em, 0x49); emit_byte(&em, 0x3b); emit_byte(&em, 0x8c);
+            emit_byte(&em, 0x24); emit_i32(&em, (int32_t)off);
         }
+    }
+    /* jl .ok (rel8 placeholder) */
+    emit_byte(&em, 0x7c); emit_byte(&em, 0x00);
+    size_t grow_skip = em.pos - 1;
+    /* mov rdi, r12; call vm_grow_stack */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_grow_stack);
+    em.buf[grow_skip] = (uint8_t)(em.pos - grow_skip - 1);
 
-        case OP_JUMP_IF_FALSE: {
-            int target_pc = pc + 1 + sbx;
-            /* Pop value, test truthiness, je if false */
-            emit_xs_pop_gpr(&em, RDI);
-            /* Save in rbx so we can potentially use it (callee-saved) */
-            emit_mov_reg_reg(&em, RBX, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_truthy);
-            emit_test_eax_eax(&em);
-            size_t p = emit_je_rel32(&em);
-            patches[npatches].native_offset = p;
-            patches[npatches].target_pc     = target_pc;
-            npatches++;
-            break;
+    /* r13 = &vm->frames[frame_count - 1] */
+    /* movsxd rcx, dword [r12 + 36] */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x63); emit_byte(&em, 0x4c);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_FRAME_COUNT);
+    /* dec rcx */
+    emit_byte(&em, 0x48); emit_byte(&em, 0xff); emit_byte(&em, 0xc9);
+    /* imul rcx, rcx, FRAME_SIZE */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x69); emit_byte(&em, 0xc9);
+    emit_i32(&em, FRAME_SIZE);
+    /* mov rdx, [r12 + VM_OFF_FRAMES] */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x54);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_FRAMES);
+    /* lea r13, [rdx + rcx] */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x8d); emit_byte(&em, 0x2c);
+    emit_byte(&em, 0x0a);
+
+    /* rax = *frame->ip  (32-bit instruction word) */
+    /* mov rsi, [r13 + FRAME_OFF_IP] */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x75);
+    emit_byte(&em, (uint8_t)FRAME_OFF_IP);
+    /* mov eax, dword [rsi] */
+    emit_byte(&em, 0x8b); emit_byte(&em, 0x06);
+
+    /* O(1) opcode dispatch through a 256-entry jump table appended
+       at the end of the emitted code. The table holds absolute
+       handler addresses; non-inlined opcodes route to the slow path. */
+    /* movzx ecx, al */
+    emit_byte(&em, 0x0f); emit_byte(&em, 0xb6); emit_byte(&em, 0xc8);
+    /* movabs rdx, <table_addr placeholder> (10 bytes) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0xba);
+    size_t table_addr_patch = em.pos;
+    emit_u64(&em, 0);
+    /* jmp qword [rdx + rcx*8] */
+    emit_byte(&em, 0xff); emit_byte(&em, 0x24); emit_byte(&em, 0xca);
+
+    /* The cmp/je chain that follows is now dead code reached only via
+       the table; each handler's leading cmp+jne always matches because
+       the table sent us here, so jne is never taken. Kept for clarity
+       so the per-handler structure stays uniform. */
+
+    #define INLINE_CMP_JNE(opval) do { \
+        handler_offsets[(uint8_t)(opval)] = em.pos; \
+        /* cmp al, opval */ \
+        emit_byte(&em, 0x3c); emit_byte(&em, (uint8_t)(opval)); \
+        /* jne rel32 placeholder (0x0F 0x85 + 4B disp) */ \
+        emit_byte(&em, 0x0f); emit_byte(&em, 0x85); \
+        emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); \
+    } while (0)
+
+    #define PATCH_JNE_HERE(patch_off) do { \
+        size_t disp_pos = (patch_off); \
+        long rel = (long)em.pos - (long)(disp_pos + 4); \
+        em.buf[disp_pos + 0] = (uint8_t)(rel & 0xff); \
+        em.buf[disp_pos + 1] = (uint8_t)((rel >> 8) & 0xff); \
+        em.buf[disp_pos + 2] = (uint8_t)((rel >> 16) & 0xff); \
+        em.buf[disp_pos + 3] = (uint8_t)((rel >> 24) & 0xff); \
+    } while (0)
+
+    #define JMP_REL32_TO(target) do { \
+        /* jmp rel32 */ \
+        emit_byte(&em, 0xe9); \
+        long rel = (long)(target) - (long)(em.pos + 4); \
+        emit_i32(&em, (int32_t)rel); \
+    } while (0)
+
+    size_t jne_patch;
+
+    /* ---- OP_POP ---- */
+    INLINE_CMP_JNE(OP_POP);
+    jne_patch = em.pos - 4;
+    /* mov rsi, [r12 + VM_OFF_SP] ; rsi = sp */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    /* sub rsi, 8 */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xee); emit_byte(&em, 0x08);
+    /* mov [r12 + VM_OFF_SP], rsi */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0x74);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    /* mov rdi, [rsi] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x3e);
+    emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_DUP ---- */
+    INLINE_CMP_JNE(OP_DUP);
+    jne_patch = em.pos - 4;
+    /* mov rsi, [r12 + 16]; rax = [rsi - 8]; mov [rsi], rax; add [r12+16], 8 */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    /* mov rax, [rsi - 8] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x46);
+    emit_byte(&em, 0xf8);
+    /* mov [rsi], rax */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x06);
+    /* add qword [r12 + 16], 8 */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x83); emit_byte(&em, 0x44);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    emit_byte(&em, 0x08);
+    emit_inline_incref_rax(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_PUSH_NULL / OP_PUSH_TRUE / OP_PUSH_FALSE ----
+       The singleton pointers are runtime-initialized externs (NULL at
+       link time), so we load &VAR and dereference at native runtime. */
+    extern Value *XS_NULL_VAL, *XS_TRUE_VAL, *XS_FALSE_VAL;
+    INLINE_CMP_JNE(OP_PUSH_NULL);
+    jne_patch = em.pos - 4;
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_NULL_VAL);
+    /* mov rax, [rax] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    INLINE_CMP_JNE(OP_PUSH_TRUE);
+    jne_patch = em.pos - 4;
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    INLINE_CMP_JNE(OP_PUSH_FALSE);
+    jne_patch = em.pos - 4;
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_LOAD_LOCAL ---- (Bx = slot, from instr >> 16) */
+    INLINE_CMP_JNE(OP_LOAD_LOCAL);
+    jne_patch = em.pos - 4;
+    /* rcx = (instr >> 16) & 0xffff  -- slot index */
+    /* mov ecx, eax */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    /* shr ecx, 16 */
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xe9); emit_byte(&em, 0x10);
+    /* and ecx, 0xffff (optional, shr already zero-extended) */
+    /* mov rdx, [r13 + FRAME_OFF_BASE]  ; rdx = frame->base */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x55);
+    emit_byte(&em, (uint8_t)FRAME_OFF_BASE);
+    /* mov rax, [rdx + rcx*8] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x04);
+    emit_byte(&em, 0xca);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_PUSH_CONST ---- (Bx = const idx)
+       consts = frame->closure_val->cl->proto->chunk.consts
+       offsets: closure_val=0 in CallFrame, cl=8 in Value, proto=0 in
+       XSClosure, chunk.consts = 16 + 16 = 32 in XSProto. */
+    INLINE_CMP_JNE(OP_PUSH_CONST);
+    jne_patch = em.pos - 4;
+    /* mov rdx, [r13]            ; rdx = closure_val (Value*) */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x55); emit_byte(&em, 0x00);
+    /* mov rdx, [rdx + 8]        ; rdx = value->cl (XSClosure*) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x08);
+    /* mov rdx, [rdx]            ; rdx = closure->proto */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x12);
+    /* mov rdx, [rdx + 32]       ; rdx = chunk.consts (Value**) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x20);
+    /* mov ecx, eax; shr ecx, 16  ; ecx = Bx */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xe9); emit_byte(&em, 0x10);
+    /* mov rax, [rdx + rcx*8] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x04);
+    emit_byte(&em, 0xca);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_STORE_LOCAL ---- (Bx = slot)
+       Pop top, decref the existing local, store new pointer. */
+    INLINE_CMP_JNE(OP_STORE_LOCAL);
+    jne_patch = em.pos - 4;
+    /* mov ecx, eax; shr ecx, 16  ; ecx = bx */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xe9); emit_byte(&em, 0x10);
+    /* mov rdx, [r13 + 16]       ; rdx = frame->base */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x55);
+    emit_byte(&em, (uint8_t)FRAME_OFF_BASE);
+    /* mov rsi, [r12 + 16]; sub rsi, 8; mov [r12+16], rsi  -- pop sp */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xee); emit_byte(&em, 0x08);
+    emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0x74);
+    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP);
+    /* mov rax, [rsi]            ; rax = popped Value*  */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x06);
+    /* mov rdi, [rdx + rcx*8]    ; rdi = old local (to decref) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x3c);
+    emit_byte(&em, 0xca);
+    /* mov [rdx + rcx*8], rax    ; store new */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x04);
+    emit_byte(&em, 0xca);
+    /* test rdi, rdi; jz skip; call value_decref; */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xff);
+    emit_byte(&em, 0x74); emit_byte(&em, 0x0c);  /* jz +12 (over the call) */
+    emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+    /* skip: */
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_NOP ---- (just advance ip) */
+    INLINE_CMP_JNE(OP_NOP);
+    jne_patch = em.pos - 4;
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_JUMP / OP_LOOP ----
+       In vm_dispatch, ip is pre-incremented before the switch fires
+       (instr = *ip++), then JUMP adds sBx instructions. We handle the
+       same net effect: ip += (sBx + 1) * 4 = (sBx + 1) instructions. */
+    INLINE_CMP_JNE(OP_JUMP);
+    jne_patch = em.pos - 4;
+    /* movsx ecx, ax            ; sign-extended sBx is in bits 16-31 */
+    /* sar eax, 16              ; eax = (int32_t)sBx (sign-extended) */
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xf8); emit_byte(&em, 0x10);
+    /* movsxd rcx, eax          ; rcx = (int64_t)sBx */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x63); emit_byte(&em, 0xc8);
+    /* inc rcx                   ; (sBx + 1) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0xff); emit_byte(&em, 0xc1);
+    /* shl rcx, 2                ; * 4 bytes */
+    emit_byte(&em, 0x48); emit_byte(&em, 0xc1); emit_byte(&em, 0xe1); emit_byte(&em, 0x02);
+    /* add qword [r13 + 8], rcx */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x01); emit_byte(&em, 0x4d);
+    emit_byte(&em, (uint8_t)FRAME_OFF_IP);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    INLINE_CMP_JNE(OP_LOOP);
+    jne_patch = em.pos - 4;
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xf8); emit_byte(&em, 0x10);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x63); emit_byte(&em, 0xc8);
+    emit_byte(&em, 0x48); emit_byte(&em, 0xff); emit_byte(&em, 0xc1);
+    emit_byte(&em, 0x48); emit_byte(&em, 0xc1); emit_byte(&em, 0xe1); emit_byte(&em, 0x02);
+    emit_byte(&em, 0x49); emit_byte(&em, 0x01); emit_byte(&em, 0x4d);
+    emit_byte(&em, (uint8_t)FRAME_OFF_IP);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- Integer-fast-path arithmetic ----
+       For OP_ADD, OP_SUB, OP_LT, OP_GT: if both operands are tagged
+       XS_INT, compute natively and skip the vm_step trampoline. Any
+       other operand type (float, string, bigint, map with dunder, ...)
+       falls through to vm_step_jit, which handles the full semantics
+       byte-for-byte like the VM. The int path matches VM behaviour via
+       xs_safe_add/xs_safe_sub (which handle overflow to bigint). */
+
+    /* Helper macro: emit "jne slow_path" rel32 placeholder and record
+       the patch offset in slow_patches[]. */
+    #define EMIT_JNE_TO_SLOW() do { \
+        emit_byte(&em, 0x0f); emit_byte(&em, 0x85); \
+        emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); \
+        slow_patches[n_slow++] = em.pos - 4; \
+    } while (0)
+
+    /* Common prefix: load b (sp[-1]) and a (sp[-2]), check XS_INT/XS_INT.
+       Leaves rax = b, rcx = a on success. rsi clobbered. */
+    #define EMIT_BINOP_INT_CHECK() do { \
+        /* mov rsi, [r12 + VM_OFF_SP] */ \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        /* mov rax, [rsi - 8]   ; b */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x46); \
+        emit_byte(&em, 0xf8); \
+        /* mov rcx, [rsi - 16]  ; a */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x4e); \
+        emit_byte(&em, 0xf0); \
+        /* cmp dword [rax], XS_INT */ \
+        emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, (uint8_t)XS_INT); \
+        EMIT_JNE_TO_SLOW(); \
+        /* cmp dword [rcx], XS_INT */ \
+        emit_byte(&em, 0x83); emit_byte(&em, 0x39); emit_byte(&em, (uint8_t)XS_INT); \
+        EMIT_JNE_TO_SLOW(); \
+        /* mov [rsp], rcx       ; spill a */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x0c); \
+        emit_byte(&em, 0x24); \
+        /* mov [rsp + 8], rax   ; spill b */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x44); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+    } while (0)
+
+    /* Common suffix: take computed result in rax, push to sp[-2],
+       decref both original operands from spill, advance ip, loop. */
+    #define EMIT_BINOP_FINISH() do { \
+        /* mov rsi, [r12 + 16]; sub rsi, 8; mov [rsi - 8], rax; */ \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xee); emit_byte(&em, 0x08); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x46); \
+        emit_byte(&em, 0xf8); \
+        /* mov [r12 + 16], rsi */ \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        /* mov rdi, [rsp]; call value_decref */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x3c); emit_byte(&em, 0x24); \
+        emit_call_abs(&em, (void *)(uintptr_t)value_decref); \
+        /* mov rdi, [rsp + 8]; call value_decref */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x7c); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+        emit_call_abs(&em, (void *)(uintptr_t)value_decref); \
+        emit_advance_ip(&em); \
+        JMP_REL32_TO(loop_top); \
+    } while (0)
+
+    /* ---- OP_ADD (int + int) ---- */
+    INLINE_CMP_JNE(OP_ADD);
+    jne_patch = em.pos - 4;
+    EMIT_BINOP_INT_CHECK();
+    /* mov rdi, [rcx + 8]; mov rsi, [rax + 8] (but rsi is clobbered, use rsi ok) */
+    /* Actually we need a->i, b->i. rcx=a, rax=b, but b is in rax; after
+       spill we don't need rax anymore. Move b->i into a register. */
+    /* mov rdi, [rcx + 8] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
+    emit_byte(&em, 0x08);
+    /* mov rsi, [rax + 8] */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x70);
+    emit_byte(&em, 0x08);
+    emit_call_abs(&em, (void *)(uintptr_t)xs_safe_add);
+    EMIT_BINOP_FINISH();
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_SUB (int - int) ---- */
+    INLINE_CMP_JNE(OP_SUB);
+    jne_patch = em.pos - 4;
+    EMIT_BINOP_INT_CHECK();
+    /* mov rdi, [rcx + 8]; mov rsi, [rax + 8]; call xs_safe_sub */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
+    emit_byte(&em, 0x08);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x70);
+    emit_byte(&em, 0x08);
+    emit_call_abs(&em, (void *)(uintptr_t)xs_safe_sub);
+    EMIT_BINOP_FINISH();
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_LT (int < int) ----
+       Emit: compare a->i with b->i, produce TRUE_VAL or FALSE_VAL. */
+    INLINE_CMP_JNE(OP_LT);
+    jne_patch = em.pos - 4;
+    EMIT_BINOP_INT_CHECK();
+    /* mov rdi, [rcx + 8]    ; a->i */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
+    emit_byte(&em, 0x08);
+    /* cmp rdi, [rax + 8]    ; a->i - b->i */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x3b); emit_byte(&em, 0x78);
+    emit_byte(&em, 0x08);
+    /* setl al / movzx eax, al  : actually we just want a bool; use lea + address */
+    /* Simpler: jl is_lt; rax = &FALSE_VAL; jmp done; is_lt: rax = &TRUE_VAL; done: mov rax, [rax] */
+    /* jl rel8 +12 */
+    emit_byte(&em, 0x7c); emit_byte(&em, 12);
+    /* mov rax, &XS_FALSE_VAL (10 bytes) */
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
+    /* jmp rel8 +10 (to skip mov TRUE_VAL) */
+    emit_byte(&em, 0xeb); emit_byte(&em, 10);
+    /* is_lt: mov rax, &XS_TRUE_VAL (10 bytes) */
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
+    /* mov rax, [rax]  (deref extern) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    EMIT_BINOP_FINISH();
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_GT (int > int) ---- */
+    INLINE_CMP_JNE(OP_GT);
+    jne_patch = em.pos - 4;
+    EMIT_BINOP_INT_CHECK();
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
+    emit_byte(&em, 0x08);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x3b); emit_byte(&em, 0x78);
+    emit_byte(&em, 0x08);
+    /* jg rel8 +12 */
+    emit_byte(&em, 0x7f); emit_byte(&em, 12);
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
+    emit_byte(&em, 0xeb); emit_byte(&em, 10);
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    EMIT_BINOP_FINISH();
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_JUMP_IF_FALSE / OP_JUMP_IF_TRUE ----
+       Pop the condition off the stack, run value_truthy, decref the
+       condition, then either advance ip by 4 (no branch) or by
+       (sBx + 1) * 4 (branch taken). Spill slot 0 holds instr across
+       the calls; slot 1 holds the cond pointer then the truthy
+       result. */
+
+    /* Helper: emit the common cond-pop / truthy / decref preamble.
+       After it: rax = instr (reloaded), ecx = truthy result.
+       Clobbers rsi, rdi. */
+    #define EMIT_JIF_PREAMBLE() do { \
+        /* mov [rsp], rax  -- spill instr (slot 0) */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x04); \
+        emit_byte(&em, 0x24); \
+        /* Pop cond from value stack */ \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xee); emit_byte(&em, 0x08); \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        /* mov rdi, [rsi]  -- cond Value*  */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x3e); \
+        /* mov [rsp + 8], rdi  -- spill cond ptr (slot 1) */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x7c); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+        emit_call_abs(&em, (void *)(uintptr_t)value_truthy); \
+        /* mov ecx, eax  -- save truthy (0/1) */ \
+        emit_byte(&em, 0x89); emit_byte(&em, 0xc1); \
+        /* mov rdi, [rsp + 8]  -- reload cond ptr */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x7c); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+        /* mov [rsp + 8], rcx  -- save truthy across decref */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x4c); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+        emit_call_abs(&em, (void *)(uintptr_t)value_decref); \
+        /* mov rcx, [rsp + 8]  -- reload truthy */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x4c); \
+        emit_byte(&em, 0x24); emit_byte(&em, 0x08); \
+        /* mov rax, [rsp]  -- reload instr */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x04); \
+        emit_byte(&em, 0x24); \
+    } while (0)
+
+    /* Helper: take a branch when ecx satisfies the condition encoded
+       in `branch_when_set` (1 = truthy taken, 0 = falsy taken). On
+       branch: ip += (sBx + 1) * 4. Else: ip += 4. */
+    #define EMIT_JIF_TAIL(branch_when_set) do { \
+        emit_byte(&em, 0x85); emit_byte(&em, 0xc9);                /* test ecx, ecx */ \
+        emit_byte(&em, (branch_when_set) ? 0x74 : 0x75);            /* j(z|nz) skip_branch */ \
+        size_t skip_pos = em.pos; emit_byte(&em, 0); \
+        /* branch taken: ip += (sBx + 1) * 4 */ \
+        emit_byte(&em, 0xc1); emit_byte(&em, 0xf8); emit_byte(&em, 0x10);  /* sar eax, 16 */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x63); emit_byte(&em, 0xc8);  /* movsxd rcx, eax */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0xff); emit_byte(&em, 0xc1);  /* inc rcx */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0xc1); emit_byte(&em, 0xe1); emit_byte(&em, 0x02); /* shl rcx, 2 */ \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x01); emit_byte(&em, 0x4d); emit_byte(&em, (uint8_t)FRAME_OFF_IP); \
+        emit_byte(&em, 0xeb);                                              /* jmp .done */ \
+        size_t done_pos = em.pos; emit_byte(&em, 0); \
+        /* skip_branch: ip += 4 */ \
+        em.buf[skip_pos] = (uint8_t)(em.pos - skip_pos - 1); \
+        emit_advance_ip(&em); \
+        /* .done: */ \
+        em.buf[done_pos] = (uint8_t)(em.pos - done_pos - 1); \
+    } while (0)
+
+    /* ---- OP_LOAD_GLOBAL ----
+       Decode Bx, fetch consts[Bx]->s (the string name) from the
+       current proto, call map_get(vm->globals, name), incref result
+       (or XS_NULL_VAL on miss), push, advance ip. */
+    INLINE_CMP_JNE(OP_LOAD_GLOBAL);
+    jne_patch = em.pos - 4;
+    /* rdx = consts ptr (same chain as OP_PUSH_CONST) */
+    /* mov rdx, [r13]            ; closure_val */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x55); emit_byte(&em, 0x00);
+    /* mov rdx, [rdx + 8]        ; cl */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x08);
+    /* mov rdx, [rdx]            ; proto */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x12);
+    /* mov rdx, [rdx + 32]       ; chunk.consts */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x20);
+    /* mov ecx, eax; shr ecx, 16 */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xe9); emit_byte(&em, 0x10);
+    /* mov rdx, [rdx + rcx*8]    ; consts[Bx]  (Value*) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x14); emit_byte(&em, 0xca);
+    /* mov rsi, [rdx + 8]        ; .s (string union member, offset 8) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x72); emit_byte(&em, 0x08);
+    /* mov rdi, [r12 + 48]       ; vm->globals */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x7c);
+    emit_byte(&em, 0x24); emit_byte(&em, 0x30);
+    emit_call_abs(&em, (void *)(uintptr_t)map_get);
+    /* If rax == NULL, replace with *XS_NULL_VAL. */
+    /* test rax, rax */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
+    /* jnz +13 (skip 10-byte movabs + 3-byte deref of NULL_VAL) */
+    emit_byte(&em, 0x75); emit_byte(&em, 13);
+    /* mov rax, &XS_NULL_VAL  (10 bytes) */
+    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_NULL_VAL);
+    /* mov rax, [rax]  (3 bytes) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
+    emit_inline_incref_rax(&em);
+    emit_push_rax_to_vm_sp(&em);
+    emit_advance_ip(&em);
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* OP_JUMP_IF_FALSE: branch when cond is falsy (truthy == 0). */
+    INLINE_CMP_JNE(OP_JUMP_IF_FALSE);
+    jne_patch = em.pos - 4;
+    EMIT_JIF_PREAMBLE();
+    EMIT_JIF_TAIL(0);  /* branch when truthy clear -> skip with jnz */
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* OP_JUMP_IF_TRUE: branch when cond is truthy. */
+    INLINE_CMP_JNE(OP_JUMP_IF_TRUE);
+    jne_patch = em.pos - 4;
+    EMIT_JIF_PREAMBLE();
+    EMIT_JIF_TAIL(1);  /* branch when truthy set -> skip with jz */
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- Slow path: call vm_step_jit ---- */
+    size_t slow_path_pos = em.pos;
+    /* mov rdi, r12 */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+    /* test eax, eax */
+    emit_test_eax(&em);
+    /* jnz exit (rel32) */
+    emit_byte(&em, 0x0f); emit_byte(&em, 0x85);
+    emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0);
+    exit_patches[n_exits++] = em.pos - 4;
+    /* jmp loop_top (rel32) */
+    JMP_REL32_TO(loop_top);
+
+    /* ----- epilogue (error exit: rc in eax, negative = error) ----- */
+    size_t epilogue_pos = em.pos;
+    /* mov ecx, eax  (preserve rc) */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    /* xor eax, eax */
+    emit_byte(&em, 0x31); emit_byte(&em, 0xc0);
+    /* test ecx, ecx */
+    emit_byte(&em, 0x85); emit_byte(&em, 0xc9);
+    /* jns +5 */
+    emit_byte(&em, 0x79); emit_byte(&em, 0x05);
+    /* mov eax, 1 */
+    emit_byte(&em, 0xb8);
+    emit_i32(&em, 1);
+
+    /* done_ok target: rc = 0 */
+    size_t done_ok_pos = em.pos;
+    /* xor eax, eax */
+    emit_byte(&em, 0x31); emit_byte(&em, 0xc0);
+
+    /* shared return: clear single_step before exiting so unrelated
+       vm_dispatch callers downstream (REPL, embed, recursive callbacks
+       outside the JIT) see normal behaviour. */
+    {
+        size_t single_step_off = offsetof(VM, single_step);
+        if (single_step_off <= 127) {
+            emit_byte(&em, 0x41); emit_byte(&em, 0xc7);
+            emit_byte(&em, 0x44); emit_byte(&em, 0x24);
+            emit_byte(&em, (uint8_t)single_step_off);
+            emit_i32(&em, 0);
+        } else {
+            emit_byte(&em, 0x41); emit_byte(&em, 0xc7);
+            emit_byte(&em, 0x84); emit_byte(&em, 0x24);
+            emit_i32(&em, (int32_t)single_step_off);
+            emit_i32(&em, 0);
         }
+    }
+    /* add rsp, 16  (free the arithmetic spill area) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xc4); emit_byte(&em, 0x10);
+    /* pop r13 */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x5d);
+    /* pop r12 */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x5c);
+    /* pop rbp */
+    emit_byte(&em, 0x5d);
+    /* ret */
+    emit_byte(&em, 0xc3);
 
-        case OP_JUMP_IF_TRUE: {
-            int target_pc = pc + 1 + sbx;
-            emit_xs_pop_gpr(&em, RDI);
-            emit_mov_reg_reg(&em, RBX, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_truthy);
-            emit_test_eax_eax(&em);
-            size_t p = emit_jne_rel32(&em);
-            patches[npatches].native_offset = p;
-            patches[npatches].target_pc     = target_pc;
-            npatches++;
-            break;
-        }
+    /* Patch arithmetic fast-path "jne slow_path" placeholders. */
+    for (int i = 0; i < n_slow; i++) {
+        size_t disp_pos = slow_patches[i];
+        long rel = (long)slow_path_pos - (long)(disp_pos + 4);
+        em.buf[disp_pos + 0] = (uint8_t)(rel & 0xff);
+        em.buf[disp_pos + 1] = (uint8_t)((rel >> 8) & 0xff);
+        em.buf[disp_pos + 2] = (uint8_t)((rel >> 16) & 0xff);
+        em.buf[disp_pos + 3] = (uint8_t)((rel >> 24) & 0xff);
+    }
+    free(slow_patches);
 
-        case OP_RETURN:
-            emit_xs_pop_rax(&em);
-            emit_epilogue(&em);
-            break;
-
-        case OP_SWAP: {
-            /* Swap [r12-8] and [r12-16] */
-            /* mov rax, [r12-8] */
-            emit_byte(&em, 0x49); emit_byte(&em, 0x8B);
-            emit_modrm(&em, 1, RAX, RSP);
-            emit_byte(&em, 0x24); emit_byte(&em, 0xF8);
-            /* mov rcx, [r12-16] */
-            emit_byte(&em, 0x49); emit_byte(&em, 0x8B);
-            emit_modrm(&em, 1, RCX, RSP);
-            emit_byte(&em, 0x24); emit_byte(&em, 0xF0);
-            /* mov [r12-8], rcx */
-            emit_byte(&em, 0x49); emit_byte(&em, 0x89);
-            emit_modrm(&em, 1, RCX, RSP);
-            emit_byte(&em, 0x24); emit_byte(&em, 0xF8);
-            /* mov [r12-16], rax */
-            emit_byte(&em, 0x49); emit_byte(&em, 0x89);
-            emit_modrm(&em, 1, RAX, RSP);
-            emit_byte(&em, 0x24); emit_byte(&em, 0xF0);
-            break;
-        }
-
-        /* Globals */
-
-        case OP_LOAD_GLOBAL: {
-            /* We need the globals map passed as a 4th hidden arg.
-             * Convention: r15 holds globals pointer (set up in prologue).
-             * The name constant is consts[bx]. */
-            emit_mov_reg_reg(&em, RDI, 15);     /* rdi = globals (r15) */
-            emit_load_const(&em, bx);            /* rax = consts[bx] */
-            emit_mov_reg_reg(&em, RSI, RAX);     /* rsi = name_val */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_load_global);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_STORE_GLOBAL: {
-            emit_xs_pop_gpr(&em, RDX);           /* rdx = val */
-            emit_mov_reg_reg(&em, RDI, 15);      /* rdi = globals (r15) */
-            emit_load_const(&em, bx);             /* rax = consts[bx] */
-            emit_mov_reg_reg(&em, RSI, RAX);      /* rsi = name_val */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_store_global);
-            break;
-        }
-
-        /* Collections */
-
-        case OP_MAKE_ARRAY: {
-            int n = (int)INSTR_C(instr);
-            /* r12 points past top; elements start at r12 - n*8 */
-            /* rdi = r12 - n*8 (pointer to first element on XS stack) */
-            emit_mov_reg_reg(&em, RDI, 12);
-            if (n > 0) {
-                emit_mov_reg_imm64(&em, RAX, (uint64_t)(n * 8));
-                /* sub rdi, rax */
-                emit_byte(&em, rex(1, 0, 0, 0)); emit_byte(&em, 0x29);
-                emit_modrm(&em, 3, RAX, RDI);
-            }
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)n);
-            /* Save the adjusted sp */
-            emit_push_reg(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_make_array);
-            emit_pop_reg(&em, RDI);
-            /* Adjust r12: pop n values, push result */
-            /* r12 = rdi (base of popped region) */
-            emit_mov_reg_reg(&em, 12, RDI);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_MAKE_MAP: {
-            int npairs = (int)INSTR_C(instr);
-            int nvals = npairs * 2;
-            emit_mov_reg_reg(&em, RDI, 12);
-            if (nvals > 0) {
-                emit_mov_reg_imm64(&em, RAX, (uint64_t)(nvals * 8));
-                emit_byte(&em, rex(1, 0, 0, 0)); emit_byte(&em, 0x29);
-                emit_modrm(&em, 3, RAX, RDI);
-            }
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)npairs);
-            emit_push_reg(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_make_map);
-            emit_pop_reg(&em, RDI);
-            emit_mov_reg_reg(&em, 12, RDI);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_INDEX_GET: {
-            /* pop idx, pop col, call jit_rt_index_get(col, idx) */
-            emit_xs_pop_gpr(&em, RSI);  /* idx */
-            emit_xs_pop_gpr(&em, RDI);  /* col */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_index_get);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_INDEX_SET: {
-            /* pop val, pop idx, pop col */
-            emit_xs_pop_gpr(&em, RDX);  /* val */
-            emit_xs_pop_gpr(&em, RSI);  /* idx */
-            emit_xs_pop_gpr(&em, RDI);  /* col */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_index_set);
-            break;
-        }
-
-        case OP_LOAD_FIELD: {
-            /* pop obj, load consts[bx] as name, call jit_rt_load_field */
-            emit_xs_pop_gpr(&em, RBX);           /* rbx = obj (callee-saved) */
-            emit_load_const(&em, bx);             /* rax = consts[bx] (name) */
-            emit_mov_reg_reg(&em, RDI, RBX);      /* rdi = obj */
-            emit_mov_reg_reg(&em, RSI, RAX);       /* rsi = name_val */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_load_field);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_STORE_FIELD: {
-            /* pop val, pop obj */
-            emit_xs_pop_gpr(&em, RBX);            /* rbx = val (callee-saved) */
-            emit_xs_pop_gpr(&em, RDI);             /* rdi = obj */
-            emit_load_const(&em, bx);              /* rax = consts[bx] */
-            emit_mov_reg_reg(&em, RSI, RAX);       /* rsi = name_val */
-            emit_mov_reg_reg(&em, RDX, RBX);       /* rdx = val */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_store_field);
-            break;
-        }
-
-        /* Function calls */
-
-        case OP_CALL: {
-            int argc = (int)INSTR_C(instr);
-            /* Stack has: [callee, arg0, arg1, ... argN-1]
-             * sp_bottom = r12 - (argc+1)*8 */
-            emit_mov_reg_reg(&em, RDI, 12);
-            emit_mov_reg_imm64(&em, RAX, (uint64_t)((argc + 1) * 8));
-            emit_byte(&em, rex(1, 0, 0, 0)); emit_byte(&em, 0x29);
-            emit_modrm(&em, 3, RAX, RDI);
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)argc);
-            /* Save sp_bottom */
-            emit_push_reg(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_call);
-            emit_pop_reg(&em, RDI);
-            /* Pop callee+args from XS stack, push result */
-            emit_mov_reg_reg(&em, 12, RDI);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        /* Additional arithmetic/comparison */
-
-        case OP_FLOOR_DIV: emit_binary_op(&em, (void *)(uintptr_t)jit_rt_floor_div); break;
-        case OP_SPACESHIP: emit_binary_op(&em, (void *)(uintptr_t)jit_rt_spaceship); break;
-        case OP_IN:        emit_binary_op(&em, (void *)(uintptr_t)jit_rt_in);        break;
-        case OP_IS:        emit_binary_op(&em, (void *)(uintptr_t)jit_rt_is);        break;
-
-        /* Tuple */
-
-        case OP_MAKE_TUPLE: {
-            int n = (int)INSTR_C(instr);
-            emit_mov_reg_reg(&em, RDI, 12);
-            if (n > 0) {
-                emit_mov_reg_imm64(&em, RAX, (uint64_t)(n * 8));
-                emit_byte(&em, rex(1, 0, 0, 0)); emit_byte(&em, 0x29);
-                emit_modrm(&em, 3, RAX, RDI);
-            }
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)n);
-            emit_push_reg(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_make_tuple);
-            emit_pop_reg(&em, RDI);
-            emit_mov_reg_reg(&em, 12, RDI);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        /* Range */
-
-        case OP_MAKE_RANGE: {
-            int inclusive = (int)INSTR_A(instr);
-            emit_xs_pop_gpr(&em, RSI);          /* end */
-            emit_xs_pop_gpr(&em, RDI);          /* start */
-            emit_mov_reg_imm64(&em, RDX, (uint64_t)inclusive);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_make_range);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        /* Iterators */
-
-        case OP_ITER_LEN: {
-            emit_xs_pop_gpr(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_iter_len);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        case OP_ITER_GET: {
-            emit_xs_pop_gpr(&em, RSI);  /* idx */
-            emit_xs_pop_gpr(&em, RDI);  /* iter */
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_iter_get);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        /* Method calls */
-
-        case OP_METHOD_CALL: {
-            int argc = (int)INSTR_A(instr);
-            /* Stack: [obj, arg0, arg1, ...] */
-            emit_mov_reg_reg(&em, RDI, 12);
-            emit_mov_reg_imm64(&em, RAX, (uint64_t)((argc + 1) * 8));
-            emit_byte(&em, rex(1, 0, 0, 0)); emit_byte(&em, 0x29);
-            emit_modrm(&em, 3, RAX, RDI);
-            emit_mov_reg_imm64(&em, RSI, (uint64_t)argc);
-            emit_load_const(&em, bx);
-            emit_mov_reg_reg(&em, RDX, RAX);  /* name_val */
-            emit_push_reg(&em, RDI);
-            emit_call_abs(&em, (void *)(uintptr_t)jit_rt_method_call);
-            emit_pop_reg(&em, RDI);
-            emit_mov_reg_reg(&em, 12, RDI);
-            emit_xs_push_rax(&em);
-            break;
-        }
-
-        /* Opcodes we don't JIT: fall back to interpreter */
-        default:
-            bail = 1;
-            break;
-
-        } /* switch */
-    } /* for pc */
-
-    pc_map[blen] = em.pos;
-
-    if (bail || em.overflow) {
-        free(pc_map);
-        free(patches);
-        return NULL;
+    /* Append the jump table after the epilogue, 8-byte aligned. Each
+       slot holds the absolute address (in this code page) of a handler
+       or the slow path. Patch the dispatch's table-address placeholder
+       once we know where the table sits. */
+    while (em.pos % 8) emit_byte(&em, 0x90);
+    size_t table_pos = em.pos;
+    for (int op = 0; op < 256; op++) {
+        size_t off = handler_offsets[op] ? handler_offsets[op] : slow_path_pos;
+        emit_u64(&em, (uint64_t)(uintptr_t)(j->code + off));
+    }
+    {
+        uint64_t addr = (uint64_t)(uintptr_t)(j->code + table_pos);
+        memcpy(&em.buf[table_addr_patch], &addr, 8);
     }
 
-    for (int i = 0; i < npatches; i++) {
-        int tpc = patches[i].target_pc;
-        if (tpc < 0 || tpc > blen) {
-            free(pc_map); free(patches);
-            return NULL;
-        }
-        patch_rel32(&em, patches[i].native_offset, pc_map[tpc]);
+    /* Patch slow-path "jnz exit" -> epilogue_pos */
+    for (int i = 0; i < n_exits; i++) {
+        size_t disp_pos = exit_patches[i];
+        long rel = (long)epilogue_pos - (long)(disp_pos + 4);
+        em.buf[disp_pos + 0] = (uint8_t)(rel & 0xff);
+        em.buf[disp_pos + 1] = (uint8_t)((rel >> 8) & 0xff);
+        em.buf[disp_pos + 2] = (uint8_t)((rel >> 16) & 0xff);
+        em.buf[disp_pos + 3] = (uint8_t)((rel >> 24) & 0xff);
     }
+    /* Patch "jz done_ok" at top of loop */
+    for (int i = 0; i < n_dones; i++) {
+        size_t disp_pos = done_patches[i];
+        long rel = (long)done_ok_pos - (long)(disp_pos + 4);
+        em.buf[disp_pos + 0] = (uint8_t)(rel & 0xff);
+        em.buf[disp_pos + 1] = (uint8_t)((rel >> 8) & 0xff);
+        em.buf[disp_pos + 2] = (uint8_t)((rel >> 16) & 0xff);
+        em.buf[disp_pos + 3] = (uint8_t)((rel >> 24) & 0xff);
+    }
+    free(exit_patches);
+    free(done_patches);
 
-    free(pc_map);
-    free(patches);
-
-    void *fn = (void *)(j->code + fn_start);
+    if (em.overflow) return NULL;
     j->code_used = em.pos;
+    (void)patch_rel8;
+    (void)emit_refresh_frame;
+    (void)emit_set_ip_abs;
+    (void)emit_jnz_rel8_placeholder;
+    (void)proto;
     return fn;
 }
 
