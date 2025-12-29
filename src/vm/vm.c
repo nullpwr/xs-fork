@@ -4900,6 +4900,81 @@ int vm_step_jit(VM *vm) {
     return 1;
 }
 
+/* JIT fast path for OP_RETURN on a plain frame (no defer, no
+   generator, no init_inst/spawn_task baggage, no top-level main
+   transition). Pops result, tears down locals + closure, pushes
+   result on caller's stack. Returns 0 on success, 1 to fall back. */
+int vm_return_fast(VM *vm) {
+    if (vm->frame_count == 0) return 1;
+    CallFrame *frame = &vm->frames[vm->frame_count - 1];
+    if (frame->defer_return_ip) return 1;
+    if (frame->is_generator) return 1;
+    if (frame->defer_depth > 0) return 1;
+    if (vm->frame_count <= 1) return 1;       /* top frame: let slow path */
+    if (vm->init_inst) return 1;
+    if (vm->spawn_task) return 1;
+    if (vm->open_upvalues) return 1;          /* let slow path close them */
+    Value *result = *--vm->sp;
+    while (vm->sp > frame->base) value_decref(*--vm->sp);
+    value_decref(frame->closure_val);
+    vm->frame_count--;
+    if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+    *vm->sp++ = result;
+    return 0;
+}
+
+/* JIT fast path for OP_CALL on a plain closure (no overload, no
+   native, no map/struct constructor, no variadic, no generator,
+   exact-arity). Returns 0 on success (frame pushed, ip advanced past
+   the CALL instruction), 1 to tell the JIT "not eligible, run the
+   slow path". On error returns 1 too -- vm_dispatch will be the one
+   to surface it on the next step. */
+int vm_call_closure_fast(VM *vm, int argc) {
+    Value *callee = vm->sp[-argc - 1];
+    if (callee->tag != XS_CLOSURE) return 1;
+    XSClosure *cl = callee->cl;
+    XSProto *proto = cl->proto;
+    if (proto->arity < 0) return 1;          /* signed-encoded variadic */
+    if (proto->is_variadic) return 1;
+    if (proto->is_generator) return 1;
+    if (proto->arity != argc) return 1;       /* requires exact arity */
+    if (vm->frame_count >= 2048) return 1;    /* let slow path do StackOverflow */
+    if (vm->frame_count >= vm->frames_cap) vm_grow_frames(vm);
+    /* Shift the callee out from under the args (matches OP_CALL). */
+    Value *saved = callee;
+    value_incref(saved);
+    for (int i = -argc - 1; i < -1; i++) vm->sp[i] = vm->sp[i + 1];
+    vm->sp--;
+    value_decref(saved);
+    CallFrame *frame = &vm->frames[vm->frame_count++];
+    frame->closure_val      = value_incref(saved);
+    frame->ip               = proto->chunk.code;
+    frame->base             = vm->sp - argc;
+    frame->try_depth        = 0;
+    frame->defer_depth      = 0;
+    frame->defer_return_ip  = NULL;
+    frame->is_generator     = 0;
+    frame->yield_arr        = NULL;
+    frame->yield_index      = 0;
+    value_decref(saved);
+    /* Fill rest of locals with null. */
+    for (int i = 0; i < proto->nlocals - argc; i++) {
+        if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+        *vm->sp++ = value_incref(XS_NULL_VAL);
+    }
+    /* Advance the CALLER's ip past the OP_CALL: when this fast path
+       returns to the JIT, the JIT's loop_top sees the new top frame
+       and runs from its first instruction. The caller frame's ip is
+       restored when OP_RETURN pops back. We do NOT touch caller ip
+       here -- vm_dispatch's OP_CALL doesn't either; the *frame->ip++
+       at the top of the dispatch loop already moved past it before
+       the case ran. We mirror that: bump the caller's ip by 4. */
+    if (vm->frame_count >= 2) {
+        vm->frames[vm->frame_count - 2].ip += 1;
+    }
+    return 0;
+}
+
 int vm_run_with(VM *vm, XSProto *proto, int (*entry)(VM *)) {
     if (!vm || !proto || !entry) return 1;
     g_vm_for_invoke = vm;

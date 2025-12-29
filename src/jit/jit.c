@@ -985,14 +985,22 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
        All other temp regs (rcx, rdx, rsi, rdi) are scratch. */
 
     /* ----- prologue -----
-       At entry rsp % 16 == 8 (caller's call pushed ret addr). Two
-       saved callee regs (r12, r13) + rbp = 3 pushes (24B), so after
-       the prologue rsp % 16 == 0 -- correctly aligned for a call. */
+       At entry rsp % 16 == 8 (caller's call pushed ret addr). Three
+       saved callee regs (r12, r13, r14) + rbp = 4 pushes (32B), so
+       after the prologue rsp % 16 == 8. We then sub rsp, 8 below to
+       re-align before any inner call. */
     emit_byte(&em, 0x55);                        /* push rbp */
     emit_mov_reg_reg(&em, RBP, RSP);             /* mov rbp, rsp */
     emit_byte(&em, 0x41); emit_byte(&em, 0x54);  /* push r12 */
     emit_byte(&em, 0x41); emit_byte(&em, 0x55);  /* push r13 */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x56);  /* push r14 (cached jump table base) */
     emit_mov_r12_rdi(&em);                       /* r12 = vm */
+    /* movabs r14, <jump_table addr placeholder> -- patched after the
+       table is emitted at the end. Caching it shaves a 10-byte
+       movabs out of every dispatch loop iteration. */
+    emit_byte(&em, 0x49); emit_byte(&em, 0xbe);
+    size_t r14_table_patch = em.pos;
+    emit_u64(&em, 0);
     /* mov dword [r12 + offsetof(VM, single_step)], 1
        Pinning single_step=1 once lets us call vm_step_jit (which
        skips the per-call save/restore of single_step) for the slow
@@ -1012,10 +1020,10 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
             emit_i32(&em, 1);
         }
     }
-    /* Reserve 16 bytes of stack spill space so arithmetic fast paths
-       can stash their two operand pointers across xs_safe_add/decref
-       calls. Keeps rsp 16-byte aligned for all inner calls. */
-    emit_sub_reg_imm8(&em, RSP, 16);
+    /* Reserve 24 bytes of stack: 16 for arithmetic fast-path spill
+       slots ([rsp], [rsp+8]) + 8 to re-align rsp to 16 (since the
+       extra push r14 in the prologue made rsp 8-misaligned). */
+    emit_sub_reg_imm8(&em, RSP, 24);
 
     /* Exit patches land here (after the shared epilogue gets emitted). */
     size_t *exit_patches = xs_calloc(256, sizeof(size_t));
@@ -1096,16 +1104,13 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
     emit_byte(&em, 0x8b); emit_byte(&em, 0x06);
 
     /* O(1) opcode dispatch through a 256-entry jump table appended
-       at the end of the emitted code. The table holds absolute
-       handler addresses; non-inlined opcodes route to the slow path. */
+       at the end of the emitted code. The table base lives in r14,
+       cached once in the prologue, so each iteration costs just a
+       movzx + indirect jmp. */
     /* movzx ecx, al */
     emit_byte(&em, 0x0f); emit_byte(&em, 0xb6); emit_byte(&em, 0xc8);
-    /* movabs rdx, <table_addr placeholder> (10 bytes) */
-    emit_byte(&em, 0x48); emit_byte(&em, 0xba);
-    size_t table_addr_patch = em.pos;
-    emit_u64(&em, 0);
-    /* jmp qword [rdx + rcx*8] */
-    emit_byte(&em, 0xff); emit_byte(&em, 0x24); emit_byte(&em, 0xca);
+    /* jmp qword [r14 + rcx*8]   (4 bytes: 41 ff 24 ce) */
+    emit_byte(&em, 0x41); emit_byte(&em, 0xff); emit_byte(&em, 0x24); emit_byte(&em, 0xce);
 
     /* The cmp/je chain that follows is now dead code reached only via
        the table; each handler's leading cmp+jne always matches because
@@ -1577,6 +1582,64 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
     JMP_REL32_TO(loop_top);
     PATCH_JNE_HERE(jne_patch);
 
+    /* ---- OP_RETURN (simple frame teardown) ----
+       Calls vm_return_fast, which bails out (returns 1) on defer,
+       generator, top-frame, init/spawn, or open upvalues. On 0, the
+       caller's frame is now top and its ip is already past OP_CALL. */
+    INLINE_CMP_JNE(OP_RETURN);
+    jne_patch = em.pos - 4;
+    /* mov rdi, r12; call vm_return_fast */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_return_fast);
+    emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
+    emit_byte(&em, 0x75); emit_byte(&em, 0x05);  /* jnz fallback */
+    JMP_REL32_TO(loop_top);
+    /* fallback: vm_step_jit */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+    emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
+    emit_byte(&em, 0x0f); emit_byte(&em, 0x85);
+    emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0);
+    exit_patches[n_exits++] = em.pos - 4;
+    JMP_REL32_TO(loop_top);
+    PATCH_JNE_HERE(jne_patch);
+
+    /* ---- OP_CALL (closure-only fast path) ----
+       Decode argc from byte C (instr >> 24), call vm_call_closure_fast.
+       It returns 0 if it took the call (frame pushed), 1 if not
+       eligible (overload, native, varargs, gen, ...). On 1 we fall
+       through to vm_step_jit which handles the full semantics. */
+    INLINE_CMP_JNE(OP_CALL);
+    jne_patch = em.pos - 4;
+    /* mov esi, eax; shr esi, 24  ; esi = argc */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc6);
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xee); emit_byte(&em, 0x18);
+    /* mov rdi, r12 */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_call_closure_fast);
+    /* test eax, eax */
+    emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
+    /* jnz .fallback (fall through to vm_step) */
+    emit_byte(&em, 0x75); emit_byte(&em, 0x05);
+    /* eax was 0 = success: jmp loop_top */
+    JMP_REL32_TO(loop_top);
+    /* .fallback: roll back -- on failure vm_call_closure_fast didn't
+       touch state, so just fall to vm_step which re-reads the same
+       instruction. */
+    {
+        /* mov rdi, r12; call vm_step_jit; test eax,eax; jnz exit;
+           jmp loop_top -- duplicates the slow path inline so we don't
+           need a backward jump. Cheaper than a jmp + label. */
+        emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+        emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+        emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
+        emit_byte(&em, 0x0f); emit_byte(&em, 0x85);
+        emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0);
+        exit_patches[n_exits++] = em.pos - 4;
+        JMP_REL32_TO(loop_top);
+    }
+    PATCH_JNE_HERE(jne_patch);
+
     /* OP_JUMP_IF_FALSE: branch when cond is falsy (truthy == 0). */
     INLINE_CMP_JNE(OP_JUMP_IF_FALSE);
     jne_patch = em.pos - 4;
@@ -1643,8 +1706,10 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
             emit_i32(&em, 0);
         }
     }
-    /* add rsp, 16  (free the arithmetic spill area) */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xc4); emit_byte(&em, 0x10);
+    /* add rsp, 24  (free the spill + alignment pad) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xc4); emit_byte(&em, 0x18);
+    /* pop r14 */
+    emit_byte(&em, 0x41); emit_byte(&em, 0x5e);
     /* pop r13 */
     emit_byte(&em, 0x41); emit_byte(&em, 0x5d);
     /* pop r12 */
@@ -1667,8 +1732,7 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
 
     /* Append the jump table after the epilogue, 8-byte aligned. Each
        slot holds the absolute address (in this code page) of a handler
-       or the slow path. Patch the dispatch's table-address placeholder
-       once we know where the table sits. */
+       or the slow path. Patch the prologue's r14 = table_addr load. */
     while (em.pos % 8) emit_byte(&em, 0x90);
     size_t table_pos = em.pos;
     for (int op = 0; op < 256; op++) {
@@ -1677,7 +1741,7 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
     }
     {
         uint64_t addr = (uint64_t)(uintptr_t)(j->code + table_pos);
-        memcpy(&em.buf[table_addr_patch], &addr, 8);
+        memcpy(&em.buf[r14_table_patch], &addr, 8);
     }
 
     /* Patch slow-path "jnz exit" -> epilogue_pos */

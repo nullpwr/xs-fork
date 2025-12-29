@@ -102,6 +102,8 @@ int  vm_run(VM *vm, XSProto *proto);
 int  vm_step(VM *vm);
 int  vm_step_jit(VM *vm);  /* faster variant for JIT (assumes single_step=1) */
 void vm_grow_stack(VM *vm); /* exposed for JIT's loop-top capacity check */
+int  vm_call_closure_fast(VM *vm, int argc);  /* JIT OP_CALL fast path */
+int  vm_return_fast(VM *vm);                  /* JIT OP_RETURN fast path */
 /* Set up the top frame for `proto` then hand control to `entry` (which
    must be a function pointer to JIT-emitted machine code that takes
    the VM and returns an exit code). vm_run_with sweeps the same global
