@@ -131,6 +131,16 @@ typedef struct {
     int          len, cap;
     Value      **consts;
     int          nconsts, cap_consts;
+    /* Inline caches: one Value* slot per instruction. Populated lazily
+       on first execution. The only opcode currently using these is
+       OP_LOAD_GLOBAL, which stashes the resolved global value pointer
+       at chunk.ic[ip] so subsequent hits skip the hashmap lookup.
+       vm->global_version bumps on every OP_STORE_GLOBAL; the IC stores
+       the version it observed so stale cached pointers are discarded
+       after a global is reassigned. Lazy-allocated: NULL until first
+       LOAD_GLOBAL executes for this chunk. */
+    Value      **ic;           /* parallel to code[], slots are Value* */
+    uint64_t    *ic_version;   /* parallel to ic[], stored vm->global_version */
 } XSChunk;
 
 typedef struct XSProto XSProto;

@@ -1583,42 +1583,37 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
         em.buf[done_pos] = (uint8_t)(em.pos - done_pos - 1); \
     } while (0)
 
-    /* ---- OP_LOAD_GLOBAL ----
-       Decode Bx, fetch consts[Bx]->s (the string name) from the
-       current proto, call map_get(vm->globals, name), incref result
-       (or XS_NULL_VAL on miss), push, advance ip. */
+    /* ---- OP_LOAD_GLOBAL (IC-aware) ----
+       Compute ip_idx and const_idx, hand them to vm_load_global_ic
+       which looks the global up via the proto's inline cache and only
+       falls through to a hashmap lookup on miss. Returns an incref'd
+       Value* ready to push. */
     INLINE_CMP_JNE(OP_LOAD_GLOBAL);
     jne_patch = em.pos - 4;
-    /* rdx = consts ptr (same chain as OP_PUSH_CONST) */
+    /* Compute ip_idx = (frame->ip - chunk.code) in instruction units.
+       frame->ip hasn't advanced yet in the JIT handler; it points at
+       the current instruction. proto is closure_val->cl->proto. */
     /* mov rdx, [r13]            ; closure_val */
     emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x55); emit_byte(&em, 0x00);
     /* mov rdx, [rdx + 8]        ; cl */
     emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x08);
     /* mov rdx, [rdx]            ; proto */
     emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x12);
-    /* mov rdx, [rdx + 32]       ; chunk.consts */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x52); emit_byte(&em, 0x20);
-    /* mov ecx, eax; shr ecx, 16 */
-    emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
-    emit_byte(&em, 0xc1); emit_byte(&em, 0xe9); emit_byte(&em, 0x10);
-    /* mov rdx, [rdx + rcx*8]    ; consts[Bx]  (Value*) */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x14); emit_byte(&em, 0xca);
-    /* mov rsi, [rdx + 8]        ; .s (string union member, offset 8) */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x72); emit_byte(&em, 0x08);
-    /* mov rdi, [r12 + 48]       ; vm->globals */
-    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x7c);
-    emit_byte(&em, 0x24); emit_byte(&em, 0x30);
-    emit_call_abs(&em, (void *)(uintptr_t)map_get);
-    /* If rax == NULL, replace with *XS_NULL_VAL. */
-    /* test rax, rax */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xc0);
-    /* jnz +13 (skip 10-byte movabs + 3-byte deref of NULL_VAL) */
-    emit_byte(&em, 0x75); emit_byte(&em, 13);
-    /* mov rax, &XS_NULL_VAL  (10 bytes) */
-    emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_NULL_VAL);
-    /* mov rax, [rax]  (3 bytes) */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
-    emit_inline_incref_rax(&em);
+    /* mov rsi, [r13 + 8]        ; frame->ip (current instr ptr) */
+    emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x75); emit_byte(&em, 0x08);
+    /* sub rsi, [rdx + 16]       ; - chunk.code (byte delta, multiple of 4) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x2b); emit_byte(&em, 0x72); emit_byte(&em, 0x10);
+    /* shr rsi, 2                ; / sizeof(Instruction) = 4 */
+    emit_byte(&em, 0x48); emit_byte(&em, 0xc1); emit_byte(&em, 0xee); emit_byte(&em, 0x02);
+    /* const_idx = (instr >> 16) & 0xffff; instr is in eax */
+    /* movzx edx, ax ; shr eax, 16 ... actually easier: mov edx, eax; shr edx, 16 */
+    emit_byte(&em, 0x89); emit_byte(&em, 0xc2);
+    emit_byte(&em, 0xc1); emit_byte(&em, 0xea); emit_byte(&em, 0x10);
+    /* Call vm_load_global_ic(vm=r12, ip_idx=rsi, const_idx=rdx) */
+    /* mov rdi, r12 */
+    emit_byte(&em, 0x4c); emit_byte(&em, 0x89); emit_byte(&em, 0xe7);
+    emit_call_abs(&em, (void *)(uintptr_t)vm_load_global_ic);
+    /* rax already incref'd, just push */
     emit_push_rax_to_vm_sp(&em);
     emit_advance_ip(&em);
     JMP_REL32_TO(loop_top);

@@ -1378,12 +1378,36 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             break;
         }
         case OP_LOAD_GLOBAL: {
-            const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
+            XSChunk *chk = &PROTO->chunk;
+            int ip_idx = (int)(frame->ip - chk->code) - 1;
+            if (ip_idx < 0 || ip_idx >= chk->len) {
+                /* ip out of range (e.g., proto executing via cached
+                   closure after reload) -- take the non-cached path. */
+                const char *name = chk->consts[INSTR_Bx(instr)]->s;
+                Value *v = map_get(vm->globals, name);
+                PUSH(v ? value_incref(v) : value_incref(XS_NULL_VAL));
+                break;
+            }
+            if (!chk->ic) {
+                chk->ic = xs_calloc((size_t)chk->len, sizeof(Value *));
+                chk->ic_version = xs_calloc((size_t)chk->len, sizeof(uint64_t));
+            }
+            Value *cached = chk->ic[ip_idx];
+            if (cached && chk->ic_version[ip_idx] == vm->global_version) {
+                PUSH(value_incref(cached));
+                break;
+            }
+            const char *name = chk->consts[INSTR_Bx(instr)]->s;
             Value *v = map_get(vm->globals, name);
-            PUSH(v ? value_incref(v) : value_incref(XS_NULL_VAL));
+            if (!v) v = XS_NULL_VAL;
+            if (chk->ic[ip_idx]) value_decref(chk->ic[ip_idx]);
+            chk->ic[ip_idx] = value_incref(v);
+            chk->ic_version[ip_idx] = vm->global_version;
+            PUSH(value_incref(v));
             break;
         }
         case OP_STORE_GLOBAL: {
+            vm->global_version++;
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *v = POP();
             /* Overload accumulation: if a user function with the same
@@ -4898,6 +4922,36 @@ int vm_step_jit(VM *vm) {
     if (rc != 0) return -1;
     if (vm->step_yielded) return 0;
     return 1;
+}
+
+/* JIT helper for OP_LOAD_GLOBAL: resolves a global name via the
+   current proto's inline cache. Populates the cache on miss. Returns
+   an incref'd value ready to push on the stack. */
+Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx) {
+    CallFrame *frame = &vm->frames[vm->frame_count - 1];
+    XSProto *proto = frame->closure_val->cl->proto;
+    XSChunk *chk = &proto->chunk;
+    if (ip_idx < 0 || ip_idx >= chk->len) {
+        /* ip out of range -- shouldn't happen but be safe */
+        const char *name = chk->consts[const_idx]->s;
+        Value *v = map_get(vm->globals, name);
+        return value_incref(v ? v : XS_NULL_VAL);
+    }
+    if (!chk->ic) {
+        chk->ic = xs_calloc((size_t)chk->len, sizeof(Value *));
+        chk->ic_version = xs_calloc((size_t)chk->len, sizeof(uint64_t));
+    }
+    Value *cached = chk->ic[ip_idx];
+    if (cached && chk->ic_version[ip_idx] == vm->global_version) {
+        return value_incref(cached);
+    }
+    const char *name = chk->consts[const_idx]->s;
+    Value *v = map_get(vm->globals, name);
+    if (!v) v = XS_NULL_VAL;
+    if (chk->ic[ip_idx]) value_decref(chk->ic[ip_idx]);
+    chk->ic[ip_idx] = value_incref(v);
+    chk->ic_version[ip_idx] = vm->global_version;
+    return value_incref(v);
 }
 
 /* JIT fast path for OP_RETURN on a plain frame (no defer, no

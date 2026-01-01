@@ -19,6 +19,12 @@ void proto_free(XSProto *p) {
     for (int i = 0; i < p->chunk.nconsts; i++) value_decref(p->chunk.consts[i]);
     free(p->chunk.consts);
     free(p->chunk.code);
+    /* Release inline-cached globals so their refcounts drop cleanly. */
+    if (p->chunk.ic) {
+        for (int i = 0; i < p->chunk.len; i++) value_decref(p->chunk.ic[i]);
+        free(p->chunk.ic);
+        free(p->chunk.ic_version);
+    }
     for (int i = 0; i < p->n_inner; i++) proto_free(p->inner[i]);
     free(p->inner);
     free(p->uv_descs);
