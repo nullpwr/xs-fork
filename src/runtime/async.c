@@ -213,7 +213,7 @@ static void schedule_callbacks(AsyncRuntime *rt, XSPromise *p) {
 }
 
 static Value *call_handler(Value *handler, Value *arg) {
-    if (!handler || handler->tag == XS_NULL) return NULL;
+    if (!handler || VAL_TAG(handler) == XS_NULL) return NULL;
     if (!g_async_interp) return arg;
 
     Value *args[1] = { arg ? arg : xs_null() };
@@ -232,7 +232,7 @@ static void run_callbacks(void *ctx_ptr) {
         Value *handler = is_reject ? cb->on_reject : cb->on_resolve;
         XSPromise *child = cb->child;
 
-        if (handler && handler->tag != XS_NULL) {
+        if (handler && VAL_TAG(handler) != XS_NULL) {
             Value *result = call_handler(handler, val);
 
             if (child) {
@@ -643,12 +643,12 @@ Value *promise_to_value(XSPromise *p) {
 }
 
 XSPromise *value_to_promise(Value *v) {
-    if (!v || v->tag != XS_MAP || !v->map) return NULL;
+    if (!v || VAL_TAG(v) != XS_MAP || !v->map) return NULL;
     Value *id = map_get(v->map, "__promise_id");
-    if (!id || id->tag != XS_INT) return NULL;
+    if (!id || VAL_TAG(id) != XS_INT) return NULL;
 
     if (!g_async_rt) return NULL;
-    int pid = (int)id->i;
+    int pid = (int)VAL_INT(id);
     for (int i = 0; i < g_async_rt->npromises; i++) {
         if (g_async_rt->promises[i] && g_async_rt->promises[i]->id == pid)
             return g_async_rt->promises[i];
@@ -657,7 +657,7 @@ XSPromise *value_to_promise(Value *v) {
 }
 
 int value_is_promise(Value *v) {
-    if (!v || v->tag != XS_MAP || !v->map) return 0;
+    if (!v || VAL_TAG(v) != XS_MAP || !v->map) return 0;
     return map_has(v->map, "__promise_id");
 }
 
@@ -676,7 +676,7 @@ static Value *native_promise_new(Interp *interp, Value **args, int argc) {
     AsyncRuntime *rt = ensure_runtime();
     XSPromise *p = promise_new(rt);
 
-    if (argc >= 1 && (args[0]->tag == XS_FUNC || args[0]->tag == XS_NATIVE)) {
+    if (argc >= 1 && (VAL_TAG(args[0]) == XS_FUNC || VAL_TAG(args[0]) == XS_NATIVE)) {
         /* executor pattern: fn(resolve, reject) */
         Value *resolve_fn = xs_native(NULL);
         Value *reject_fn = xs_native(NULL);
@@ -709,7 +709,7 @@ static Value *native_promise_reject(Interp *interp, Value **args, int argc) {
 static Value *native_promise_all(Interp *interp, Value **args, int argc) {
     (void)interp;
     AsyncRuntime *rt = ensure_runtime();
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_null();
 
     int count = args[0]->arr->len;
     XSPromise **promises = xs_calloc(count > 0 ? count : 1, sizeof(XSPromise *));
@@ -731,7 +731,7 @@ static Value *native_promise_all(Interp *interp, Value **args, int argc) {
 static Value *native_promise_race(Interp *interp, Value **args, int argc) {
     (void)interp;
     AsyncRuntime *rt = ensure_runtime();
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_null();
 
     int count = args[0]->arr->len;
     XSPromise **promises = xs_calloc(count > 0 ? count : 1, sizeof(XSPromise *));
@@ -751,7 +751,7 @@ static Value *native_promise_race(Interp *interp, Value **args, int argc) {
 static Value *native_promise_any(Interp *interp, Value **args, int argc) {
     (void)interp;
     AsyncRuntime *rt = ensure_runtime();
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_null();
 
     int count = args[0]->arr->len;
     XSPromise **promises = xs_calloc(count > 0 ? count : 1, sizeof(XSPromise *));
@@ -771,7 +771,7 @@ static Value *native_promise_any(Interp *interp, Value **args, int argc) {
 static Value *native_promise_all_settled(Interp *interp, Value **args, int argc) {
     (void)interp;
     AsyncRuntime *rt = ensure_runtime();
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_null();
 
     int count = args[0]->arr->len;
     XSPromise **promises = xs_calloc(count > 0 ? count : 1, sizeof(XSPromise *));
@@ -791,7 +791,7 @@ static Value *native_promise_all_settled(Interp *interp, Value **args, int argc)
 static Value *native_async_sleep(Interp *interp, Value **args, int argc) {
     (void)interp;
     AsyncRuntime *rt = ensure_runtime();
-    int ms = (argc > 0 && args[0]->tag == XS_INT) ? (int)args[0]->i : 0;
+    int ms = (argc > 0 && VAL_TAG(args[0]) == XS_INT) ? (int)VAL_INT(args[0]) : 0;
     XSPromise *p = async_sleep(rt, ms);
     return promise_to_value(p);
 }
@@ -803,7 +803,7 @@ static Value *native_async_timeout(Interp *interp, Value **args, int argc) {
 
     XSPromise *p = value_to_promise(args[0]);
     if (!p) p = promise_resolve_value(rt, args[0]);
-    int ms = (args[1]->tag == XS_INT) ? (int)args[1]->i : 1000;
+    int ms = (VAL_TAG(args[1]) == XS_INT) ? (int)VAL_INT(args[1]) : 1000;
 
     XSPromise *result = async_timeout(rt, p, ms);
     return promise_to_value(result);

@@ -29,19 +29,19 @@ Value *xs_error_from_str(const char *message) {
 }
 
 const char *xs_error_kind(Value *err) {
-    if (!err || err->tag != XS_MAP) return "Error";
+    if (!err || VAL_TAG(err) != XS_MAP) return "Error";
     Value *v = map_get(err->map, "kind");
-    return (v && v->tag == XS_STR) ? v->s : "Error";
+    return (v && VAL_TAG(v) == XS_STR) ? v->s : "Error";
 }
 
 const char *xs_error_message(Value *err) {
-    if (!err || err->tag != XS_MAP) return "";
+    if (!err || VAL_TAG(err) != XS_MAP) return "";
     Value *v = map_get(err->map, "message");
-    return (v && v->tag == XS_STR) ? v->s : "";
+    return (v && VAL_TAG(v) == XS_STR) ? v->s : "";
 }
 
 Value *xs_error_cause(Value *err) {
-    if (!err || err->tag != XS_MAP) return NULL;
+    if (!err || VAL_TAG(err) != XS_MAP) return NULL;
     return map_get(err->map, "cause");
 }
 

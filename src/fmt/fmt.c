@@ -117,7 +117,7 @@ static void fmt_type(SB *s, TypeExpr *te) {
 
 static void fmt_block_body(SB *s, Node *block, int depth) {
     if (!block) return;
-    if (block->tag == NODE_BLOCK) {
+    if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++) {
             fmt_stmt(s, block->block.stmts.items[i], depth);
         }
@@ -142,7 +142,7 @@ static void fmt_block(SB *s, Node *block, int depth) {
 static void fmt_pattern(SB *s, Node *n, int depth) {
     (void)depth;
     if (!n) { sb_add(s, "_"); return; }
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_PAT_WILD:
         sb_addc(s, '_');
         break;
@@ -249,7 +249,7 @@ static void fmt_pattern(SB *s, Node *n, int depth) {
 /* Expressions */
 static void fmt_expr(SB *s, Node *n, int depth) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         sb_printf(s, "%" PRId64, n->lit_int.ival);
         break;
@@ -477,7 +477,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
                 fmt_expr(s, arm->guard, depth + 1);
             }
             sb_add(s, " => ");
-            if (arm->body && arm->body->tag == NODE_BLOCK) {
+            if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                 fmt_block(s, arm->body, depth + 1);
                 sb_addc(s, '\n');
             } else {
@@ -495,7 +495,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
         sb_add(s, "fn");
         fmt_params(s, &n->lambda.params);
         sb_addc(s, ' ');
-        if (n->lambda.body && n->lambda.body->tag == NODE_BLOCK) {
+        if (n->lambda.body && VAL_TAG(n->lambda.body) == NODE_BLOCK) {
             fmt_block(s, n->lambda.body, depth);
         } else {
             sb_add(s, "{ ");
@@ -559,7 +559,7 @@ static void fmt_expr(SB *s, Node *n, int depth) {
             sb_add(s, arm->op_name);
             fmt_params(s, &arm->params);
             sb_add(s, " => ");
-            if (arm->body && arm->body->tag == NODE_BLOCK)
+            if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
                 fmt_block(s, arm->body, depth + 1);
             else
                 fmt_expr(s, arm->body, depth + 1);
@@ -646,7 +646,7 @@ static void fmt_stmt(SB *s, Node *n, int depth) {
 }
 static void fmt_stmt_core(SB *s, Node *n, int depth) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_EXPR_STMT:
         fmt_indent_n(s, depth);
         fmt_expr(s, n->expr_stmt.expr, depth);
@@ -909,7 +909,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
             sb_add(s, " catch ");
             fmt_pattern(s, arm->pattern, depth);
             sb_addc(s, ' ');
-            if (arm->body && arm->body->tag == NODE_BLOCK)
+            if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
                 fmt_block(s, arm->body, depth);
             else
                 fmt_expr(s, arm->body, depth);
@@ -923,7 +923,7 @@ static void fmt_stmt_core(SB *s, Node *n, int depth) {
     case NODE_DEFER:
         fmt_indent_n(s, depth);
         sb_add(s, "defer ");
-        if (n->defer_.body && n->defer_.body->tag == NODE_BLOCK)
+        if (n->defer_.body && VAL_TAG(n->defer_.body) == NODE_BLOCK)
             fmt_block(s, n->defer_.body, depth);
         else
             fmt_expr(s, n->defer_.body, depth);
@@ -1023,7 +1023,7 @@ char *fmt_format_ex(Node *program, const char *src, const FmtConfig *cfg) {
 }
 
 char *fmt_format(Node *program, const char *src) {
-    if (!program || program->tag != NODE_PROGRAM) return src ? xs_strdup(src) : NULL;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return src ? xs_strdup(src) : NULL;
 
     CommentList cl = {NULL, 0, 0};
     if (src) {
@@ -1046,14 +1046,14 @@ char *fmt_format(Node *program, const char *src) {
         if (i > 0) {
             Node *prev = program->program.stmts.items[i - 1];
             Node *cur  = program->program.stmts.items[i];
-            if (prev->tag == NODE_FN_DECL || prev->tag == NODE_STRUCT_DECL ||
-                prev->tag == NODE_ENUM_DECL || prev->tag == NODE_IMPL_DECL ||
-                prev->tag == NODE_TRAIT_DECL || prev->tag == NODE_CLASS_DECL ||
-                prev->tag == NODE_MODULE_DECL || prev->tag == NODE_EFFECT_DECL ||
-                cur->tag == NODE_FN_DECL || cur->tag == NODE_STRUCT_DECL ||
-                cur->tag == NODE_ENUM_DECL || cur->tag == NODE_IMPL_DECL ||
-                cur->tag == NODE_TRAIT_DECL || cur->tag == NODE_CLASS_DECL ||
-                cur->tag == NODE_MODULE_DECL || cur->tag == NODE_EFFECT_DECL) {
+            if (VAL_TAG(prev) == NODE_FN_DECL || VAL_TAG(prev) == NODE_STRUCT_DECL ||
+                VAL_TAG(prev) == NODE_ENUM_DECL || VAL_TAG(prev) == NODE_IMPL_DECL ||
+                VAL_TAG(prev) == NODE_TRAIT_DECL || VAL_TAG(prev) == NODE_CLASS_DECL ||
+                VAL_TAG(prev) == NODE_MODULE_DECL || VAL_TAG(prev) == NODE_EFFECT_DECL ||
+                VAL_TAG(cur) == NODE_FN_DECL || VAL_TAG(cur) == NODE_STRUCT_DECL ||
+                VAL_TAG(cur) == NODE_ENUM_DECL || VAL_TAG(cur) == NODE_IMPL_DECL ||
+                VAL_TAG(cur) == NODE_TRAIT_DECL || VAL_TAG(cur) == NODE_CLASS_DECL ||
+                VAL_TAG(cur) == NODE_MODULE_DECL || VAL_TAG(cur) == NODE_EFFECT_DECL) {
                 sb_addc(&sb, '\n');
             }
         }

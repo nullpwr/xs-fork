@@ -10,7 +10,7 @@
 
 /* find the closest matching field name in a struct declaration */
 static const char *find_similar_field(Node *struct_decl, const char *name) {
-    if (!struct_decl || struct_decl->tag != NODE_STRUCT_DECL || !name) return NULL;
+    if (!struct_decl || VAL_TAG(struct_decl) != NODE_STRUCT_DECL || !name) return NULL;
     NodePairList *fl = &struct_decl->struct_decl.fields;
     const char *best = NULL;
     int best_dist = 4;
@@ -27,7 +27,7 @@ static const char *find_similar_field(Node *struct_decl, const char *name) {
 
 /* format a function signature for error messages */
 static char *format_fn_signature(const char *name, Node *fn_decl) {
-    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return NULL;
+    if (!fn_decl || VAL_TAG(fn_decl) != NODE_FN_DECL) return NULL;
     char buf[512];
     int pos = 0;
     pos += snprintf(buf + pos, sizeof buf - pos, "fn %s(", name ? name : "?");
@@ -111,7 +111,7 @@ static XsType *texpr_to_xstype(TypeExpr *te) {
 
 XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
     if (!n) return ty_unknown();
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
         case NODE_LIT_INT:    return ty_i64();
         case NODE_LIT_BIGINT: return ty_i64();
         case NODE_LIT_FLOAT:  return ty_f64();
@@ -157,7 +157,7 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
             XsType *callee_ty = tc_synth(n->call.callee, st, ctx);
             if (callee_ty && callee_ty->kind == TY_FN && callee_ty->fn_.ret)
                 return callee_ty->fn_.ret;
-            if (n->call.callee && n->call.callee->tag == NODE_IDENT &&
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
                 n->call.callee->ident.name) {
                 Symbol *sym = sym_lookup(st, n->call.callee->ident.name);
                 if (sym && sym->type && sym->type->kind == TY_FN &&
@@ -180,7 +180,7 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
             if (obj_ty->kind == TY_NAMED && obj_ty->named.name) {
                 Symbol *st_sym = sym_lookup(st, obj_ty->named.name);
                 if (st_sym && st_sym->decl &&
-                    st_sym->decl->tag == NODE_STRUCT_DECL) {
+                    VAL_TAG(st_sym->decl) == NODE_STRUCT_DECL) {
                     NodePairList *fl = &st_sym->decl->struct_decl.fields;
                     for (int i = 0; i < fl->len; i++) {
                         if (fl->items[i].key &&
@@ -199,7 +199,7 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
             if (obj_ty && obj_ty->kind == TY_ARRAY && obj_ty->array.inner)
                 return obj_ty->array.inner;
             if (obj_ty && obj_ty->kind == TY_TUPLE &&
-                n->index.index && n->index.index->tag == NODE_LIT_INT) {
+                n->index.index && VAL_TAG(n->index.index) == NODE_LIT_INT) {
                 int64_t idx = n->index.index->lit_int.ival;
                 if (idx >= 0 && idx < obj_ty->tuple.nelems)
                     return obj_ty->tuple.elems[idx];
@@ -229,7 +229,7 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
                 return tc_synth(n->block.expr, st, ctx);
             if (n->block.stmts.len > 0) {
                 Node *last = n->block.stmts.items[n->block.stmts.len - 1];
-                if (last && last->tag == NODE_EXPR_STMT)
+                if (last && VAL_TAG(last) == NODE_EXPR_STMT)
                     return tc_synth(last->expr_stmt.expr, st, ctx);
             }
             return ty_unit();
@@ -287,7 +287,7 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
             Node *first_k = NULL, *first_v = NULL;
             for (int i = 0; i < n->lit_map.keys.len; i++) {
                 Node *k = n->lit_map.keys.items[i];
-                if (k && k->tag != NODE_SPREAD && i < n->lit_map.vals.len && n->lit_map.vals.items[i]) {
+                if (k && VAL_TAG(k) != NODE_SPREAD && i < n->lit_map.vals.len && n->lit_map.vals.items[i]) {
                     first_k = k; first_v = n->lit_map.vals.items[i]; break;
                 }
             }
@@ -462,7 +462,7 @@ static void tc_walk_list(NodeList *nl, SymTab *st, SemaCtx *ctx) {
 static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
     if (!n) return;
     if (ctx->diag && diag_context_error_count(ctx->diag) >= TC_MAX_ERRORS) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
 
     case NODE_FN_DECL: {
         if (n->fn_decl.ret_type)
@@ -592,9 +592,9 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
         tc_walk(n->call.callee, st, ctx);
         tc_walk_list(&n->call.args, st, ctx);
         /* check argument types against parameter annotations */
-        if (n->call.callee && n->call.callee->tag == NODE_IDENT) {
+        if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT) {
             Symbol *fn_sym = sym_lookup(st, n->call.callee->ident.name);
-            if (fn_sym && fn_sym->decl && fn_sym->decl->tag == NODE_FN_DECL) {
+            if (fn_sym && fn_sym->decl && VAL_TAG(fn_sym->decl) == NODE_FN_DECL) {
                 ParamList *params = &fn_sym->decl->fn_decl.params;
                 int nargs = n->call.args.len;
                 int nparams = params->len;
@@ -682,7 +682,7 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
         if (n->struct_init.rest) tc_walk(n->struct_init.rest, st, ctx);
         if (n->struct_init.path) {
             Symbol *st_sym = sym_lookup(st, n->struct_init.path);
-            if (st_sym && st_sym->decl && st_sym->decl->tag == NODE_STRUCT_DECL) {
+            if (st_sym && st_sym->decl && VAL_TAG(st_sym->decl) == NODE_STRUCT_DECL) {
                 Node *sd = st_sym->decl;
                 NodePairList *decl_fields = &sd->struct_decl.fields;
                 TypeExpr **field_types = sd->struct_decl.field_types;

@@ -449,11 +449,11 @@ static void update_top_frame(DapState *st, int line, int col) {
 /* simple hash for data breakpoint change detection */
 static uint64_t value_hash_simple(Value *v) {
     if (!v) return 0;
-    uint64_t h = (uint64_t)v->tag * 2654435761ULL;
-    switch (v->tag) {
-    case XS_INT:   h ^= (uint64_t)v->i; break;
+    uint64_t h = (uint64_t)VAL_TAG(v) * 2654435761ULL;
+    switch (VAL_TAG(v)) {
+    case XS_INT:   h ^= (uint64_t)VAL_INT(v); break;
     case XS_FLOAT: { uint64_t bits; memcpy(&bits, &v->f, sizeof(bits)); h ^= bits; } break;
-    case XS_BOOL:  h ^= (uint64_t)v->i; break;
+    case XS_BOOL:  h ^= (uint64_t)VAL_INT(v); break;
     case XS_STR:   if (v->s) { for (const char *p = v->s; *p; p++) h = h * 31 + (unsigned char)*p; } break;
     case XS_NULL:  break;
     default: h ^= (uint64_t)(uintptr_t)v; break; /* pointer identity for complex types */
@@ -481,9 +481,9 @@ static Value *eval_expression(DapState *st, const char *expr_str) {
     }
 
     Value *result = NULL;
-    if (prog->tag == NODE_PROGRAM && prog->program.stmts.len == 1) {
+    if (VAL_TAG(prog) == NODE_PROGRAM && prog->program.stmts.len == 1) {
         Node *stmt = prog->program.stmts.items[0];
-        if (stmt->tag == NODE_EXPR_STMT && stmt->expr_stmt.expr) {
+        if (VAL_TAG(stmt) == NODE_EXPR_STMT && stmt->expr_stmt.expr) {
             result = interp_eval(st->interp, stmt->expr_stmt.expr);
             if (result) value_incref(result);
         } else {
@@ -660,7 +660,7 @@ static int exec_stmt_with_debug(DapState *st, Node *stmt) {
  * Returns the stop reason string, or NULL if completed.
  */
 static const char *run_program_debug(DapState *st, int from_stmt) {
-    if (!st->program_ast || st->program_ast->tag != NODE_PROGRAM) return NULL;
+    if (!st->program_ast || VAL_TAG(st->program_ast) != NODE_PROGRAM) return NULL;
 
     NodeList *stmts = &st->program_ast->program.stmts;
 
@@ -680,7 +680,7 @@ static const char *run_program_debug(DapState *st, int from_stmt) {
             {
                 char body[DAP_BUF_MEDIUM];
                 char escaped[DAP_BUF_SMALL];
-                const char *emsg = (err && err->tag == XS_STR) ? err->s : "runtime error";
+                const char *emsg = (err && VAL_TAG(err) == XS_STR) ? err->s : "runtime error";
                 json_escape_into(escaped, sizeof(escaped), emsg);
                 snprintf(body, sizeof(body),
                     "{\"reason\":\"exception\",\"description\":\"%s\","
@@ -798,7 +798,7 @@ static void dap_parse_breakpoints(DapState *st, const char *msg) {
 
 static const char *value_type_name(Value *v) {
     if (!v) return "null";
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
     case XS_NULL:       return "null";
     case XS_BOOL:       return "Bool";
     case XS_INT:        return "Int";
@@ -851,9 +851,9 @@ static int build_variables_json(Env *env, char *buf, size_t bufsz, int ref) {
                 const char *type_str = value_type_name(b->value);
 
                 int var_ref = 0;
-                if (b->value && (b->value->tag == XS_ARRAY || b->value->tag == XS_MAP ||
-                                 b->value->tag == XS_TUPLE || b->value->tag == XS_STRUCT_VAL ||
-                                 b->value->tag == XS_INST)) {
+                if (b->value && (VAL_TAG(b->value) == XS_ARRAY || VAL_TAG(b->value) == XS_MAP ||
+                                 VAL_TAG(b->value) == XS_TUPLE || VAL_TAG(b->value) == XS_STRUCT_VAL ||
+                                 VAL_TAG(b->value) == XS_INST)) {
                     var_ref = 1000 + i + depth * 100;
                 }
 
@@ -1353,9 +1353,9 @@ static void dap_handle_evaluate(DapState *st, int req_seq, const char *msg) {
     }
 
     Value *result = NULL;
-    if (prog->tag == NODE_PROGRAM && prog->program.stmts.len == 1) {
+    if (VAL_TAG(prog) == NODE_PROGRAM && prog->program.stmts.len == 1) {
         Node *stmt = prog->program.stmts.items[0];
-        if (stmt->tag == NODE_EXPR_STMT && stmt->expr_stmt.expr) {
+        if (VAL_TAG(stmt) == NODE_EXPR_STMT && stmt->expr_stmt.expr) {
             result = interp_eval(st->interp, stmt->expr_stmt.expr);
             if (result) value_incref(result);
         } else {
@@ -1369,7 +1369,7 @@ static void dap_handle_evaluate(DapState *st, int req_seq, const char *msg) {
     if (st->interp->cf.signal == CF_ERROR || st->interp->cf.signal == CF_PANIC) {
         Value *err = st->interp->cf.value;
         char err_msg[DAP_BUF_SMALL];
-        if (err && err->tag == XS_STR) {
+        if (err && VAL_TAG(err) == XS_STR) {
             snprintf(err_msg, sizeof(err_msg), "Error: %s", err->s);
         } else {
             char *repr = err ? value_repr(err) : NULL;
@@ -1393,9 +1393,9 @@ static void dap_handle_evaluate(DapState *st, int req_seq, const char *msg) {
 
         /* provide variablesReference for compound types */
         int var_ref = 0;
-        if (result && (result->tag == XS_ARRAY || result->tag == XS_MAP ||
-                       result->tag == XS_TUPLE || result->tag == XS_STRUCT_VAL ||
-                       result->tag == XS_INST)) {
+        if (result && (VAL_TAG(result) == XS_ARRAY || VAL_TAG(result) == XS_MAP ||
+                       VAL_TAG(result) == XS_TUPLE || VAL_TAG(result) == XS_STRUCT_VAL ||
+                       VAL_TAG(result) == XS_INST)) {
             var_ref = 9000; /* special eval ref */
         }
 

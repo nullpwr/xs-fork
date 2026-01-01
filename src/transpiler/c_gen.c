@@ -124,7 +124,7 @@ static int register_lambda(Node *n) {
     if (n_lambdas < MAX_LAMBDAS) {
         lambdas[n_lambdas].id = id;
         lambdas[n_lambdas].node = n;
-        lambdas[n_lambdas].n_params = n->tag == NODE_LAMBDA ?
+        lambdas[n_lambdas].n_params = VAL_TAG(n) == NODE_LAMBDA ?
             n->lambda.params.len : 0;
         n_lambdas++;
     }
@@ -183,7 +183,7 @@ static int is_actor_field(const char *name) {
    Collects identifiers used in the body that are NOT declared locally within it. */
 static void collect_local_decls(Node *n, const char **out, int *nout, int max) {
     if (!n || *nout >= max) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LET: case NODE_VAR:
         if (n->let.name && *nout < max) out[(*nout)++] = n->let.name;
         break;
@@ -192,7 +192,7 @@ static void collect_local_decls(Node *n, const char **out, int *nout, int max) {
         break;
     case NODE_FOR:
         /* for loop pattern declares a variable */
-        if (n->for_loop.pattern && n->for_loop.pattern->tag == NODE_PAT_IDENT)
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
             if (*nout < max) out[(*nout)++] = n->for_loop.pattern->pat_ident.name;
         collect_local_decls(n->for_loop.body, out, nout, max);
         break;
@@ -213,13 +213,13 @@ static void collect_local_decls(Node *n, const char **out, int *nout, int max) {
 
 static void collect_idents(Node *n, const char **out, int *nout, int max) {
     if (!n || *nout >= max) return;
-    if (n->tag == NODE_IDENT) {
+    if (VAL_TAG(n) == NODE_IDENT) {
         for (int i = 0; i < *nout; i++)
             if (strcmp(out[i], n->ident.name) == 0) return;
         out[(*nout)++] = n->ident.name;
         return;
     }
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_BINOP: collect_idents(n->binop.left, out, nout, max);
                      collect_idents(n->binop.right, out, nout, max); break;
     case NODE_UNARY: collect_idents(n->unary.expr, out, nout, max); break;
@@ -247,7 +247,7 @@ static void collect_idents(Node *n, const char **out, int *nout, int max) {
 /* recursive lambda scanner */
 static void scan_lambdas(Node *n) {
     if (!n) return;
-    if (n->tag == NODE_LAMBDA) {
+    if (VAL_TAG(n) == NODE_LAMBDA) {
         int lid = register_lambda(n);
         /* find captures: idents used in body minus params and local declarations */
         const char *all_idents[64];
@@ -294,7 +294,7 @@ static void scan_lambdas(Node *n) {
         return;
     }
     /* walk children looking for lambdas */
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_PROGRAM: for (int i=0;i<n->program.stmts.len;i++) scan_lambdas(n->program.stmts.items[i]); break;
     case NODE_BLOCK: for (int i=0;i<n->block.stmts.len;i++) scan_lambdas(n->block.stmts.items[i]);
                      if (n->block.expr) scan_lambdas(n->block.expr); break;
@@ -345,57 +345,57 @@ static void scan_lambdas(Node *n) {
 
 /* pre-scan to collect actor declarations and actor variable bindings */
 static void prescan_stmts(Node *program) {
-    if (!program || program->tag != NODE_PROGRAM) return;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
     for (int i = 0; i < program->program.stmts.len; i++) {
         Node *st = program->program.stmts.items[i];
         if (!st) continue;
         /* register actor declarations */
-        if (st->tag == NODE_EXPR_STMT && st->expr_stmt.expr &&
-            st->expr_stmt.expr->tag == NODE_ACTOR_DECL) {
+        if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+            VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL) {
             Node *ad = st->expr_stmt.expr;
             if (ad->actor_decl.name) register_actor(ad->actor_decl.name);
         }
-        if (st->tag == NODE_ACTOR_DECL && st->actor_decl.name)
+        if (VAL_TAG(st) == NODE_ACTOR_DECL && st->actor_decl.name)
             register_actor(st->actor_decl.name);
         /* register let x = spawn ActorName */
-        if ((st->tag == NODE_LET || st->tag == NODE_VAR) && st->let.name && st->let.value) {
+        if ((VAL_TAG(st) == NODE_LET || VAL_TAG(st) == NODE_VAR) && st->let.name && st->let.value) {
             Node *val = st->let.value;
-            if (val->tag == NODE_SPAWN && val->spawn_.expr &&
-                val->spawn_.expr->tag == NODE_IDENT) {
+            if (VAL_TAG(val) == NODE_SPAWN && val->spawn_.expr &&
+                VAL_TAG(val->spawn_.expr) == NODE_IDENT) {
                 const char *aname = val->spawn_.expr->ident.name;
                 if (find_actor(aname))
                     register_actor_var(st->let.name, aname);
             }
             /* register let x = StructName { ... } */
-            if (val->tag == NODE_STRUCT_INIT && val->struct_init.path) {
+            if (VAL_TAG(val) == NODE_STRUCT_INIT && val->struct_init.path) {
                 const char *sname = val->struct_init.path;
                 if (find_impl_type(sname))
                     register_struct_var(st->let.name, sname);
             }
             /* register let x = y.method(...) where y is a known struct var */
-            if (val->tag == NODE_METHOD_CALL && val->method_call.obj &&
-                val->method_call.obj->tag == NODE_IDENT) {
+            if (VAL_TAG(val) == NODE_METHOD_CALL && val->method_call.obj &&
+                VAL_TAG(val->method_call.obj) == NODE_IDENT) {
                 const char *otype = lookup_struct_var(val->method_call.obj->ident.name);
                 if (otype)
                     register_struct_var(st->let.name, otype);
             }
         }
         /* register impl declarations */
-        if (st->tag == NODE_IMPL_DECL && st->impl_decl.type_name)
+        if (VAL_TAG(st) == NODE_IMPL_DECL && st->impl_decl.type_name)
             register_impl_type(st->impl_decl.type_name);
         /* register function signatures for default param padding */
-        if (st->tag == NODE_FN_DECL && st->fn_decl.name)
+        if (VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.name)
             register_fn_sig(st->fn_decl.name, st->fn_decl.params.len);
     }
 }
 
 /* helpers */
 static int is_callee_name(Node *callee, const char *name) {
-    return callee && callee->tag == NODE_IDENT && strcmp(callee->ident.name, name) == 0;
+    return callee && VAL_TAG(callee) == NODE_IDENT && strcmp(callee->ident.name, name) == 0;
 }
 
 static int is_main_fn(Node *n) {
-    return n->tag == NODE_FN_DECL && n->fn_decl.name && strcmp(n->fn_decl.name, "main") == 0;
+    return VAL_TAG(n) == NODE_FN_DECL && n->fn_decl.name && strcmp(n->fn_decl.name, "main") == 0;
 }
 
 static void emit_params_c(SB *s, ParamList *pl) {
@@ -416,20 +416,20 @@ static void emit_params_c(SB *s, ParamList *pl) {
 
 /* collect defer bodies from a block */
 static int block_has_defers(Node *block) {
-    if (!block || block->tag != NODE_BLOCK) return 0;
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return 0;
     for (int i = 0; i < block->block.stmts.len; i++) {
-        if (block->block.stmts.items[i] && block->block.stmts.items[i]->tag == NODE_DEFER)
+        if (block->block.stmts.items[i] && VAL_TAG(block->block.stmts.items[i]) == NODE_DEFER)
             return 1;
     }
     return 0;
 }
 
 static void emit_deferred_cleanup(SB *s, Node *block, int depth) {
-    if (!block || block->tag != NODE_BLOCK) return;
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return;
     /* Emit deferred bodies in reverse order (LIFO) */
     for (int i = block->block.stmts.len - 1; i >= 0; i--) {
         Node *st = block->block.stmts.items[i];
-        if (st && st->tag == NODE_DEFER && st->defer_.body) {
+        if (st && VAL_TAG(st) == NODE_DEFER && st->defer_.body) {
             sb_indent(s, depth);
             emit_expr(s, st->defer_.body, depth);
             sb_add(s, ";\n");
@@ -440,7 +440,7 @@ static void emit_deferred_cleanup(SB *s, Node *block, int depth) {
 /* expression emitter */
 static void emit_expr(SB *s, Node *n, int depth) {
     if (!n) { sb_add(s, "XS_NULL"); return; }
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         sb_printf(s, "XS_INT(%" PRId64 ")", n->lit_int.ival);
         break;
@@ -472,7 +472,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_addc(s, '"');
         for (int i = 0; i < parts->len; i++) {
             Node *part = parts->items[i];
-            if (part->tag == NODE_LIT_STRING && part->lit_string.sval) {
+            if (VAL_TAG(part) == NODE_LIT_STRING && part->lit_string.sval) {
                 for (const char *p = part->lit_string.sval; *p; p++) {
                     if (*p == '"') sb_add(s, "\\\"");
                     else if (*p == '\\') sb_add(s, "\\\\");
@@ -488,7 +488,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         /* Now emit the expression arguments */
         for (int i = 0; i < parts->len; i++) {
             Node *part = parts->items[i];
-            if (part->tag != NODE_LIT_STRING) {
+            if (VAL_TAG(part) != NODE_LIT_STRING) {
                 sb_add(s, ", xs_to_str(");
                 emit_expr(s, part, depth);
                 sb_addc(s, ')');
@@ -523,7 +523,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             /* map keys: if ident, emit as string */
             Node *mk = n->lit_map.keys.items[i];
-            if (mk && mk->tag == NODE_IDENT)
+            if (mk && VAL_TAG(mk) == NODE_IDENT)
                 sb_printf(s, "XS_STR(\"%s\")", mk->ident.name);
             else
                 emit_expr(s, mk, depth);
@@ -660,10 +660,10 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_is_type(");
             emit_expr(s, n->binop.left, depth);
             sb_add(s, ", ");
-            if (n->binop.right && n->binop.right->tag == NODE_LIT_STRING &&
+            if (n->binop.right && VAL_TAG(n->binop.right) == NODE_LIT_STRING &&
                 n->binop.right->lit_string.sval)
                 sb_printf(s, "\"%s\"", n->binop.right->lit_string.sval);
-            else if (n->binop.right && n->binop.right->tag == NODE_IDENT)
+            else if (n->binop.right && VAL_TAG(n->binop.right) == NODE_IDENT)
                 sb_printf(s, "\"%s\"", n->binop.right->ident.name);
             else
                 sb_add(s, "\"?\"");
@@ -742,7 +742,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
             else
                 sb_add(s, "XS_NULL");
             sb_addc(s, ')');
-        } else if (n->call.callee && n->call.callee->tag == NODE_SCOPE &&
+        } else if (n->call.callee && VAL_TAG(n->call.callee) == NODE_SCOPE &&
                    n->call.callee->scope.nparts == 2) {
             /* enum constructor call: Shape::Circle(5) -> map */
             sb_printf(s, "xs_map(%d, XS_STR(\"_type\"), XS_STR(\"%s\"), XS_STR(\"_variant\"), XS_STR(\"%s\")",
@@ -828,13 +828,13 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else {
             /* check if callee might be a closure (variable holding fn) */
             int might_be_closure = 0;
-            if (n->call.callee && n->call.callee->tag == NODE_INDEX) {
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_INDEX) {
                 /* e.g. counter["inc"](): indexing into map, likely returns closure */
                 might_be_closure = 1;
             }
             /* variable calls might be closures if the var was assigned from a function
                that returns closures */
-            if (n->call.callee && n->call.callee->tag == NODE_IDENT &&
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
                 lookup_fn_param_count(n->call.callee->ident.name) < 0 &&
                 !is_c_keyword(n->call.callee->ident.name)) {
                 /* not a known function: might be a closure variable */
@@ -854,7 +854,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_addc(s, '(');
                 /* determine expected param count for padding */
                 int expected = -1;
-                if (n->call.callee && n->call.callee->tag == NODE_IDENT)
+                if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT)
                     expected = lookup_fn_param_count(n->call.callee->ident.name);
                 for (int i = 0; i < n->call.args.len; i++) {
                     if (i) sb_add(s, ", ");
@@ -876,7 +876,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         const char *meth = n->method_call.method;
         /* check if receiver is a known actor variable */
         const char *actor_type = NULL;
-        if (n->method_call.obj && n->method_call.obj->tag == NODE_IDENT)
+        if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT)
             actor_type = lookup_actor_var(n->method_call.obj->ident.name);
         if (actor_type) {
             /* actor method dispatch */
@@ -1026,7 +1026,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else {
             /* check if receiver is a known struct with impl */
             const char *stype = NULL;
-            if (n->method_call.obj && n->method_call.obj->tag == NODE_IDENT)
+            if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT)
                 stype = lookup_struct_var(n->method_call.obj->ident.name);
             if (stype) {
                 sb_printf(s, "%s_%s(", stype, meth);
@@ -1068,7 +1068,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     case NODE_FIELD:
         if (n_actor_fields > 0 && in_method_body && n->field.obj &&
-            n->field.obj->tag == NODE_IDENT &&
+            VAL_TAG(n->field.obj) == NODE_IDENT &&
             strcmp(n->field.obj->ident.name, "self") == 0) {
             /* actor method: self is a struct pointer */
             sb_printf(s, "self->%s", n->field.name);
@@ -1096,7 +1096,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         break;
     case NODE_ASSIGN:
-        if (n->assign.target && n->assign.target->tag == NODE_INDEX) {
+        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_INDEX) {
             sb_add(s, "xs_map_put(&");
             emit_expr(s, n->assign.target->index.obj, depth);
             sb_add(s, ", ");
@@ -1217,14 +1217,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_indent(s, depth + 1 + ci);
             sb_add(s, "xs_val ");
             Node *cpat = n->list_comp.clause_pats.items[ci];
-            if (cpat && cpat->tag == NODE_PAT_IDENT)
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT)
                 sb_add(s, cpat->pat_ident.name);
             else
                 sb_printf(s, "__lc_v_%d", ci);
             sb_add(s, ";\n");
             sb_indent(s, depth + 1 + ci);
             sb_add(s, "while (xs_iter_next(&__lc_iter, &");
-            if (cpat && cpat->tag == NODE_PAT_IDENT)
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT)
                 sb_add(s, cpat->pat_ident.name);
             else
                 sb_printf(s, "__lc_v_%d", ci);
@@ -1265,14 +1265,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_indent(s, depth + 1 + ci);
             sb_add(s, "xs_val ");
             Node *cpat = n->map_comp.clause_pats.items[ci];
-            if (cpat && cpat->tag == NODE_PAT_IDENT)
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT)
                 sb_add(s, cpat->pat_ident.name);
             else
                 sb_printf(s, "__mc_v_%d", ci);
             sb_add(s, ";\n");
             sb_indent(s, depth + 1 + ci);
             sb_add(s, "while (xs_iter_next(&__mc_iter, &");
-            if (cpat && cpat->tag == NODE_PAT_IDENT)
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT)
                 sb_add(s, cpat->pat_ident.name);
             else
                 sb_printf(s, "__mc_v_%d", ci);
@@ -1311,10 +1311,10 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     case NODE_SPAWN: {
         Node *se = n->spawn_.expr;
-        if (se && se->tag == NODE_IDENT && find_actor(se->ident.name)) {
+        if (se && VAL_TAG(se) == NODE_IDENT && find_actor(se->ident.name)) {
             /* spawn ActorName -> already handled as statement, return dummy */
             sb_add(s, "XS_NULL /* spawn actor */");
-        } else if (se && se->tag == NODE_BLOCK) {
+        } else if (se && VAL_TAG(se) == NODE_BLOCK) {
             /* spawn { block } -> execute inline, return result map */
             sb_add(s, "({ xs_val __spawn_result = XS_NULL;\n");
             emit_block_body(s, se, depth + 1);
@@ -1342,7 +1342,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_SEND_EXPR: {
         /* actor ! message -> call handle method */
         const char *atype = NULL;
-        if (n->send_expr.target && n->send_expr.target->tag == NODE_IDENT)
+        if (n->send_expr.target && VAL_TAG(n->send_expr.target) == NODE_IDENT)
             atype = lookup_actor_var(n->send_expr.target->ident.name);
         if (atype) {
             sb_printf(s, "%s_handle(&%s_state, ", atype, n->send_expr.target->ident.name);
@@ -1376,13 +1376,13 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "(xs_truthy(");
         emit_expr(s, n->if_expr.cond, depth);
         sb_add(s, ") ? ");
-        if (n->if_expr.then && n->if_expr.then->tag == NODE_BLOCK && n->if_expr.then->block.expr) {
+        if (n->if_expr.then && VAL_TAG(n->if_expr.then) == NODE_BLOCK && n->if_expr.then->block.expr) {
             emit_expr(s, n->if_expr.then->block.expr, depth);
         } else {
             sb_add(s, "XS_NULL");
         }
         sb_add(s, " : ");
-        if (n->if_expr.else_branch && n->if_expr.else_branch->tag == NODE_BLOCK
+        if (n->if_expr.else_branch && VAL_TAG(n->if_expr.else_branch) == NODE_BLOCK
             && n->if_expr.else_branch->block.expr) {
             emit_expr(s, n->if_expr.else_branch->block.expr, depth);
         } else {
@@ -1411,7 +1411,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_add(s, "if (xs_truthy(");
                 emit_expr(s, arm->guard, depth + 2);
                 sb_add(s, ")) {\n");
-                if (arm->body && arm->body->tag == NODE_BLOCK) {
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                     emit_block_body(s, arm->body, depth + 3);
                     if (arm->body->block.expr) {
                         sb_indent(s, depth + 3);
@@ -1435,7 +1435,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
                 sb_add(s, ") {\n");
                 emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                if (arm->body && arm->body->tag == NODE_BLOCK) {
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                     emit_block_body(s, arm->body, depth + 2);
                     if (arm->body->block.expr) {
                         sb_indent(s, depth + 2);
@@ -1566,7 +1566,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
 /* pattern condition for match */
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) {
     if (!pat) { sb_add(s, "1"); return; }
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_WILD:
     case NODE_PAT_IDENT:
         sb_add(s, "1");
@@ -1607,7 +1607,7 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
     case NODE_PAT_GUARD: {
         /* for guards with ident patterns, bind first then check */
         Node *inner = pat->pat_guard.pattern;
-        if (inner && inner->tag == NODE_PAT_IDENT) {
+        if (inner && VAL_TAG(inner) == NODE_PAT_IDENT) {
             /* (({ xs_val name = subject; truthy(guard) })) */
             sb_printf(s, "({ xs_val %s = %s; xs_truthy(", inner->pat_ident.name, subject);
             emit_expr(s, pat->pat_guard.guard, depth);
@@ -1689,7 +1689,7 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
 /* pattern binding emitter */
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth) {
     if (!pat) return;
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_IDENT:
         sb_indent(s, depth);
         sb_printf(s, "xs_val %s = %s;\n", pat->pat_ident.name, subject);
@@ -1738,7 +1738,7 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
 /* emit block body */
 static void emit_block_body(SB *s, Node *block, int depth) {
     if (!block) return;
-    if (block->tag != NODE_BLOCK) {
+    if (VAL_TAG(block) != NODE_BLOCK) {
         emit_stmt(s, block, depth);
         return;
     }
@@ -1747,13 +1747,13 @@ static void emit_block_body(SB *s, Node *block, int depth) {
     }
     if (block->block.expr) {
         /* statement-like nodes should be emitted as statements */
-        if (block->block.expr->tag == NODE_SPAWN ||
-            block->block.expr->tag == NODE_NURSERY ||
-            block->block.expr->tag == NODE_FOR ||
-            block->block.expr->tag == NODE_WHILE ||
-            block->block.expr->tag == NODE_LOOP ||
-            block->block.expr->tag == NODE_IF ||
-            block->block.expr->tag == NODE_BLOCK) {
+        if (VAL_TAG(block->block.expr) == NODE_SPAWN ||
+            VAL_TAG(block->block.expr) == NODE_NURSERY ||
+            VAL_TAG(block->block.expr) == NODE_FOR ||
+            VAL_TAG(block->block.expr) == NODE_WHILE ||
+            VAL_TAG(block->block.expr) == NODE_LOOP ||
+            VAL_TAG(block->block.expr) == NODE_IF ||
+            VAL_TAG(block->block.expr) == NODE_BLOCK) {
             emit_stmt(s, block->block.expr, depth);
         } else {
             sb_indent(s, depth);
@@ -1766,7 +1766,7 @@ static void emit_block_body(SB *s, Node *block, int depth) {
 /* statement emitter */
 static void emit_stmt(SB *s, Node *n, int depth) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LET: {
         /* check if captured by lambda (needs boxing for closures) */
         if (n->let.name) {
@@ -1790,9 +1790,9 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         }
         /* check for let x = spawn ActorName */
         int is_actor_spawn = 0;
-        if (n->let.name && n->let.value && n->let.value->tag == NODE_SPAWN) {
+        if (n->let.name && n->let.value && VAL_TAG(n->let.value) == NODE_SPAWN) {
             Node *se = n->let.value->spawn_.expr;
-            if (se && se->tag == NODE_IDENT && find_actor(se->ident.name)) {
+            if (se && VAL_TAG(se) == NODE_IDENT && find_actor(se->ident.name)) {
                 is_actor_spawn = 1;
                 sb_indent(s, depth);
                 sb_printf(s, "/* spawn actor %s */\n", se->ident.name);
@@ -1869,13 +1869,13 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_add(s, "(void)argc; (void)argv;\n");
             sb_indent(s, depth + 1);
             sb_add(s, "xs_push_frame(\"main\");\n");
-            if (n->fn_decl.body && n->fn_decl.body->tag == NODE_BLOCK) {
+            if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
                 int has_defer = block_has_defers(n->fn_decl.body);
                 if (has_defer) {
                     /* emit non-defer statements */
                     for (int i = 0; i < n->fn_decl.body->block.stmts.len; i++) {
                         Node *st = n->fn_decl.body->block.stmts.items[i];
-                        if (st && st->tag != NODE_DEFER)
+                        if (st && VAL_TAG(st) != NODE_DEFER)
                             emit_stmt(s, st, depth + 1);
                     }
                     if (n->fn_decl.body->block.expr) {
@@ -1942,7 +1942,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_printf(s, "xs_push_frame(\"%s\");\n", n->fn_decl.name);
             sb_indent(s, depth + 1);
             sb_add(s, "int __saved_defer_top = __xs_defer_top;\n");
-            if (n->fn_decl.body && n->fn_decl.body->tag == NODE_BLOCK) {
+            if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
                 int has_defer = block_has_defers(n->fn_decl.body);
                 if (has_defer) {
                     sb_indent(s, depth + 1);
@@ -1950,7 +1950,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     /* emit non-defer statements */
                     for (int i = 0; i < n->fn_decl.body->block.stmts.len; i++) {
                         Node *st = n->fn_decl.body->block.stmts.items[i];
-                        if (st && st->tag != NODE_DEFER)
+                        if (st && VAL_TAG(st) != NODE_DEFER)
                             emit_stmt(s, st, depth + 1);
                     }
                     if (n->fn_decl.body->block.expr) {
@@ -1978,11 +1978,11 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     if (n->fn_decl.body->block.expr) {
                         Node *be = n->fn_decl.body->block.expr;
                         /* statement-like exprs need special handling */
-                        if (be->tag == NODE_IF || be->tag == NODE_MATCH ||
-                            be->tag == NODE_FOR || be->tag == NODE_WHILE ||
-                            be->tag == NODE_LOOP || be->tag == NODE_BLOCK) {
+                        if (VAL_TAG(be) == NODE_IF || VAL_TAG(be) == NODE_MATCH ||
+                            VAL_TAG(be) == NODE_FOR || VAL_TAG(be) == NODE_WHILE ||
+                            VAL_TAG(be) == NODE_LOOP || VAL_TAG(be) == NODE_BLOCK) {
                             emit_stmt(s, be, depth + 1);
-                        } else if (be->tag == NODE_RETURN) {
+                        } else if (VAL_TAG(be) == NODE_RETURN) {
                             emit_stmt(s, be, depth + 1);
                         } else {
                             sb_indent(s, depth + 1);
@@ -2091,14 +2091,14 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, ");\n");
         sb_indent(s, depth + 1);
         sb_add(s, "xs_val ");
-        if (n->for_loop.pattern && n->for_loop.pattern->tag == NODE_PAT_IDENT)
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
             sb_add(s, n->for_loop.pattern->pat_ident.name);
         else
             sb_add(s, "__item");
         sb_add(s, ";\n");
         sb_indent(s, depth + 1);
         sb_add(s, "while (xs_iter_next(&__iter, &");
-        if (n->for_loop.pattern && n->for_loop.pattern->tag == NODE_PAT_IDENT)
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
             sb_add(s, n->for_loop.pattern->pat_ident.name);
         else
             sb_add(s, "__item");
@@ -2140,7 +2140,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 sb_add(s, "if (xs_truthy(");
                 emit_expr(s, arm->guard, depth + 2);
                 sb_add(s, ")) {\n");
-                if (arm->body && arm->body->tag == NODE_BLOCK)
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
                     emit_block_body(s, arm->body, depth + 3);
                 else if (arm->body) {
                     sb_indent(s, depth + 3);
@@ -2157,7 +2157,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
                 sb_add(s, ") {\n");
                 emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                if (arm->body && arm->body->tag == NODE_BLOCK)
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
                     emit_block_body(s, arm->body, depth + 2);
                 else if (arm->body) {
                     sb_indent(s, depth + 2);
@@ -2231,7 +2231,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     }
                     sb_add(s, ") {\n");
                     emit_pattern_bindings(s, arm->pattern, "__exception", depth + 3);
-                    if (arm->body && arm->body->tag == NODE_BLOCK) {
+                    if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                         emit_block_body(s, arm->body, depth + 3);
                     } else if (arm->body) {
                         sb_indent(s, depth + 3);
@@ -2243,7 +2243,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 } else {
                     /* Single catch arm or wildcard - bind and execute directly */
                     emit_pattern_bindings(s, arm->pattern, "__exception", depth + 2);
-                    if (arm->body && arm->body->tag == NODE_BLOCK) {
+                    if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                         emit_block_body(s, arm->body, depth + 2);
                     } else if (arm->body) {
                         sb_indent(s, depth + 2);
@@ -2307,7 +2307,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth + 1);
         sb_printf(s, "void __defer_fn_%d(void) {\n", defer_label_counter);
         if (n->defer_.body) {
-            if (n->defer_.body->tag == NODE_BLOCK) {
+            if (VAL_TAG(n->defer_.body) == NODE_BLOCK) {
                 emit_block_body(s, n->defer_.body, depth + 2);
             } else {
                 sb_indent(s, depth + 2);
@@ -2391,7 +2391,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, " */\n");
         for (int i = 0; i < n->impl_decl.members.len; i++) {
             Node *m = n->impl_decl.members.items[i];
-            if (m && m->tag == NODE_FN_DECL && m->fn_decl.name) {
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.name) {
                 /* Rename method to TypeName_methodName(xs_val self, ...) */
                 sb_indent(s, depth);
                 sb_printf(s, "static xs_val %s_%s(xs_val self",
@@ -2404,7 +2404,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 }
                 sb_add(s, ") {\n");
                 in_method_body = 1;
-                if (m->fn_decl.body && m->fn_decl.body->tag == NODE_BLOCK) {
+                if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                     for (int si = 0; si < m->fn_decl.body->block.stmts.len; si++)
                         emit_stmt(s, m->fn_decl.body->block.stmts.items[si], depth + 1);
                     if (m->fn_decl.body->block.expr) {
@@ -2451,7 +2451,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     case NODE_IMPORT:
     case NODE_USE:
         sb_indent(s, depth);
-        if (n->tag == NODE_USE) {
+        if (VAL_TAG(n) == NODE_USE) {
             sb_add(s, "/* use ");
             for (int i = 0; i < n->import.nparts; i++) {
                 if (i) sb_addc(s, '/');
@@ -2488,7 +2488,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         /* scan constructor for field assignments (self.x = ...) */
         for (int i = 0; i < n->class_decl.members.len; i++) {
             Node *m = n->class_decl.members.items[i];
-            if (m && m->tag == NODE_FN_DECL && m->fn_decl.name &&
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.name &&
                 (strcmp(m->fn_decl.name, "new") == 0 || strcmp(m->fn_decl.name, "init") == 0)) {
                 /* emit params as fields (heuristic) */
                 for (int p = 0; p < m->fn_decl.params.len; p++) {
@@ -2505,7 +2505,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         /* emit methods as standalone functions */
         for (int i = 0; i < n->class_decl.members.len; i++) {
             Node *m = n->class_decl.members.items[i];
-            if (m && m->tag == NODE_FN_DECL) {
+            if (m && VAL_TAG(m) == NODE_FN_DECL) {
                 sb_indent(s, depth);
                 sb_add(s, "xs_val ");
                 sb_add(s, n->class_decl.name);
@@ -2521,7 +2521,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                         sb_add(s, "_");
                 }
                 sb_add(s, ") {\n");
-                if (m->fn_decl.body && m->fn_decl.body->tag == NODE_BLOCK) {
+                if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                     emit_block_body(s, m->fn_decl.body, depth + 1);
                     if (m->fn_decl.body->block.expr) {
                         sb_indent(s, depth + 1);
@@ -2574,7 +2574,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         /* field assignment on non-self objects → xs_map_put
            (actor self uses ->, impl self uses xs_index so also needs map_put) */
-        if (n->assign.target && n->assign.target->tag == NODE_INDEX) {
+        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_INDEX) {
             /* index assignment: obj[key] = val → xs_map_put */
             sb_add(s, "xs_map_put(&");
             emit_expr(s, n->assign.target->index.obj, depth);
@@ -2583,10 +2583,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             emit_expr(s, n->assign.value, depth);
             sb_add(s, ");\n");
-        } else if (n->assign.target && n->assign.target->tag == NODE_FIELD &&
+        } else if (n->assign.target && VAL_TAG(n->assign.target) == NODE_FIELD &&
             !(n_actor_fields > 0 && in_method_body &&
               n->assign.target->field.obj &&
-              n->assign.target->field.obj->tag == NODE_IDENT &&
+              VAL_TAG(n->assign.target->field.obj) == NODE_IDENT &&
               strcmp(n->assign.target->field.obj->ident.name, "self") == 0)) {
             sb_add(s, "xs_map_put(&");
             emit_expr(s, n->assign.target->field.obj, depth);
@@ -2604,12 +2604,12 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_EXPR_STMT: {
         Node *inner = n->expr_stmt.expr;
-        if (inner && (inner->tag == NODE_IF || inner->tag == NODE_MATCH ||
-                      inner->tag == NODE_FOR || inner->tag == NODE_WHILE ||
-                      inner->tag == NODE_LOOP || inner->tag == NODE_TRY ||
-                      inner->tag == NODE_BLOCK || inner->tag == NODE_NURSERY ||
-                      inner->tag == NODE_SPAWN || inner->tag == NODE_ACTOR_DECL ||
-                      inner->tag == NODE_RETURN)) {
+        if (inner && (VAL_TAG(inner) == NODE_IF || VAL_TAG(inner) == NODE_MATCH ||
+                      VAL_TAG(inner) == NODE_FOR || VAL_TAG(inner) == NODE_WHILE ||
+                      VAL_TAG(inner) == NODE_LOOP || VAL_TAG(inner) == NODE_TRY ||
+                      VAL_TAG(inner) == NODE_BLOCK || VAL_TAG(inner) == NODE_NURSERY ||
+                      VAL_TAG(inner) == NODE_SPAWN || VAL_TAG(inner) == NODE_ACTOR_DECL ||
+                      VAL_TAG(inner) == NODE_RETURN)) {
             emit_stmt(s, inner, depth);
         } else {
             sb_indent(s, depth);
@@ -2633,11 +2633,11 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     case NODE_SPAWN: {
         /* spawn as statement */
         Node *se = n->spawn_.expr;
-        if (se && se->tag == NODE_IDENT && find_actor(se->ident.name)) {
+        if (se && VAL_TAG(se) == NODE_IDENT && find_actor(se->ident.name)) {
             /* spawn ActorName -> not useful as a standalone stmt, skip */
             sb_indent(s, depth);
             sb_add(s, "/* spawn actor (see let binding) */\n");
-        } else if (se && se->tag == NODE_BLOCK) {
+        } else if (se && VAL_TAG(se) == NODE_BLOCK) {
             /* spawn { block } as statement -> just execute the block */
             sb_indent(s, depth);
             sb_add(s, "{\n");
@@ -3098,7 +3098,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    return v;\n"
         "}\n\n"
         "static int xs_iter_next(xs_val *iter, xs_val *out) {\n"
-        "    if (iter->tag != 5 || !iter->p) return 0;\n"
+        "    if (VAL_TAG(iter) != 5 || !iter->p) return 0;\n"
         "    xs_arr *state = (xs_arr*)iter->p;\n"
         "    if (state->len < 2) return 0;\n"
         "    xs_val src = state->items[0];\n"
@@ -3131,7 +3131,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    return (xs_val){.tag=6, .p=m};\n"
         "}\n\n"
         "static void xs_map_put(xs_val *map, xs_val key, xs_val val) {\n"
-        "    if (map->tag != 6 || !map->p) return;\n"
+        "    if (VAL_TAG(map) != 6 || !map->p) return;\n"
         "    xs_hmap *m = (xs_hmap*)map->p;\n"
         "    const char *ks = key.tag == 2 ? key.s : xs_to_str(key);\n"
         "    for (int i = 0; i < m->len; i++) {\n"
@@ -3316,15 +3316,15 @@ char *transpile_c(Node *program, const char *filename) {
     scan_lambdas(program);
 
     /* emit actor struct + method definitions at file scope */
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *st = program->program.stmts.items[i];
             if (!st) continue;
             /* find actor decl nodes (may be wrapped in EXPR_STMT) */
             Node *ad = NULL;
-            if (st->tag == NODE_ACTOR_DECL) ad = st;
-            else if (st->tag == NODE_EXPR_STMT && st->expr_stmt.expr &&
-                     st->expr_stmt.expr->tag == NODE_ACTOR_DECL)
+            if (VAL_TAG(st) == NODE_ACTOR_DECL) ad = st;
+            else if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+                     VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL)
                 ad = st->expr_stmt.expr;
             if (!ad || !ad->actor_decl.name) continue;
 
@@ -3346,7 +3346,7 @@ char *transpile_c(Node *program, const char *filename) {
             /* emit methods as static functions */
             for (int j = 0; j < ad->actor_decl.methods.len; j++) {
                 Node *m = ad->actor_decl.methods.items[j];
-                if (!m || m->tag != NODE_FN_DECL || !m->fn_decl.name) continue;
+                if (!m || VAL_TAG(m) != NODE_FN_DECL || !m->fn_decl.name) continue;
                 sb_printf(&s, "static xs_val %s_%s(%s_state *self",
                           aname, m->fn_decl.name, aname);
                 for (int p = 0; p < m->fn_decl.params.len; p++) {
@@ -3356,7 +3356,7 @@ char *transpile_c(Node *program, const char *filename) {
                 }
                 sb_add(&s, ") {\n");
                 in_method_body = 1;
-                if (m->fn_decl.body && m->fn_decl.body->tag == NODE_BLOCK) {
+                if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                     /* emit statements but not the trailing expression (it becomes return) */
                     for (int si = 0; si < m->fn_decl.body->block.stmts.len; si++)
                         emit_stmt(&s, m->fn_decl.body->block.stmts.items[si], 1);
@@ -3382,7 +3382,7 @@ char *transpile_c(Node *program, const char *filename) {
         /* emit async functions at file scope */
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *st = program->program.stmts.items[i];
-            if (!st || st->tag != NODE_FN_DECL) continue;
+            if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
             if (is_main_fn(st)) continue;
             if (st->fn_decl.is_async) {
                 /* async fn -> regular function at file scope */
@@ -3390,7 +3390,7 @@ char *transpile_c(Node *program, const char *filename) {
                 sb_add(&s, st->fn_decl.name);
                 emit_params_c(&s, &st->fn_decl.params);
                 sb_add(&s, " {\n");
-                if (st->fn_decl.body && st->fn_decl.body->tag == NODE_BLOCK) {
+                if (st->fn_decl.body && VAL_TAG(st->fn_decl.body) == NODE_BLOCK) {
                     emit_block_body(&s, st->fn_decl.body, 1);
                     if (st->fn_decl.body->block.expr) {
                         sb_add(&s, "    return ");
@@ -3406,7 +3406,7 @@ char *transpile_c(Node *program, const char *filename) {
     /* emit lambda static functions */
     for (int li = 0; li < n_lambdas; li++) {
         Node *ln = lambdas[li].node;
-        if (!ln || ln->tag != NODE_LAMBDA) continue;
+        if (!ln || VAL_TAG(ln) != NODE_LAMBDA) continue;
         sb_printf(&s, "static xs_val __xs_lambda_%d(void *__env, xs_val *__args, int __argc) {\n", lambdas[li].id);
         /* bind params from __args */
         for (int p = 0; p < ln->lambda.params.len; p++) {
@@ -3416,7 +3416,7 @@ char *transpile_c(Node *program, const char *filename) {
         }
         /* set current_lambda so NODE_IDENT emits capture access */
         current_lambda = &lambdas[li];
-        if (ln->lambda.body && ln->lambda.body->tag == NODE_BLOCK) {
+        if (ln->lambda.body && VAL_TAG(ln->lambda.body) == NODE_BLOCK) {
             for (int si = 0; si < ln->lambda.body->block.stmts.len; si++)
                 emit_stmt(&s, ln->lambda.body->block.stmts.items[si], 1);
             if (ln->lambda.body->block.expr) {
@@ -3439,11 +3439,11 @@ char *transpile_c(Node *program, const char *filename) {
 
     /* check if top-level code needs wrapping in main() */
     int needs_main_wrap = 0;
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         int has_explicit_main = 0;
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *st = program->program.stmts.items[i];
-            if (st && st->tag == NODE_FN_DECL && is_main_fn(st))
+            if (st && VAL_TAG(st) == NODE_FN_DECL && is_main_fn(st))
                 has_explicit_main = 1;
         }
         /* if there are non-declaration statements and no main, wrap */
@@ -3451,16 +3451,16 @@ char *transpile_c(Node *program, const char *filename) {
             for (int i = 0; i < program->program.stmts.len; i++) {
                 Node *st = program->program.stmts.items[i];
                 if (!st) continue;
-                if (st->tag != NODE_FN_DECL && st->tag != NODE_STRUCT_DECL &&
-                    st->tag != NODE_ENUM_DECL && st->tag != NODE_CLASS_DECL &&
-                    st->tag != NODE_TRAIT_DECL && st->tag != NODE_IMPL_DECL &&
-                    st->tag != NODE_TYPE_ALIAS && st->tag != NODE_IMPORT &&
-                    st->tag != NODE_USE && st->tag != NODE_MODULE_DECL &&
-                    st->tag != NODE_EFFECT_DECL) {
+                if (VAL_TAG(st) != NODE_FN_DECL && VAL_TAG(st) != NODE_STRUCT_DECL &&
+                    VAL_TAG(st) != NODE_ENUM_DECL && VAL_TAG(st) != NODE_CLASS_DECL &&
+                    VAL_TAG(st) != NODE_TRAIT_DECL && VAL_TAG(st) != NODE_IMPL_DECL &&
+                    VAL_TAG(st) != NODE_TYPE_ALIAS && VAL_TAG(st) != NODE_IMPORT &&
+                    VAL_TAG(st) != NODE_USE && VAL_TAG(st) != NODE_MODULE_DECL &&
+                    VAL_TAG(st) != NODE_EFFECT_DECL) {
                     /* skip actor decls (already emitted) */
-                    if (st->tag == NODE_ACTOR_DECL) continue;
-                    if (st->tag == NODE_EXPR_STMT && st->expr_stmt.expr &&
-                        st->expr_stmt.expr->tag == NODE_ACTOR_DECL) continue;
+                    if (VAL_TAG(st) == NODE_ACTOR_DECL) continue;
+                    if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+                        VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL) continue;
                     needs_main_wrap = 1;
                     break;
                 }
@@ -3469,11 +3469,11 @@ char *transpile_c(Node *program, const char *filename) {
     }
 
     /* emit forward declarations for pub functions (header-like) */
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         int has_pub = 0;
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *st = program->program.stmts.items[i];
-            if (st && st->tag == NODE_FN_DECL && st->fn_decl.is_pub && !is_main_fn(st)) {
+            if (st && VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.is_pub && !is_main_fn(st)) {
                 if (!has_pub) {
                     sb_add(&s, "/* exported function prototypes */\n");
                     has_pub = 1;
@@ -3489,17 +3489,17 @@ char *transpile_c(Node *program, const char *filename) {
 
     if (needs_main_wrap) {
         /* emit file-scope declarations first */
-        if (program->tag == NODE_PROGRAM) {
+        if (VAL_TAG(program) == NODE_PROGRAM) {
             for (int i = 0; i < program->program.stmts.len; i++) {
                 Node *st = program->program.stmts.items[i];
                 if (!st) continue;
-                if (st->tag == NODE_FN_DECL && !is_main_fn(st) && !st->fn_decl.is_async)
+                if (VAL_TAG(st) == NODE_FN_DECL && !is_main_fn(st) && !st->fn_decl.is_async)
                     emit_stmt(&s, st, 0);
-                else if (st->tag == NODE_STRUCT_DECL || st->tag == NODE_ENUM_DECL ||
-                         st->tag == NODE_CLASS_DECL || st->tag == NODE_TRAIT_DECL ||
-                         st->tag == NODE_IMPL_DECL || st->tag == NODE_TYPE_ALIAS ||
-                         st->tag == NODE_IMPORT || st->tag == NODE_USE ||
-                         st->tag == NODE_MODULE_DECL || st->tag == NODE_EFFECT_DECL)
+                else if (VAL_TAG(st) == NODE_STRUCT_DECL || VAL_TAG(st) == NODE_ENUM_DECL ||
+                         VAL_TAG(st) == NODE_CLASS_DECL || VAL_TAG(st) == NODE_TRAIT_DECL ||
+                         VAL_TAG(st) == NODE_IMPL_DECL || VAL_TAG(st) == NODE_TYPE_ALIAS ||
+                         VAL_TAG(st) == NODE_IMPORT || VAL_TAG(st) == NODE_USE ||
+                         VAL_TAG(st) == NODE_MODULE_DECL || VAL_TAG(st) == NODE_EFFECT_DECL)
                     emit_stmt(&s, st, 0);
             }
         }
@@ -3512,13 +3512,13 @@ char *transpile_c(Node *program, const char *filename) {
             sb_printf(&s, "    %s_state %s_state;\n",
                       actor_vars[i].actor_name, actor_vars[i].var_name);
             /* find the actor decl and init fields */
-            if (program->tag == NODE_PROGRAM) {
+            if (VAL_TAG(program) == NODE_PROGRAM) {
                 for (int j = 0; j < program->program.stmts.len; j++) {
                     Node *st = program->program.stmts.items[j];
                     Node *ad = NULL;
-                    if (st && st->tag == NODE_ACTOR_DECL) ad = st;
-                    else if (st && st->tag == NODE_EXPR_STMT && st->expr_stmt.expr &&
-                             st->expr_stmt.expr->tag == NODE_ACTOR_DECL)
+                    if (st && VAL_TAG(st) == NODE_ACTOR_DECL) ad = st;
+                    else if (st && VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+                             VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL)
                         ad = st->expr_stmt.expr;
                     if (!ad || !ad->actor_decl.name) continue;
                     if (strcmp(ad->actor_decl.name, actor_vars[i].actor_name) != 0) continue;
@@ -3538,20 +3538,20 @@ char *transpile_c(Node *program, const char *filename) {
         }
 
         /* emit non-declaration statements */
-        if (program->tag == NODE_PROGRAM) {
+        if (VAL_TAG(program) == NODE_PROGRAM) {
             for (int i = 0; i < program->program.stmts.len; i++) {
                 Node *st = program->program.stmts.items[i];
                 if (!st) continue;
                 /* skip declarations already emitted */
-                if (st->tag == NODE_FN_DECL || st->tag == NODE_STRUCT_DECL ||
-                    st->tag == NODE_ENUM_DECL || st->tag == NODE_CLASS_DECL ||
-                    st->tag == NODE_TRAIT_DECL || st->tag == NODE_IMPL_DECL ||
-                    st->tag == NODE_TYPE_ALIAS || st->tag == NODE_IMPORT ||
-                    st->tag == NODE_USE || st->tag == NODE_MODULE_DECL ||
-                    st->tag == NODE_EFFECT_DECL || st->tag == NODE_ACTOR_DECL)
+                if (VAL_TAG(st) == NODE_FN_DECL || VAL_TAG(st) == NODE_STRUCT_DECL ||
+                    VAL_TAG(st) == NODE_ENUM_DECL || VAL_TAG(st) == NODE_CLASS_DECL ||
+                    VAL_TAG(st) == NODE_TRAIT_DECL || VAL_TAG(st) == NODE_IMPL_DECL ||
+                    VAL_TAG(st) == NODE_TYPE_ALIAS || VAL_TAG(st) == NODE_IMPORT ||
+                    VAL_TAG(st) == NODE_USE || VAL_TAG(st) == NODE_MODULE_DECL ||
+                    VAL_TAG(st) == NODE_EFFECT_DECL || VAL_TAG(st) == NODE_ACTOR_DECL)
                     continue;
-                if (st->tag == NODE_EXPR_STMT && st->expr_stmt.expr &&
-                    st->expr_stmt.expr->tag == NODE_ACTOR_DECL)
+                if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+                    VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL)
                     continue;
                 emit_stmt(&s, st, 1);
             }
@@ -3559,7 +3559,7 @@ char *transpile_c(Node *program, const char *filename) {
 
         sb_add(&s, "    return 0;\n}\n");
     } else {
-        if (program->tag == NODE_PROGRAM) {
+        if (VAL_TAG(program) == NODE_PROGRAM) {
             for (int i = 0; i < program->program.stmts.len; i++)
                 emit_stmt(&s, program->program.stmts.items[i], 0);
         } else {

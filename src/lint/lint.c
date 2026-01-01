@@ -166,18 +166,18 @@ static int is_upper_snake_case(const char *name) {
 }
 
 static int is_literal_bool(Node *n) {
-    return n && n->tag == NODE_LIT_BOOL;
+    return n && VAL_TAG(n) == NODE_LIT_BOOL;
 }
 
 static int block_ends_with_return(Node *n) {
     if (!n) return 0;
-    if (n->tag != NODE_BLOCK) return 0;
+    if (VAL_TAG(n) != NODE_BLOCK) return 0;
     if (n->block.stmts.len == 0) return 0;
     Node *last = n->block.stmts.items[n->block.stmts.len - 1];
     if (!last) return 0;
-    if (last->tag == NODE_RETURN) return 1;
-    if (last->tag == NODE_EXPR_STMT && last->expr_stmt.expr &&
-        last->expr_stmt.expr->tag == NODE_RETURN) return 1;
+    if (VAL_TAG(last) == NODE_RETURN) return 1;
+    if (VAL_TAG(last) == NODE_EXPR_STMT && last->expr_stmt.expr &&
+        VAL_TAG(last->expr_stmt.expr) == NODE_RETURN) return 1;
     return 0;
 }
 
@@ -232,10 +232,10 @@ static void import_check_unused(XSLint *l) {
 }
 
 static void check_null_comparison(XSLint *l, Node *n) {
-    if (!n || n->tag != NODE_BINOP) return;
+    if (!n || VAL_TAG(n) != NODE_BINOP) return;
     if (strcmp(n->binop.op, "==") != 0 && strcmp(n->binop.op, "!=") != 0) return;
-    int left_null = (n->binop.left && n->binop.left->tag == NODE_LIT_NULL);
-    int right_null = (n->binop.right && n->binop.right->tag == NODE_LIT_NULL);
+    int left_null = (n->binop.left && VAL_TAG(n->binop.left) == NODE_LIT_NULL);
+    int right_null = (n->binop.right && VAL_TAG(n->binop.right) == NODE_LIT_NULL);
     if (left_null || right_null) {
         const char *suggest = strcmp(n->binop.op, "==") == 0 ? "is null" : "is not null";
         lint_add(l, SEV_STYLE, n->span.line,
@@ -244,12 +244,12 @@ static void check_null_comparison(XSLint *l, Node *n) {
 }
 
 static void check_self_comparison(XSLint *l, Node *n) {
-    if (!n || n->tag != NODE_BINOP) return;
+    if (!n || VAL_TAG(n) != NODE_BINOP) return;
     if (strcmp(n->binop.op, "==") != 0 && strcmp(n->binop.op, "!=") != 0) return;
     Node *left = n->binop.left;
     Node *right = n->binop.right;
     if (!left || !right) return;
-    if (left->tag == NODE_IDENT && right->tag == NODE_IDENT &&
+    if (VAL_TAG(left) == NODE_IDENT && VAL_TAG(right) == NODE_IDENT &&
         left->ident.name && right->ident.name &&
         strcmp(left->ident.name, right->ident.name) == 0) {
         lint_add(l, SEV_WARNING, n->span.line,
@@ -260,17 +260,17 @@ static void check_self_comparison(XSLint *l, Node *n) {
 }
 
 static int is_double_negation(Node *n) {
-    if (!n || n->tag != NODE_UNARY) return 0;
+    if (!n || VAL_TAG(n) != NODE_UNARY) return 0;
     if (strcmp(n->unary.op, "!") != 0 && strcmp(n->unary.op, "not") != 0) return 0;
     Node *inner = n->unary.expr;
-    if (!inner || inner->tag != NODE_UNARY) return 0;
+    if (!inner || VAL_TAG(inner) != NODE_UNARY) return 0;
     if (strcmp(inner->unary.op, "!") != 0 && strcmp(inner->unary.op, "not") != 0) return 0;
     return 1;
 }
 
 static void check_assignment_in_condition(XSLint *l, Node *cond) {
     if (!cond) return;
-    if (cond->tag == NODE_ASSIGN) {
+    if (VAL_TAG(cond) == NODE_ASSIGN) {
         lint_add(l, SEV_WARNING, cond->span.line,
                  "assignment in condition (did you mean '=='?)");
     }
@@ -278,7 +278,7 @@ static void check_assignment_in_condition(XSLint *l, Node *cond) {
 
 static int is_empty_block(Node *n) {
     if (!n) return 1;
-    if (n->tag != NODE_BLOCK) return 0;
+    if (VAL_TAG(n) != NODE_BLOCK) return 0;
     return (n->block.stmts.len == 0 && !n->block.expr);
 }
 
@@ -288,7 +288,7 @@ static void lint_block(XSLint *l, Node *n);
 
 static int is_terminator(Node *n) {
     if (!n) return 0;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_RETURN: case NODE_BREAK: case NODE_CONTINUE: case NODE_THROW:
         return 1;
     case NODE_EXPR_STMT:
@@ -304,9 +304,9 @@ static void check_unreachable(XSLint *l, NodeList *stmts) {
             int line = stmts->items[i + 1]->span.line;
             if (line <= 0) line = stmts->items[i]->span.line;
             lint_add(l, SEV_WARNING, line, "unreachable code after %s",
-                     stmts->items[i]->tag == NODE_RETURN ? "return" :
-                     stmts->items[i]->tag == NODE_BREAK ? "break" :
-                     stmts->items[i]->tag == NODE_CONTINUE ? "continue" : "throw");
+                     VAL_TAG(stmts->items[i]) == NODE_RETURN ? "return" :
+                     VAL_TAG(stmts->items[i]) == NODE_BREAK ? "break" :
+                     VAL_TAG(stmts->items[i]) == NODE_CONTINUE ? "continue" : "throw");
             break;
         }
     }
@@ -314,7 +314,7 @@ static void check_unreachable(XSLint *l, NodeList *stmts) {
 
 static void lint_expr(XSLint *l, Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_IDENT:
         scope_mark_used(l, n->ident.name);
         import_mark_used(n->ident.name);
@@ -345,7 +345,7 @@ static void lint_expr(XSLint *l, Node *n) {
         break;
     case NODE_METHOD_CALL:
         lint_expr(l, n->method_call.obj);
-        if (n->method_call.obj && n->method_call.obj->tag == NODE_IDENT)
+        if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT)
             import_mark_used(n->method_call.obj->ident.name);
         for (int i = 0; i < n->method_call.args.len; i++)
             lint_expr(l, n->method_call.args.items[i]);
@@ -358,7 +358,7 @@ static void lint_expr(XSLint *l, Node *n) {
         break;
     case NODE_FIELD:
         lint_expr(l, n->field.obj);
-        import_mark_used(n->field.obj && n->field.obj->tag == NODE_IDENT ? n->field.obj->ident.name : NULL);
+        import_mark_used(n->field.obj && VAL_TAG(n->field.obj) == NODE_IDENT ? n->field.obj->ident.name : NULL);
         break;
     case NODE_IF:
         if (is_literal_bool(n->if_expr.cond)) {
@@ -440,7 +440,7 @@ static void lint_expr(XSLint *l, Node *n) {
         for (int i = 0; i < n->list_comp.clause_pats.len; i++) {
             lint_expr(l, n->list_comp.clause_iters.items[i]);
             Node *pat = n->list_comp.clause_pats.items[i];
-            if (pat && pat->tag == NODE_PAT_IDENT)
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT)
                 scope_add_var(l, pat->pat_ident.name, pat->span.line);
             if (i < n->list_comp.clause_conds.len && n->list_comp.clause_conds.items[i])
                 lint_expr(l, n->list_comp.clause_conds.items[i]);
@@ -453,7 +453,7 @@ static void lint_expr(XSLint *l, Node *n) {
         for (int i = 0; i < n->map_comp.clause_pats.len; i++) {
             lint_expr(l, n->map_comp.clause_iters.items[i]);
             Node *pat = n->map_comp.clause_pats.items[i];
-            if (pat && pat->tag == NODE_PAT_IDENT)
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT)
                 scope_add_var(l, pat->pat_ident.name, pat->span.line);
             if (i < n->map_comp.clause_conds.len && n->map_comp.clause_conds.items[i])
                 lint_expr(l, n->map_comp.clause_conds.items[i]);
@@ -509,7 +509,7 @@ static void lint_expr(XSLint *l, Node *n) {
 
 static void lint_block(XSLint *l, Node *n) {
     if (!n) return;
-    if (n->tag != NODE_BLOCK) {
+    if (VAL_TAG(n) != NODE_BLOCK) {
         lint_node(l, n);
         return;
     }
@@ -536,7 +536,7 @@ static void lint_block(XSLint *l, Node *n) {
 
 static void lint_node(XSLint *l, Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LET:
     case NODE_VAR: {
         const char *vname = n->let.name;
@@ -650,7 +650,7 @@ static void lint_node(XSLint *l, Node *n) {
         }
         lint_expr(l, n->for_loop.iter);
         scope_push(l);
-        if (n->for_loop.pattern && n->for_loop.pattern->tag == NODE_PAT_IDENT) {
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT) {
             const char *pname = n->for_loop.pattern->pat_ident.name;
             if (pname) scope_add_var(l, pname, n->span.line);
         }
@@ -698,7 +698,7 @@ static void lint_node(XSLint *l, Node *n) {
             MatchArm *arm = &n->match.arms.items[i];
             if (arm->guard) lint_expr(l, arm->guard);
             scope_push(l);
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                 scope_add_var(l, arm->pattern->pat_ident.name, arm->span.line);
             }
             lint_expr(l, arm->body);
@@ -714,7 +714,7 @@ static void lint_node(XSLint *l, Node *n) {
                          "empty catch block silently swallows errors");
             }
             scope_push(l);
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT)
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT)
                 scope_add_var(l, arm->pattern->pat_ident.name, arm->span.line);
             lint_expr(l, arm->body);
             scope_pop(l);
@@ -783,7 +783,7 @@ void lint_free(XSLint *l) {
 }
 
 int lint_program(XSLint *l, Node *program, const char *filename) {
-    if (!program || program->tag != NODE_PROGRAM) return 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
     l->filename = filename;
     l->depth = 0;
     l->nscopes = 0;

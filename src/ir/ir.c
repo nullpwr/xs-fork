@@ -757,7 +757,7 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
         return ir_emit_const_null(ctx->block, ctx->func);
     }
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_LIT_INT:
         return ir_emit_const_int(ctx->block, ctx->func, node->lit_int.ival);
 
@@ -871,7 +871,7 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
             args[i] = irop_reg(r);
         }
         const char *callee = "?";
-        if (node->call.callee && node->call.callee->tag == NODE_IDENT)
+        if (node->call.callee && VAL_TAG(node->call.callee) == NODE_IDENT)
             callee = node->call.callee->ident.name;
         int dest = ir_emit_call(ctx->block, ctx->func, callee, args, nargs, IRT_ANY);
         free(args);
@@ -1080,10 +1080,10 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
                                  ir_block_new(ctx->func, "match_test") : merge_block;
 
             ctx->block = current_test;
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_WILD) {
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_WILD) {
                 ir_emit_br(ctx->block, arm_body->id);
                 ir_link_blocks(ctx->block, arm_body);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_LIT) {
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_LIT) {
                 int pat_val;
                 if (arm->pattern->pat_lit.tag == 0)
                     pat_val = ir_emit_const_int(ctx->block, ctx->func, arm->pattern->pat_lit.ival);
@@ -1101,7 +1101,7 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
                 ir_emit_br_if(ctx->block, irop_reg(cmp), arm_body->id, next_test->id);
                 ir_link_blocks(ctx->block, arm_body);
                 ir_link_blocks(ctx->block, next_test);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                 int slot = ir_emit_alloc(ctx->block, ctx->func, IRT_ANY);
                 ir_emit_store(ctx->block, irop_reg(subject), irop_reg(slot));
                 ctx_push_local(ctx, arm->pattern->pat_ident.name, slot);
@@ -1238,9 +1238,9 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
             int elem_slot = ir_emit_alloc(body_block, ctx->func, IRT_ANY);
             ir_emit_store(body_block, irop_reg(elem_reg), irop_reg(elem_slot));
             Node *pat = node->list_comp.clause_pats.items[ci];
-            if (pat && pat->tag == NODE_PAT_IDENT)
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT)
                 ctx_push_local(ctx, pat->pat_ident.name, elem_slot);
-            else if (pat && pat->tag == NODE_IDENT)
+            else if (pat && VAL_TAG(pat) == NODE_IDENT)
                 ctx_push_local(ctx, pat->ident.name, elem_slot);
 
             /* Optional guard condition */
@@ -1328,9 +1328,9 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
             int elem_slot = ir_emit_alloc(body_block, ctx->func, IRT_ANY);
             ir_emit_store(body_block, irop_reg(elem_reg), irop_reg(elem_slot));
             Node *pat = node->map_comp.clause_pats.items[ci];
-            if (pat && pat->tag == NODE_PAT_IDENT)
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT)
                 ctx_push_local(ctx, pat->pat_ident.name, elem_slot);
-            else if (pat && pat->tag == NODE_IDENT)
+            else if (pat && VAL_TAG(pat) == NODE_IDENT)
                 ctx_push_local(ctx, pat->ident.name, elem_slot);
 
             Node *guard = (ci < node->map_comp.clause_conds.len) ?
@@ -1426,10 +1426,10 @@ static int lower_expr(LowerCtx *ctx, Node *node) {
                                 ir_block_new(ctx->func, "catch_test") :
                                 (finally_block_ir ? finally_block_ir : merge_block);
 
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_WILD) {
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_WILD) {
                 ir_emit_br(ctx->block, arm_body->id);
                 ir_link_blocks(ctx->block, arm_body);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                 int slot = ir_emit_alloc(ctx->block, ctx->func, IRT_ANY);
                 ir_emit_store(ctx->block, irop_reg(exc_reg), irop_reg(slot));
                 ctx_push_local(ctx, arm->pattern->pat_ident.name, slot);
@@ -1595,7 +1595,7 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
     if (!node) return;
     if (ir_block_is_terminated(ctx->block)) return;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_LET:
     case NODE_VAR: {
         int val_reg;
@@ -1779,9 +1779,9 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
         int elem_slot = ir_emit_alloc(body_block, ctx->func, IRT_ANY);
         ir_emit_store(body_block, irop_reg(elem_reg), irop_reg(elem_slot));
         /* Bind pattern name */
-        if (node->for_loop.pattern && node->for_loop.pattern->tag == NODE_PAT_IDENT)
+        if (node->for_loop.pattern && VAL_TAG(node->for_loop.pattern) == NODE_PAT_IDENT)
             ctx_push_local(ctx, node->for_loop.pattern->pat_ident.name, elem_slot);
-        else if (node->for_loop.pattern && node->for_loop.pattern->tag == NODE_IDENT)
+        else if (node->for_loop.pattern && VAL_TAG(node->for_loop.pattern) == NODE_IDENT)
             ctx_push_local(ctx, node->for_loop.pattern->ident.name, elem_slot);
 
         if (node->for_loop.body)
@@ -1834,15 +1834,15 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
 
     case NODE_ASSIGN: {
         int val_reg = lower_expr(ctx, node->assign.value);
-        if (node->assign.target && node->assign.target->tag == NODE_IDENT) {
+        if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT) {
             int slot = ctx_lookup_local(ctx, node->assign.target->ident.name);
             if (slot >= 0)
                 ir_emit_store(ctx->block, irop_reg(val_reg), irop_reg(slot));
-        } else if (node->assign.target && node->assign.target->tag == NODE_FIELD) {
+        } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_FIELD) {
             int obj = lower_expr(ctx, node->assign.target->field.obj);
             ir_emit_store_field(ctx->block, irop_reg(obj),
                                 node->assign.target->field.name, irop_reg(val_reg));
-        } else if (node->assign.target && node->assign.target->tag == NODE_INDEX) {
+        } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_INDEX) {
             int obj = lower_expr(ctx, node->assign.target->index.obj);
             int idx = lower_expr(ctx, node->assign.target->index.index);
             IRInstr inst = instr_new(IR_STORE);
@@ -1881,7 +1881,7 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
 
         /* Lower body */
         if (node->fn_decl.body) {
-            if (node->fn_decl.body->tag == NODE_BLOCK) {
+            if (VAL_TAG(node->fn_decl.body) == NODE_BLOCK) {
                 /* Block body */
                 for (int i = 0; i < node->fn_decl.body->block.stmts.len; i++) {
                     lower_stmt(ctx, node->fn_decl.body->block.stmts.items[i]);
@@ -1938,10 +1938,10 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
             }
 
             ctx->block = current_test;
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_WILD) {
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_WILD) {
                 ir_emit_br(ctx->block, arm_body->id);
                 ir_link_blocks(ctx->block, arm_body);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_LIT) {
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_LIT) {
                 int pat_val;
                 if (arm->pattern->pat_lit.tag == 0)
                     pat_val = ir_emit_const_int(ctx->block, ctx->func, arm->pattern->pat_lit.ival);
@@ -1959,7 +1959,7 @@ static void lower_stmt(LowerCtx *ctx, Node *node) {
                 ir_emit_br_if(ctx->block, irop_reg(cmp), arm_body->id, next_test->id);
                 ir_link_blocks(ctx->block, arm_body);
                 ir_link_blocks(ctx->block, next_test);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                 int slot = ir_emit_alloc(ctx->block, ctx->func, IRT_ANY);
                 ir_emit_store(ctx->block, irop_reg(subject), irop_reg(slot));
                 ctx_push_local(ctx, arm->pattern->pat_ident.name, slot);
@@ -2017,7 +2017,7 @@ IRModule *ir_lower(Node *program) {
     IRBlock *entry = ir_block_new(main_fn, "entry");
     ctx.block = entry;
 
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *stmt = program->program.stmts.items[i];
             lower_stmt(&ctx, stmt);

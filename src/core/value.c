@@ -40,7 +40,7 @@ static Value *val_alloc(ValueTag tag) {
         v = xs_malloc(sizeof(Value));
         memset(v, 0, sizeof(Value));
     }
-    v->tag      = tag;
+    v->tag = tag;
     v->refcount = 1;
     return v;
 }
@@ -50,7 +50,7 @@ static void val_free(Value *v) {
        have complex union members and we'd risk tripping up code that
        holds stale references. Ints (the dominant arithmetic output)
        are simple enough to recycle safely. */
-    if (v->tag == XS_INT && g_val_freelist_len < VAL_FREELIST_MAX) {
+    if (VAL_TAG(v) == XS_INT && g_val_freelist_len < VAL_FREELIST_MAX) {
         v->fn = (XSFunc *)g_val_freelist;
         g_val_freelist = v;
         g_val_freelist_len++;
@@ -74,6 +74,7 @@ Value *xs_null(void) { return value_incref(XS_NULL_VAL); }
 Value *xs_bool(int b) { return value_incref(b ? XS_TRUE_VAL : XS_FALSE_VAL); }
 
 Value *xs_int(int64_t i) {
+    if (xs_fits_smi(i)) return xs_int_to_smi(i);
     Value *v = val_alloc(XS_INT);
     v->i = i;
     return v;
@@ -172,13 +173,13 @@ Value *xs_regex(const char *pattern) {
 
 // refcount
 Value *value_incref(Value *v) {
-    if (v) v->refcount++;
+    if (v && !xs_is_smi(v)) v->refcount++;
     return v;
 }
 
 static void free_value(Value *v) {
     if (!v) return;
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_STR:
         case XS_CHAR:
         case XS_REGEX:
@@ -317,17 +318,17 @@ static void free_value(Value *v) {
 }
 
 void value_decref(Value *v) {
-    if (!v) return;
+    if (!v || xs_is_smi(v)) return;
     v->refcount--;
     if (v->refcount <= 0) free_value(v);
 }
 
 int value_truthy(Value *v) {
     if (!v) return 0;
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_NULL:   return 0;
-        case XS_BOOL:   return (int)v->i;
-        case XS_INT:    return v->i != 0;
+        case XS_BOOL:   return (int)VAL_INT(v);
+        case XS_INT:    return VAL_INT(v) != 0;
         case XS_BIGINT: return !bigint_is_zero(v->bigint);
         case XS_FLOAT:  return v->f != 0.0;
         case XS_STR:    return v->s && v->s[0] != '\0';
@@ -343,11 +344,11 @@ int value_truthy(Value *v) {
 char *value_repr(Value *v) {
     if (!v) return xs_strdup("null");
     char buf[64];
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_NULL:  return xs_strdup("null");
-        case XS_BOOL:  return xs_strdup(v->i ? "true" : "false");
+        case XS_BOOL:  return xs_strdup(VAL_INT(v) ? "true" : "false");
         case XS_INT:
-            snprintf(buf, sizeof(buf), "%lld", (long long)v->i);
+            snprintf(buf, sizeof(buf), "%lld", (long long)VAL_INT(v));
             return xs_strdup(buf);
         case XS_BIGINT: {
             char *s = bigint_to_str(v->bigint, 10);
@@ -373,7 +374,7 @@ char *value_repr(Value *v) {
             size_t sz = 64;
             char *out = xs_malloc(sz);
             size_t pos = 0;
-            out[pos++] = (v->tag == XS_TUPLE) ? '(' : '[';
+            out[pos++] = (VAL_TAG(v) == XS_TUPLE) ? '(' : '[';
             if (v->arr) {
                 for (int i = 0; i < v->arr->len; i++) {
                     char *item = value_repr(v->arr->items[i]);
@@ -385,7 +386,7 @@ char *value_repr(Value *v) {
                 }
             }
             while (pos + 2 >= sz) { sz *= 2; out = xs_realloc(out, sz); }
-            out[pos++] = (v->tag == XS_TUPLE) ? ')' : ']';
+            out[pos++] = (VAL_TAG(v) == XS_TUPLE) ? ')' : ']';
             out[pos] = '\0';
             return out;
         }
@@ -394,9 +395,9 @@ char *value_repr(Value *v) {
             if (v->map) {
                 Value *tag_v = map_get(v->map, "_tag");
                 Value *type_v = map_get(v->map, "__type");
-                if (tag_v && tag_v->tag == XS_STR && type_v && type_v->tag == XS_STR) {
+                if (tag_v && VAL_TAG(tag_v) == XS_STR && type_v && VAL_TAG(type_v) == XS_STR) {
                     Value *val_v = map_get(v->map, "_val");
-                    if (val_v && val_v->tag != XS_NULL) {
+                    if (val_v && VAL_TAG(val_v) != XS_NULL) {
                         char *vs = value_repr(val_v);
                         size_t n = strlen(type_v->s) + 2 + strlen(tag_v->s) + 1 + strlen(vs) + 2;
                         char *out = xs_malloc(n);
@@ -537,7 +538,7 @@ char *value_repr(Value *v) {
             return xs_strdup("<module>");
         case XS_OVERLOAD: {
             if (v->overload && v->overload->len > 0 &&
-                v->overload->items[0]->tag == XS_FUNC &&
+                VAL_TAG(v->overload->items[0]) == XS_FUNC &&
                 v->overload->items[0]->fn->name) {
                 snprintf(buf, sizeof(buf), "<overloaded fn %s (%d variants)>",
                     v->overload->items[0]->fn->name, v->overload->len);
@@ -561,31 +562,31 @@ char *value_str(Value *v) { return value_repr(v); }
 int value_equal(Value *a, Value *b) {
     if (!a || !b) return a == b;
     if (a == b) return 1;
-    if (a->tag == XS_NULL && b->tag == XS_NULL) return 1;
-    if (a->tag == XS_BOOL && b->tag == XS_BOOL) return a->i == b->i;
-    if (a->tag == XS_INT  && b->tag == XS_INT)  return a->i == b->i;
-    if (a->tag == XS_FLOAT && b->tag == XS_FLOAT) return a->f == b->f;
-    if (a->tag == XS_INT  && b->tag == XS_FLOAT) return (double)a->i == b->f;
-    if (a->tag == XS_FLOAT && b->tag == XS_INT)  return a->f == (double)b->i;
-    if (a->tag == XS_BIGINT && b->tag == XS_BIGINT) return bigint_cmp(a->bigint, b->bigint) == 0;
-    if (a->tag == XS_BIGINT && b->tag == XS_INT)    return bigint_cmp_i64(a->bigint, b->i) == 0;
-    if (a->tag == XS_INT    && b->tag == XS_BIGINT)  return bigint_cmp_i64(b->bigint, a->i) == 0;
-    if (a->tag == XS_BIGINT && b->tag == XS_FLOAT)  return bigint_to_double(a->bigint) == b->f;
-    if (a->tag == XS_FLOAT  && b->tag == XS_BIGINT) return a->f == bigint_to_double(b->bigint);
-    if ((a->tag == XS_STR || a->tag == XS_CHAR) &&
-        (b->tag == XS_STR || b->tag == XS_CHAR))
+    if (VAL_TAG(a) == XS_NULL && VAL_TAG(b) == XS_NULL) return 1;
+    if (VAL_TAG(a) == XS_BOOL && VAL_TAG(b) == XS_BOOL) return VAL_INT(a) == VAL_INT(b);
+    if (VAL_TAG(a) == XS_INT  && VAL_TAG(b) == XS_INT)  return VAL_INT(a) == VAL_INT(b);
+    if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_FLOAT) return a->f == b->f;
+    if (VAL_TAG(a) == XS_INT  && VAL_TAG(b) == XS_FLOAT) return (double)VAL_INT(a) == b->f;
+    if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_INT)  return a->f == (double)VAL_INT(b);
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_BIGINT) return bigint_cmp(a->bigint, b->bigint) == 0;
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_INT)    return bigint_cmp_i64(a->bigint, VAL_INT(b)) == 0;
+    if (VAL_TAG(a) == XS_INT    && VAL_TAG(b) == XS_BIGINT)  return bigint_cmp_i64(b->bigint, VAL_INT(a)) == 0;
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_FLOAT)  return bigint_to_double(a->bigint) == b->f;
+    if (VAL_TAG(a) == XS_FLOAT  && VAL_TAG(b) == XS_BIGINT) return a->f == bigint_to_double(b->bigint);
+    if ((VAL_TAG(a) == XS_STR || VAL_TAG(a) == XS_CHAR) &&
+        (VAL_TAG(b) == XS_STR || VAL_TAG(b) == XS_CHAR))
         return strcmp(a->s, b->s) == 0;
     /* structural equality for collections */
-    if ((a->tag == XS_ARRAY || a->tag == XS_TUPLE) &&
-        (b->tag == XS_ARRAY || b->tag == XS_TUPLE) &&
-        a->tag == b->tag) {
+    if ((VAL_TAG(a) == XS_ARRAY || VAL_TAG(a) == XS_TUPLE) &&
+        (VAL_TAG(b) == XS_ARRAY || VAL_TAG(b) == XS_TUPLE) &&
+        VAL_TAG(a) == VAL_TAG(b)) {
         if (a->arr->len != b->arr->len) return 0;
         for (int i = 0; i < a->arr->len; i++) {
             if (!value_equal(a->arr->items[i], b->arr->items[i])) return 0;
         }
         return 1;
     }
-    if (a->tag == XS_ENUM_VAL && b->tag == XS_ENUM_VAL) {
+    if (VAL_TAG(a) == XS_ENUM_VAL && VAL_TAG(b) == XS_ENUM_VAL) {
         if (strcmp(a->en->type_name, b->en->type_name) != 0) return 0;
         if (strcmp(a->en->variant,   b->en->variant)   != 0) return 0;
         if (a->en->arr_data && b->en->arr_data) {
@@ -600,7 +601,7 @@ int value_equal(Value *a, Value *b) {
             !a->en->map_data && !b->en->map_data) return 1;
         return 0;
     }
-    if (a->tag == XS_INST && b->tag == XS_INST) {
+    if (VAL_TAG(a) == XS_INST && VAL_TAG(b) == XS_INST) {
         if (a->inst->class_ != b->inst->class_) return 0;
         if (!a->inst->fields || !b->inst->fields) return a->inst->fields == b->inst->fields;
         int nk = 0; char **ks = map_keys(a->inst->fields, &nk);
@@ -614,7 +615,7 @@ int value_equal(Value *a, Value *b) {
         free(ks);
         return eq;
     }
-    if (a->tag == XS_STRUCT_VAL && b->tag == XS_STRUCT_VAL) {
+    if (VAL_TAG(a) == XS_STRUCT_VAL && VAL_TAG(b) == XS_STRUCT_VAL) {
         if (strcmp(a->st->type_name, b->st->type_name) != 0) return 0;
         if (!a->st->fields || !b->st->fields) return a->st->fields == b->st->fields;
         if (a->st->fields->len != b->st->fields->len) return 0;
@@ -626,7 +627,7 @@ int value_equal(Value *a, Value *b) {
         return 1;
     }
     /* Structural map equality: same key set, same value at every key. */
-    if (a->tag == XS_MAP && b->tag == XS_MAP) {
+    if (VAL_TAG(a) == XS_MAP && VAL_TAG(b) == XS_MAP) {
         if (!a->map || !b->map) return a->map == b->map;
         if (a->map->len != b->map->len) return 0;
         for (int i = 0; i < a->map->cap; i++) {
@@ -641,33 +642,33 @@ int value_equal(Value *a, Value *b) {
 
 int value_cmp(Value *a, Value *b) {
     if (!a || !b) return 0;
-    if (a->tag == XS_INT && b->tag == XS_INT) {
-        if (a->i < b->i) return -1;
-        if (a->i > b->i) return  1;
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
+        if (VAL_INT(a) < VAL_INT(b)) return -1;
+        if (VAL_INT(a) > VAL_INT(b)) return  1;
         return 0;
     }
-    if (a->tag == XS_BIGINT && b->tag == XS_BIGINT) return bigint_cmp(a->bigint, b->bigint);
-    if (a->tag == XS_BIGINT && b->tag == XS_INT)    return bigint_cmp_i64(a->bigint, b->i);
-    if (a->tag == XS_INT    && b->tag == XS_BIGINT)  return -bigint_cmp_i64(b->bigint, a->i);
-    if (a->tag == XS_BIGINT && b->tag == XS_FLOAT) {
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_BIGINT) return bigint_cmp(a->bigint, b->bigint);
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_INT)    return bigint_cmp_i64(a->bigint, VAL_INT(b));
+    if (VAL_TAG(a) == XS_INT    && VAL_TAG(b) == XS_BIGINT)  return -bigint_cmp_i64(b->bigint, VAL_INT(a));
+    if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_FLOAT) {
         double da = bigint_to_double(a->bigint);
         if (da < b->f) return -1;
         if (da > b->f) return  1;
         return 0;
     }
-    if (a->tag == XS_FLOAT && b->tag == XS_BIGINT) {
+    if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_BIGINT) {
         double db = bigint_to_double(b->bigint);
         if (a->f < db) return -1;
         if (a->f > db) return  1;
         return 0;
     }
-    if (a->tag == XS_STR && b->tag == XS_STR) {
+    if (VAL_TAG(a) == XS_STR && VAL_TAG(b) == XS_STR) {
         return strcmp(a->s, b->s);
     }
-    if ((a->tag == XS_INT || a->tag == XS_FLOAT) &&
-        (b->tag == XS_INT || b->tag == XS_FLOAT)) {
-        double fa = (a->tag == XS_FLOAT) ? a->f : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f : (double)b->i;
+    if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT) &&
+        (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT)) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f : (double)VAL_INT(b);
         if (fa < fb) return -1;
         if (fa > fb) return  1;
         return 0;
@@ -675,8 +676,8 @@ int value_cmp(Value *a, Value *b) {
     /* Lexicographic compare for arrays and tuples (same shape on both
        sides). Element-wise: first non-zero comparison wins; otherwise
        shorter side is less. */
-    if ((a->tag == XS_ARRAY || a->tag == XS_TUPLE) &&
-        a->tag == b->tag && a->arr && b->arr) {
+    if ((VAL_TAG(a) == XS_ARRAY || VAL_TAG(a) == XS_TUPLE) &&
+        VAL_TAG(a) == VAL_TAG(b) && a->arr && b->arr) {
         int n = a->arr->len < b->arr->len ? a->arr->len : b->arr->len;
         for (int i = 0; i < n; i++) {
             int c = value_cmp(a->arr->items[i], b->arr->items[i]);
@@ -687,7 +688,7 @@ int value_cmp(Value *a, Value *b) {
         return 0;
     }
     /* fallback: compare by type tag */
-    return (a->tag > b->tag) - (a->tag < b->tag);
+    return (VAL_TAG(a) > VAL_TAG(b)) - (VAL_TAG(a) < VAL_TAG(b));
 }
 
 Value *value_copy(Value *v) {

@@ -825,12 +825,12 @@ Value *xs_bigint_val(XSBigInt *b) {
 /* mixed operations */
 
 static XSBigInt *val_to_bigint(Value *v) {
-    if (v->tag == XS_BIGINT)
+    if (VAL_TAG(v) == XS_BIGINT)
         return bigint_copy(v->bigint);
-    if (v->tag == XS_INT)
-        return bigint_from_i64(v->i);
+    if (VAL_TAG(v) == XS_INT)
+        return bigint_from_i64(VAL_INT(v));
     /* FLOAT: truncate to i64 first, then bigint */
-    if (v->tag == XS_FLOAT) {
+    if (VAL_TAG(v) == XS_FLOAT) {
         if (v->f >= (double)INT64_MIN && v->f <= (double)INT64_MAX)
             return bigint_from_i64((int64_t)v->f);
         /* For very large floats, use string conversion */
@@ -845,17 +845,17 @@ static XSBigInt *val_to_bigint(Value *v) {
 
 /* If both operands are INT, try the safe i64 path first */
 static int both_int(Value *a, Value *b) {
-    return a->tag == XS_INT && b->tag == XS_INT;
+    return VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT;
 }
 
 Value *xs_numeric_add(Value *a, Value *b) {
-    if (both_int(a, b)) return xs_safe_add(a->i, b->i);
+    if (both_int(a, b)) return xs_safe_add(VAL_INT(a), VAL_INT(b));
     /* At least one is BIGINT (or mixed) */
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(fa + fb);
     }
     XSBigInt *ba = val_to_bigint(a);
@@ -867,12 +867,12 @@ Value *xs_numeric_add(Value *a, Value *b) {
 }
 
 Value *xs_numeric_sub(Value *a, Value *b) {
-    if (both_int(a, b)) return xs_safe_sub(a->i, b->i);
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (both_int(a, b)) return xs_safe_sub(VAL_INT(a), VAL_INT(b));
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(fa - fb);
     }
     XSBigInt *ba = val_to_bigint(a);
@@ -884,12 +884,12 @@ Value *xs_numeric_sub(Value *a, Value *b) {
 }
 
 Value *xs_numeric_mul(Value *a, Value *b) {
-    if (both_int(a, b)) return xs_safe_mul(a->i, b->i);
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (both_int(a, b)) return xs_safe_mul(VAL_INT(a), VAL_INT(b));
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(fa * fb);
     }
     XSBigInt *ba = val_to_bigint(a);
@@ -903,23 +903,23 @@ Value *xs_numeric_mul(Value *a, Value *b) {
 Value *xs_numeric_div(Value *a, Value *b) {
     /* Division always produces integer quotient for bigints */
     if (both_int(a, b)) {
-        if (b->i == 0) return xs_int(0); /* or error */
+        if (VAL_INT(b) == 0) return xs_int(0); /* or error */
         /* Check for INT64_MIN / -1 overflow */
-        if (a->i == INT64_MIN && b->i == -1) {
-            XSBigInt *ba = bigint_from_i64(a->i);
-            XSBigInt *bb = bigint_from_i64(b->i);
+        if (VAL_INT(a) == INT64_MIN && VAL_INT(b) == -1) {
+            XSBigInt *ba = bigint_from_i64(VAL_INT(a));
+            XSBigInt *bb = bigint_from_i64(VAL_INT(b));
             XSBigInt *r = bigint_div(ba, bb);
             bigint_free(ba);
             bigint_free(bb);
             return xs_bigint_val(r);
         }
-        return xs_int(a->i / b->i);
+        return xs_int(VAL_INT(a) / VAL_INT(b));
     }
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(fa / fb);
     }
     XSBigInt *ba = val_to_bigint(a);
@@ -932,14 +932,14 @@ Value *xs_numeric_div(Value *a, Value *b) {
 
 Value *xs_numeric_mod(Value *a, Value *b) {
     if (both_int(a, b)) {
-        if (b->i == 0) return xs_int(0);
-        return xs_int(a->i % b->i);
+        if (VAL_INT(b) == 0) return xs_int(0);
+        return xs_int(VAL_INT(a) % VAL_INT(b));
     }
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(fmod(fa, fb));
     }
     XSBigInt *ba = val_to_bigint(a);
@@ -951,20 +951,20 @@ Value *xs_numeric_mod(Value *a, Value *b) {
 }
 
 Value *xs_numeric_pow(Value *a, Value *b) {
-    if (both_int(a, b)) return xs_safe_pow(a->i, b->i);
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (both_int(a, b)) return xs_safe_pow(VAL_INT(a), VAL_INT(b));
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(pow(fa, fb));
     }
     /* exponent must be convertible to i64 for bigint_pow */
     XSBigInt *ba = val_to_bigint(a);
     int64_t exp_val = 0;
-    if (b->tag == XS_INT) {
-        exp_val = b->i;
-    } else if (b->tag == XS_BIGINT) {
+    if (VAL_TAG(b) == XS_INT) {
+        exp_val = VAL_INT(b);
+    } else if (VAL_TAG(b) == XS_BIGINT) {
         if (bigint_fits_i64(b->bigint))
             exp_val = bigint_to_i64(b->bigint);
         else {
@@ -979,9 +979,9 @@ Value *xs_numeric_pow(Value *a, Value *b) {
 }
 
 Value *xs_numeric_neg(Value *a) {
-    if (a->tag == XS_INT) return xs_safe_neg(a->i);
-    if (a->tag == XS_FLOAT) return xs_float(-a->f);
-    if (a->tag == XS_BIGINT) {
+    if (VAL_TAG(a) == XS_INT) return xs_safe_neg(VAL_INT(a));
+    if (VAL_TAG(a) == XS_FLOAT) return xs_float(-a->f);
+    if (VAL_TAG(a) == XS_BIGINT) {
         XSBigInt *r = bigint_neg(a->bigint);
         return xs_bigint_val(r);
     }
@@ -990,26 +990,26 @@ Value *xs_numeric_neg(Value *a) {
 
 Value *xs_numeric_floordiv(Value *a, Value *b) {
     if (both_int(a, b)) {
-        if (b->i == 0) return xs_int(0);
-        if (a->i == INT64_MIN && b->i == -1) {
-            XSBigInt *ba = bigint_from_i64(a->i);
-            XSBigInt *bb = bigint_from_i64(b->i);
+        if (VAL_INT(b) == 0) return xs_int(0);
+        if (VAL_INT(a) == INT64_MIN && VAL_INT(b) == -1) {
+            XSBigInt *ba = bigint_from_i64(VAL_INT(a));
+            XSBigInt *bb = bigint_from_i64(VAL_INT(b));
             XSBigInt *r = bigint_div(ba, bb);
             bigint_free(ba);
             bigint_free(bb);
             return xs_bigint_val(r);
         }
-        int64_t q = a->i / b->i;
-        int64_t r = a->i % b->i;
+        int64_t q = VAL_INT(a) / VAL_INT(b);
+        int64_t r = VAL_INT(a) % VAL_INT(b);
         /* Floor division: round toward negative infinity */
-        if (r != 0 && ((a->i ^ b->i) < 0)) q--;
+        if (r != 0 && ((VAL_INT(a) ^ VAL_INT(b)) < 0)) q--;
         return xs_int(q);
     }
-    if (a->tag == XS_FLOAT || b->tag == XS_FLOAT) {
-        double fa = (a->tag == XS_FLOAT) ? a->f :
-                    (a->tag == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)a->i;
-        double fb = (b->tag == XS_FLOAT) ? b->f :
-                    (b->tag == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)b->i;
+    if (VAL_TAG(a) == XS_FLOAT || VAL_TAG(b) == XS_FLOAT) {
+        double fa = (VAL_TAG(a) == XS_FLOAT) ? a->f :
+                    (VAL_TAG(a) == XS_BIGINT) ? bigint_to_double(a->bigint) : (double)VAL_INT(a);
+        double fb = (VAL_TAG(b) == XS_FLOAT) ? b->f :
+                    (VAL_TAG(b) == XS_BIGINT) ? bigint_to_double(b->bigint) : (double)VAL_INT(b);
         return xs_float(floor(fa / fb));
     }
     /* Bigint floor division: q = a/b, adjust if remainder has opposite sign to divisor */

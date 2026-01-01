@@ -7,7 +7,7 @@
 
 static int is_catchall(Node *pat) {
     if (!pat) return 0;
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
         case NODE_PAT_WILD:    return 1;
         case NODE_PAT_IDENT:   return 1;
         case NODE_PAT_CAPTURE: return is_catchall(pat->pat_capture.pattern);
@@ -29,7 +29,7 @@ char *exhaust_check(MatchArm *arms, int n_arms,
         int all_bool = 1, has_true = 0, has_false = 0;
         for (int i = 0; i < n_arms; i++) {
             Node *p = arms[i].pattern;
-            if (p && p->tag == NODE_PAT_LIT && p->pat_lit.tag == 3) {
+            if (p && VAL_TAG(p) == NODE_PAT_LIT && p->pat_lit.tag == 3) {
                 if (p->pat_lit.bval) has_true  = 1;
                 else                 has_false = 1;
             } else {
@@ -49,7 +49,7 @@ char *exhaust_check(MatchArm *arms, int n_arms,
             int found = 0;
             for (int i = 0; i < n_arms && !found; i++) {
                 Node *p = arms[i].pattern;
-                if (p && p->tag == NODE_PAT_ENUM && p->pat_enum.path) {
+                if (p && VAL_TAG(p) == NODE_PAT_ENUM && p->pat_enum.path) {
                     const char *path = p->pat_enum.path;
                     if (strcmp(path, variants[v]) == 0) {
                         found = 1;

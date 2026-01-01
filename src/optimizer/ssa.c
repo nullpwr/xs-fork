@@ -137,7 +137,7 @@ static int build_expr(SSABuilder *b, Node *n) {
         return c->id;
     }
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT: {
         SSAInstr *c = ssa_emit(b->func, b->cur_block, SSA_CONST);
         c->konst.ival = n->lit_int.ival;
@@ -215,7 +215,7 @@ static int build_expr(SSABuilder *b, Node *n) {
         call->call.args = args;
         call->call.nargs = nargs;
         call->call.name = NULL;
-        if (n->call.callee && n->call.callee->tag == NODE_IDENT)
+        if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT)
             call->call.name = xs_strdup(n->call.callee->ident.name);
         return call->id;
     }
@@ -239,7 +239,7 @@ static int build_expr(SSABuilder *b, Node *n) {
         b->cur_block = then_bb;
         int then_val = -1;
         if (n->if_expr.then) {
-            if (n->if_expr.then->tag == NODE_BLOCK) {
+            if (VAL_TAG(n->if_expr.then) == NODE_BLOCK) {
                 for (int i = 0; i < n->if_expr.then->block.stmts.len; i++)
                     build_stmt(b, n->if_expr.then->block.stmts.items[i]);
                 if (n->if_expr.then->block.expr)
@@ -258,7 +258,7 @@ static int build_expr(SSABuilder *b, Node *n) {
         b->cur_block = else_bb;
         int else_val = -1;
         if (n->if_expr.else_branch) {
-            if (n->if_expr.else_branch->tag == NODE_BLOCK) {
+            if (VAL_TAG(n->if_expr.else_branch) == NODE_BLOCK) {
                 for (int i = 0; i < n->if_expr.else_branch->block.stmts.len; i++)
                     build_stmt(b, n->if_expr.else_branch->block.stmts.items[i]);
                 if (n->if_expr.else_branch->block.expr)
@@ -304,7 +304,7 @@ static int build_expr(SSABuilder *b, Node *n) {
 static void build_stmt(SSABuilder *b, Node *n) {
     if (!n) return;
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LET:
     case NODE_VAR: {
         int val = build_expr(b, n->let.value);
@@ -328,7 +328,7 @@ static void build_stmt(SSABuilder *b, Node *n) {
     }
     case NODE_ASSIGN: {
         int val = build_expr(b, n->assign.value);
-        if (n->assign.target && n->assign.target->tag == NODE_IDENT) {
+        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_IDENT) {
             SSAInstr *st = ssa_emit(b->func, b->cur_block, SSA_STORE);
             st->store.name = xs_strdup(n->assign.target->ident.name);
             st->store.val_id = val;
@@ -386,7 +386,7 @@ static void build_stmt(SSABuilder *b, Node *n) {
 
         b->cur_block = body_bb;
         if (n->while_loop.body) {
-            if (n->while_loop.body->tag == NODE_BLOCK) {
+            if (VAL_TAG(n->while_loop.body) == NODE_BLOCK) {
                 for (int i = 0; i < n->while_loop.body->block.stmts.len; i++)
                     build_stmt(b, n->while_loop.body->block.stmts.items[i]);
             } else {
@@ -431,7 +431,7 @@ static void build_stmt(SSABuilder *b, Node *n) {
 
         b->cur_block = body_bb;
         if (n->for_loop.body) {
-            if (n->for_loop.body->tag == NODE_BLOCK) {
+            if (VAL_TAG(n->for_loop.body) == NODE_BLOCK) {
                 for (int i = 0; i < n->for_loop.body->block.stmts.len; i++)
                     build_stmt(b, n->for_loop.body->block.stmts.items[i]);
             } else {
@@ -477,7 +477,7 @@ SSAFunction *ssa_build(Node *fn_body, const char **param_names, int nparams) {
 
     /* build body */
     if (fn_body) {
-        if (fn_body->tag == NODE_BLOCK) {
+        if (VAL_TAG(fn_body) == NODE_BLOCK) {
             for (int i = 0; i < fn_body->block.stmts.len; i++)
                 build_stmt(&builder, fn_body->block.stmts.items[i]);
             if (fn_body->block.expr) {

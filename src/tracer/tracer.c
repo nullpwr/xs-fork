@@ -105,13 +105,13 @@ static char *value_to_json(Value *v, int max_depth) {
     char *buf = NULL;
     int pos = 0, cap = 0;
 
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
     case XS_NULL:
         return strdup("null");
     case XS_BOOL:
-        return strdup(v->i ? "true" : "false");
+        return strdup(VAL_INT(v) ? "true" : "false");
     case XS_INT:
-        snprintf(tmp, sizeof(tmp), "%lld", (long long)v->i);
+        snprintf(tmp, sizeof(tmp), "%lld", (long long)VAL_INT(v));
         return strdup(tmp);
     case XS_FLOAT:
         snprintf(tmp, sizeof(tmp), "%.17g", v->f);
@@ -212,7 +212,7 @@ static char *value_to_json(Value *v, int max_depth) {
     case XS_ACTOR:
         return strdup("{\"type\": \"actor\"}");
     default:
-        snprintf(tmp, sizeof(tmp), "{\"type\": \"tag_%d\"}", (int)v->tag);
+        snprintf(tmp, sizeof(tmp), "{\"type\": \"tag_%d\"}", (int)VAL_TAG(v));
         return strdup(tmp);
     }
 }
@@ -274,10 +274,10 @@ void tracer_record_call(XSTracer *t, const char *fn, int line) {
 static void extract_value(Value *v, int *tag, int64_t *ival, double *fval, const char **sval) {
     *ival = 0; *fval = 0.0; *sval = NULL;
     if (!v) { *tag = XS_NULL; return; }
-    *tag = (int)v->tag;
-    switch (v->tag) {
-    case XS_INT:   *ival = v->i;  break;
-    case XS_BOOL:  *ival = v->i;  break;
+    *tag = (int)VAL_TAG(v);
+    switch (VAL_TAG(v)) {
+    case XS_INT:   *ival = VAL_INT(v);  break;
+    case XS_BOOL:  *ival = VAL_INT(v);  break;
     case XS_FLOAT: *fval = v->f;  break;
     case XS_STR:
     case XS_CHAR:  *sval = v->s;  break;

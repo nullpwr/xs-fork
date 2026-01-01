@@ -65,12 +65,12 @@ static void trace_provenance_for_node(Interp *interp, const char *var, Node *exp
     if (!interp->tracer || !expr) return;
     const char *origin = "unknown";
     const char *detail = "";
-    switch (expr->tag) {
+    switch (VAL_TAG(expr)) {
     case NODE_LIT_INT: case NODE_LIT_FLOAT: case NODE_LIT_STRING: case NODE_LIT_BOOL:
         origin = "literal"; break;
     case NODE_CALL:
         origin = "fn_return";
-        if (expr->call.callee && expr->call.callee->tag == NODE_IDENT)
+        if (expr->call.callee && VAL_TAG(expr->call.callee) == NODE_IDENT)
             detail = expr->call.callee->ident.name;
         break;
     case NODE_BINOP:
@@ -376,7 +376,7 @@ static Value *builtin_debug_to_string(Interp *interp, Value **args, int argc) {
 
 static Value *builtin_clone(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_INST) return value_incref(XS_NULL_VAL);
+    if (argc < 1 || VAL_TAG(args[0]) != XS_INST) return value_incref(XS_NULL_VAL);
     Value *self = args[0];
     XSInst *inst = xs_calloc(1, sizeof(XSInst));
     inst->class_ = self->inst->class_;
@@ -412,7 +412,7 @@ static Value *builtin_struct_eq(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return value_incref(XS_FALSE_VAL);
     Value *self = args[0], *other = args[1];
-    if (self->tag != XS_INST || other->tag != XS_INST) return value_incref(XS_FALSE_VAL);
+    if (VAL_TAG(self) != XS_INST || VAL_TAG(other) != XS_INST) return value_incref(XS_FALSE_VAL);
     if (self->inst->class_ != other->inst->class_) return value_incref(XS_FALSE_VAL);
     if (!self->inst->fields || !other->inst->fields) return value_incref(XS_FALSE_VAL);
     int nk = 0; char **ks = map_keys(self->inst->fields, &nk);
@@ -468,28 +468,28 @@ static int value_matches_type(Value *v, const char *type_name) {
     if (!type_name || !v) return 1;
     if (strcmp(type_name, "any") == 0) return 1;
     if (strcmp(type_name, "int") == 0 || strcmp(type_name, "i64") == 0)
-        return v->tag == XS_INT;
+        return VAL_TAG(v) == XS_INT;
     if (strcmp(type_name, "float") == 0 || strcmp(type_name, "f64") == 0)
-        return v->tag == XS_FLOAT;
+        return VAL_TAG(v) == XS_FLOAT;
     if (strcmp(type_name, "str") == 0 || strcmp(type_name, "string") == 0)
-        return v->tag == XS_STR;
+        return VAL_TAG(v) == XS_STR;
     if (strcmp(type_name, "bool") == 0)
-        return v->tag == XS_BOOL;
+        return VAL_TAG(v) == XS_BOOL;
     if (strcmp(type_name, "array") == 0)
-        return v->tag == XS_ARRAY;
+        return VAL_TAG(v) == XS_ARRAY;
     if (strcmp(type_name, "map") == 0)
-        return v->tag == XS_MAP;
+        return VAL_TAG(v) == XS_MAP;
     if (strcmp(type_name, "null") == 0)
-        return v->tag == XS_NULL;
+        return VAL_TAG(v) == XS_NULL;
     if (strcmp(type_name, "fn") == 0 || strcmp(type_name, "function") == 0)
-        return v->tag == XS_FUNC || v->tag == XS_NATIVE;
+        return VAL_TAG(v) == XS_FUNC || VAL_TAG(v) == XS_NATIVE;
     if (strcmp(type_name, "tuple") == 0)
-        return v->tag == XS_TUPLE;
-    if (v->tag == XS_STRUCT_VAL && v->st)
+        return VAL_TAG(v) == XS_TUPLE;
+    if (VAL_TAG(v) == XS_STRUCT_VAL && v->st)
         return strcmp(v->st->type_name, type_name) == 0;
-    if (v->tag == XS_INST && v->inst && v->inst->class_)
+    if (VAL_TAG(v) == XS_INST && v->inst && v->inst->class_)
         return strcmp(v->inst->class_->name, type_name) == 0;
-    if (v->tag == XS_ENUM_VAL && v->en)
+    if (VAL_TAG(v) == XS_ENUM_VAL && v->en)
         return strcmp(v->en->type_name, type_name) == 0;
     return 1; /* unknown type = pass */
 }
@@ -503,7 +503,7 @@ static int value_matches_typeexpr(Value *v, TypeExpr *te) {
         if (!value_matches_type(v, te->name)) return 0;
         /* check generic args for map<K,V> */
         if (te->name && strcmp(te->name, "map") == 0 && te->nargs >= 2 &&
-            v->tag == XS_MAP && v->map) {
+            VAL_TAG(v) == XS_MAP && v->map) {
             int nk = 0;
             char **keys = map_keys(v->map, &nk);
             for (int j = 0; j < nk; j++) {
@@ -529,7 +529,7 @@ static int value_matches_typeexpr(Value *v, TypeExpr *te) {
 
     case TEXPR_ARRAY:
         /* [T]: value must be array and all elements must match T */
-        if (v->tag != XS_ARRAY) return 0;
+        if (VAL_TAG(v) != XS_ARRAY) return 0;
         if (te->inner && v->arr) {
             for (int j = 0; j < v->arr->len; j++) {
                 if (!value_matches_typeexpr(v->arr->items[j], te->inner))
@@ -540,7 +540,7 @@ static int value_matches_typeexpr(Value *v, TypeExpr *te) {
 
     case TEXPR_TUPLE:
         /* (A, B, C): value must be tuple with matching element types */
-        if (v->tag != XS_TUPLE) return 0;
+        if (VAL_TAG(v) != XS_TUPLE) return 0;
         if (v->arr && te->nelems > 0) {
             if (v->arr->len != te->nelems) return 0;
             for (int j = 0; j < te->nelems; j++) {
@@ -552,11 +552,11 @@ static int value_matches_typeexpr(Value *v, TypeExpr *te) {
 
     case TEXPR_FN:
         /* fn(A,B)->R: just check it's callable */
-        return v->tag == XS_FUNC || v->tag == XS_NATIVE || v->tag == XS_CLOSURE;
+        return VAL_TAG(v) == XS_FUNC || VAL_TAG(v) == XS_NATIVE || VAL_TAG(v) == XS_CLOSURE;
 
     case TEXPR_OPTION:
         /* T?: value is null or matches T */
-        if (v->tag == XS_NULL) return 1;
+        if (VAL_TAG(v) == XS_NULL) return 1;
         return value_matches_typeexpr(v, te->inner);
 
     case TEXPR_INFER:
@@ -612,7 +612,7 @@ static const char *typeexpr_str(TypeExpr *te) {
 static const char *value_type_str(Value *v) {
     static char tbuf[256];
     if (!v) return "null";
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_INT:   return "int";
         case XS_FLOAT: return "float";
         case XS_STR:   return "str";
@@ -771,7 +771,7 @@ static void hoist_functions(Interp *i, NodeList *stmts);
 
 static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable) {
     if (!pat) return 1;
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_WILD: return 1;
     case NODE_PAT_IDENT:
         env_define(env, pat->pat_ident.name, val,
@@ -779,7 +779,7 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
         return 1;
     case NODE_PAT_LIT: return 1;
     case NODE_PAT_TUPLE: {
-        if (val->tag != XS_ARRAY && val->tag != XS_TUPLE) return 0;
+        if (VAL_TAG(val) != XS_ARRAY && VAL_TAG(val) != XS_TUPLE) return 0;
         XSArray *arr = val->arr;
         if (pat->pat_tuple.elems.len != arr->len) return 0;
         for (int j = 0; j < pat->pat_tuple.elems.len; j++) {
@@ -790,16 +790,16 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
     }
     case NODE_PAT_STRUCT: {
         XSMap *m = NULL;
-        if (val->tag == XS_MAP) m = val->map;
-        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
-        else if (val->tag == XS_ENUM_VAL) m = val->en->map_data;
-        else if (val->tag == XS_INST) m = val->inst->fields;
+        if (VAL_TAG(val) == XS_MAP) m = val->map;
+        else if (VAL_TAG(val) == XS_STRUCT_VAL) m = val->st->fields;
+        else if (VAL_TAG(val) == XS_ENUM_VAL) m = val->en->map_data;
+        else if (VAL_TAG(val) == XS_INST) m = val->inst->fields;
         if (!m) return 0;
         for (int j = 0; j < pat->pat_struct.fields.len; j++) {
             char *fname = pat->pat_struct.fields.items[j].key;
             Node *sub   = pat->pat_struct.fields.items[j].val;
             Value *fv   = map_get(m, fname);
-            if ((!fv || fv->tag == XS_NULL) &&
+            if ((!fv || VAL_TAG(fv) == XS_NULL) &&
                 j < pat->pat_struct.defaults.len &&
                 pat->pat_struct.defaults.items[j]) {
                 fv = EVAL(i, pat->pat_struct.defaults.items[j]);
@@ -825,10 +825,10 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
         return 1;
     }
     case NODE_PAT_ENUM: {
-        if (val->tag != XS_ENUM_VAL && val->tag != XS_ARRAY) return 0;
+        if (VAL_TAG(val) != XS_ENUM_VAL && VAL_TAG(val) != XS_ARRAY) return 0;
         XSArray *arr = NULL;
-        if (val->tag == XS_ENUM_VAL && val->en->arr_data) arr = val->en->arr_data;
-        else if (val->tag == XS_ARRAY) arr = val->arr;
+        if (VAL_TAG(val) == XS_ENUM_VAL && val->en->arr_data) arr = val->en->arr_data;
+        else if (VAL_TAG(val) == XS_ARRAY) arr = val->arr;
         if (!arr) {
                 return (pat->pat_enum.args.len == 0);
         }
@@ -840,7 +840,7 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
         return 1;
     }
     case NODE_PAT_SLICE: {
-        if (val->tag != XS_ARRAY && val->tag != XS_TUPLE) return 0;
+        if (VAL_TAG(val) != XS_ARRAY && VAL_TAG(val) != XS_TUPLE) return 0;
         XSArray *arr = val->arr;
         int nfixed = pat->pat_slice.elems.len;
         if (!pat->pat_slice.rest && arr->len != nfixed) return 0;
@@ -862,9 +862,9 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
         /* Accept any map-shaped value. Closed patterns (no `..`) require the
            set of keys to match exactly; open patterns allow extra keys. */
         XSMap *m = NULL;
-        if (val->tag == XS_MAP || val->tag == XS_MODULE) m = val->map;
-        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
-        else if (val->tag == XS_INST) m = val->inst->fields;
+        if (VAL_TAG(val) == XS_MAP || VAL_TAG(val) == XS_MODULE) m = val->map;
+        else if (VAL_TAG(val) == XS_STRUCT_VAL) m = val->st->fields;
+        else if (VAL_TAG(val) == XS_INST) m = val->inst->fields;
         if (!m) return 0;
         for (int j = 0; j < pat->pat_map.nfields; j++) {
             const char *k = pat->pat_map.keys[j];
@@ -881,7 +881,7 @@ static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable)
 
 static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
     if (!pat) return 1;
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_WILD: return 1;
     case NODE_PAT_IDENT:
         if (env) env_define(env, pat->pat_ident.name, val,
@@ -889,17 +889,17 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
         return 1;
     case NODE_PAT_LIT: {
         switch (pat->pat_lit.tag) {
-        case 0: return val->tag == XS_INT && val->i == pat->pat_lit.ival;
-        case 1: return val->tag == XS_FLOAT && val->f == pat->pat_lit.fval;
-        case 2: return val->tag == XS_STR && strcmp(val->s, pat->pat_lit.sval) == 0;
-        case 3: return val->tag == XS_BOOL && (int)val->i == pat->pat_lit.bval;
-        case 4: return val->tag == XS_NULL;
+        case 0: return VAL_TAG(val) == XS_INT && VAL_INT(val) == pat->pat_lit.ival;
+        case 1: return VAL_TAG(val) == XS_FLOAT && val->f == pat->pat_lit.fval;
+        case 2: return VAL_TAG(val) == XS_STR && strcmp(val->s, pat->pat_lit.sval) == 0;
+        case 3: return VAL_TAG(val) == XS_BOOL && (int)VAL_INT(val) == pat->pat_lit.bval;
+        case 4: return VAL_TAG(val) == XS_NULL;
         default: return 0;
         }
     }
     case NODE_PAT_TUPLE: {
         /* Tuple patterns ((..)) match tuples only; arrays need [..]. */
-        if (val->tag != XS_TUPLE) return 0;
+        if (VAL_TAG(val) != XS_TUPLE) return 0;
         if (val->arr->len != pat->pat_tuple.elems.len) return 0;
         for (int j = 0; j < pat->pat_tuple.elems.len; j++) {
             if (!match_pattern(i, pat->pat_tuple.elems.items[j],
@@ -913,7 +913,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
         const char *sep = strstr(path, "::");
         while (sep) { variant = sep + 2; sep = strstr(variant, "::"); }
 
-        if (val->tag == XS_ENUM_VAL) {
+        if (VAL_TAG(val) == XS_ENUM_VAL) {
             if (strcmp(val->en->variant, variant) != 0) return 0;
             XSArray *arr = val->en->arr_data;
             if (pat->pat_enum.args.len == 0) return 1;
@@ -924,18 +924,18 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
             }
             return 1;
         }
-        if (val->tag == XS_STR && strcmp(val->s, variant) == 0)
+        if (VAL_TAG(val) == XS_STR && strcmp(val->s, variant) == 0)
             return pat->pat_enum.args.len == 0;
         return 0;
     }
     case NODE_PAT_STRUCT: {
         XSMap *m = NULL;
         const char *type_name = pat->pat_struct.path;
-        if (val->tag == XS_MAP) m = val->map;
-        else if (val->tag == XS_STRUCT_VAL) {
+        if (VAL_TAG(val) == XS_MAP) m = val->map;
+        else if (VAL_TAG(val) == XS_STRUCT_VAL) {
             if (type_name && strcmp(val->st->type_name, type_name) != 0) return 0;
             m = val->st->fields;
-        } else if (val->tag == XS_ENUM_VAL) {
+        } else if (VAL_TAG(val) == XS_ENUM_VAL) {
             if (type_name) {
                 const char *variant = type_name;
                 const char *sep = strstr(type_name, "::");
@@ -943,7 +943,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
                 if (strcmp(val->en->variant, variant) != 0) return 0;
             }
             m = val->en->map_data;
-        } else if (val->tag == XS_INST) {
+        } else if (VAL_TAG(val) == XS_INST) {
             m = val->inst->fields;
         }
         if (!m) return 0;
@@ -952,7 +952,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
             Node *sub   = pat->pat_struct.fields.items[j].val;
             Value *fv   = map_get(m, fname);
             /* Apply default value if field is missing/null */
-            if ((!fv || fv->tag == XS_NULL) &&
+            if ((!fv || VAL_TAG(fv) == XS_NULL) &&
                 j < pat->pat_struct.defaults.len &&
                 pat->pat_struct.defaults.items[j]) {
                 fv = EVAL(i, pat->pat_struct.defaults.items[j]);
@@ -1005,7 +1005,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
     }
     case NODE_PAT_SLICE: {
         /* Slice patterns ([..]) match arrays only; tuples need (..). */
-        if (val->tag != XS_ARRAY) return 0;
+        if (VAL_TAG(val) != XS_ARRAY) return 0;
         XSArray *arr = val->arr;
         int nfixed = pat->pat_slice.elems.len;
         if (!pat->pat_slice.rest && arr->len != nfixed) return 0;
@@ -1042,7 +1042,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
         return ok;
     }
     case NODE_PAT_STRING_CONCAT: {
-        if (val->tag != XS_STR) return 0;
+        if (VAL_TAG(val) != XS_STR) return 0;
         const char *prefix = pat->pat_str_concat.prefix;
         size_t plen = strlen(prefix);
         if (strncmp(val->s, prefix, plen) != 0) return 0;
@@ -1052,7 +1052,7 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
         return ok;
     }
     case NODE_PAT_REGEX: {
-        if (val->tag != XS_STR || !pat->pat_regex.pattern) return 0;
+        if (VAL_TAG(val) != XS_STR || !pat->pat_regex.pattern) return 0;
         /* full-string match: run regex, check that match covers entire string */
         regex_t re;
         int rc = regcomp(&re, pat->pat_regex.pattern, REG_EXTENDED);
@@ -1067,9 +1067,9 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
     }
     case NODE_PAT_MAP: {
         XSMap *m = NULL;
-        if (val->tag == XS_MAP || val->tag == XS_MODULE) m = val->map;
-        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
-        else if (val->tag == XS_INST) m = val->inst->fields;
+        if (VAL_TAG(val) == XS_MAP || VAL_TAG(val) == XS_MODULE) m = val->map;
+        else if (VAL_TAG(val) == XS_STRUCT_VAL) m = val->st->fields;
+        else if (VAL_TAG(val) == XS_INST) m = val->inst->fields;
         if (!m) return 0;
         for (int j = 0; j < pat->pat_map.nfields; j++) {
             const char *k = pat->pat_map.keys[j];
@@ -1105,22 +1105,22 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
     if (!callee) return value_incref(XS_NULL_VAL);
 
     const char *frame_name = call_site;
-    if (!frame_name && callee->tag == XS_FUNC && callee->fn->name)
+    if (!frame_name && VAL_TAG(callee) == XS_FUNC && callee->fn->name)
         frame_name = callee->fn->name;
     TRACE_CALL(i, frame_name ? frame_name : "<call>", i->current_span.line);
     interp_push_frame(i, frame_name, i->current_span);
 
-    if (callee->tag == XS_OVERLOAD) {
+    if (VAL_TAG(callee) == XS_OVERLOAD) {
         /* dispatch overloaded function by argument count */
         XSArray *oset = callee->overload;
         Value *best = NULL;
         for (int oi = 0; oi < oset->len; oi++) {
             Value *candidate = oset->items[oi];
-            if (candidate->tag == XS_NATIVE) {
+            if (VAL_TAG(candidate) == XS_NATIVE) {
                 if (!best) best = candidate; /* native is fallback */
                 continue;
             }
-            if (candidate->tag != XS_FUNC) continue;
+            if (VAL_TAG(candidate) != XS_FUNC) continue;
             XSFunc *cfn = candidate->fn;
             int min_arity = 0, max_arity = cfn->nparams;
             int has_variadic = 0;
@@ -1146,14 +1146,14 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
         return call_value(i, best, args, argc, call_site);
     }
 
-    if (callee->tag == XS_NATIVE) {
+    if (VAL_TAG(callee) == XS_NATIVE) {
         Value *result = callee->native(i, args, argc);
         TRACE_RETURN(i, frame_name ? frame_name : "<call>", result);
         interp_pop_frame(i);
         return result ? result : value_incref(XS_NULL_VAL);
     }
 
-    if (callee->tag == XS_FUNC) {
+    if (VAL_TAG(callee) == XS_FUNC) {
         XSFunc *fn = callee->fn;
         if (fn->deprecated_msg) {
             fprintf(stderr, "xs: warning: function '%s' is deprecated: %s\n",
@@ -1197,14 +1197,14 @@ tail_call_entry: ;
                     Value *rest = xs_array_new();
                     for (int k = arg_idx; k < cur_argc; k++)
                         array_push(rest->arr, value_incref(cur_args[k]));
-                    if (param->tag == NODE_PAT_IDENT)
+                    if (VAL_TAG(param) == NODE_PAT_IDENT)
                         env_define(call_env, param->pat_ident.name, rest, 1);
                     else
                         bind_pattern(i, param, rest, call_env, 1);
                     value_decref(rest);
                     arg_idx = cur_argc;
                 } else if (arg_idx < cur_argc) {
-                    if (param->tag == NODE_PAT_IDENT) {
+                    if (VAL_TAG(param) == NODE_PAT_IDENT) {
                         env_define(call_env, param->pat_ident.name, cur_args[arg_idx], 1);
                         /* fire after_eval hooks for param binding (as NODE_LET) */
                         if (g_has_eval_hooks && g_n_after_eval > 0 && !g_in_eval_hook) {
@@ -1233,13 +1233,13 @@ tail_call_entry: ;
                     Node *def = fn->default_vals ? fn->default_vals[j] : NULL;
                     if (def) {
                         Value *dv = interp_eval(i, def);
-                        if (param->tag == NODE_PAT_IDENT)
+                        if (VAL_TAG(param) == NODE_PAT_IDENT)
                             env_define(call_env, param->pat_ident.name, dv, 1);
                         else
                             bind_pattern(i, param, dv, call_env, 1);
                         value_decref(dv);
                     } else {
-                        if (param->tag == NODE_PAT_IDENT)
+                        if (VAL_TAG(param) == NODE_PAT_IDENT)
                             env_define(call_env, param->pat_ident.name, XS_NULL_VAL, 1);
                     }
                 }
@@ -1251,9 +1251,9 @@ tail_call_entry: ;
             Value **cur_args2 = owns_args ? tc_args : args;
             int     cur_argc2 = owns_args ? tc_argc : argc;
             if (fn->nparams > 0 && cur_argc2 > 0 &&
-                fn->params[0]->tag == NODE_PAT_IDENT &&
+                VAL_TAG(fn->params[0]) == NODE_PAT_IDENT &&
                 strcmp(fn->params[0]->pat_ident.name, "self") == 0 &&
-                cur_args2[0]->tag == XS_INST &&
+                VAL_TAG(cur_args2[0]) == XS_INST &&
                 cur_args2[0]->inst->class_ &&
                 cur_args2[0]->inst->class_->nbases > 0 &&
                 cur_args2[0]->inst->class_->bases[0]) {
@@ -1412,7 +1412,7 @@ tail_call_entry: ;
                     i->cf.signal = 0;
 
                     env_decref(i->env);
-                    if (tc_callee->tag == XS_FUNC) {
+                    if (VAL_TAG(tc_callee) == XS_FUNC) {
                         fn = tc_callee->fn;
                         value_decref(tc_callee);
                         goto tail_call_entry;
@@ -1475,7 +1475,7 @@ tail_call_entry: ;
         } /* end of tail_call_entry block */
     }
 
-    if (callee->tag == XS_CLASS_VAL) {
+    if (VAL_TAG(callee) == XS_CLASS_VAL) {
         XSClass *cls = callee->cls;
         XSInst  *inst = xs_calloc(1, sizeof(XSInst));
         inst->class_  = cls; cls->refcount++;
@@ -1510,7 +1510,7 @@ tail_call_entry: ;
 
         Value *init_fn = map_get(inst->methods, "__init__");
         if (!init_fn) init_fn = map_get(inst->methods, "init");
-        if (init_fn && init_fn->tag == XS_FUNC) {
+        if (init_fn && VAL_TAG(init_fn) == XS_FUNC) {
             Value **new_args = xs_malloc((argc+1)*sizeof(Value*));
             new_args[0] = value_incref(inst_val);
             for (int j = 0; j < argc; j++) new_args[j+1] = args[j];
@@ -1523,7 +1523,7 @@ tail_call_entry: ;
         return inst_val;
     }
 
-    if (callee->tag == XS_SIGNAL) {
+    if (VAL_TAG(callee) == XS_SIGNAL) {
         XSSignal *sig = callee->signal;
         if (argc > 0) {
             value_decref(sig->value);
@@ -1546,7 +1546,7 @@ tail_call_entry: ;
         return value_incref(sig->value);
     }
 
-    if (callee->tag == XS_ACTOR && callee->actor) {
+    if (VAL_TAG(callee) == XS_ACTOR && callee->actor) {
         XSActor *src = callee->actor;
         XSActor *actor = xs_calloc(1, sizeof(XSActor));
         actor->name     = xs_strdup(src->name);
@@ -1579,10 +1579,10 @@ tail_call_entry: ;
         Value *init_fn = map_get(actor->methods, "init");
         if (!init_fn) init_fn = map_get(actor->methods, "__init__");
         Value *actor_val = xs_calloc(1, sizeof(Value));
-        actor_val->tag      = XS_ACTOR;
+        actor_val->tag = XS_ACTOR;
         actor_val->refcount = 1;
         actor_val->actor    = actor;
-        if (init_fn && init_fn->tag == XS_FUNC) {
+        if (init_fn && VAL_TAG(init_fn) == XS_FUNC) {
             Env *wrapper = env_new(init_fn->fn->closure ? init_fn->fn->closure : actor->closure);
             env_define(wrapper, "self", value_incref(actor_val), 0);
             if (actor->state) {
@@ -1618,7 +1618,7 @@ tail_call_entry: ;
 
     char *repr = value_repr(callee);
     const char *type_name = "unknown";
-    switch (callee->tag) {
+    switch (VAL_TAG(callee)) {
         case XS_INT: type_name = "int"; break;
         case XS_FLOAT: type_name = "float"; break;
         case XS_STR: type_name = "str"; break;
@@ -1643,9 +1643,9 @@ tail_call_entry: ;
 
 static Value *eval_method(Interp *i, Value *obj, const char *method,
                            Value **args, int argc) {
-    if (obj->tag == XS_INST) {
+    if (VAL_TAG(obj) == XS_INST) {
         if (strcmp(method, "is_a") == 0) {
-            if (argc >= 1 && args[0]->tag == XS_STR && obj->inst->class_) {
+            if (argc >= 1 && VAL_TAG(args[0]) == XS_STR && obj->inst->class_) {
                 int found = 0;
                 XSClass *stack[64];
                 int sp = 0;
@@ -1671,17 +1671,17 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             fn = map_get(obj->inst->class_->methods, method);
         if (fn) {
             int has_self_param = 0;
-            if (fn->tag == XS_FUNC && fn->fn->nparams > 0) {
+            if (VAL_TAG(fn) == XS_FUNC && fn->fn->nparams > 0) {
                 Node *p0 = fn->fn->params[0];
-                if (p0->tag == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
+                if (VAL_TAG(p0) == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
                     has_self_param = 1;
             }
-            if (fn->tag == XS_NATIVE) has_self_param = 1;
+            if (VAL_TAG(fn) == XS_NATIVE) has_self_param = 1;
             Value *r;
             if (has_self_param) {
                 Value *real_self = obj;
                 Value *super_self = map_get(obj->inst->fields, "__super_self__");
-                if (super_self && super_self->tag == XS_INST)
+                if (super_self && VAL_TAG(super_self) == XS_INST)
                     real_self = super_self;
                 Value **new_args = xs_malloc((argc+1)*sizeof(Value*));
                 new_args[0] = value_incref(real_self);
@@ -1692,7 +1692,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             } else {
                 Env *saved = i->env;
                 env_incref(saved);
-                Env *wrapper = env_new(fn->tag==XS_FUNC ? fn->fn->closure : saved);
+                Env *wrapper = env_new(VAL_TAG(fn)==XS_FUNC ? fn->fn->closure : saved);
                 env_define(wrapper, "self", obj, 1);
                 if (obj->inst && obj->inst->fields) {
                     int nk = 0; char **ks = map_keys(obj->inst->fields, &nk);
@@ -1704,13 +1704,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     free(ks);
                 }
                 Env *orig_closure = NULL;
-                if (fn->tag == XS_FUNC) {
+                if (VAL_TAG(fn) == XS_FUNC) {
                     orig_closure = fn->fn->closure;
                     env_incref(wrapper);
                     fn->fn->closure = wrapper;
                 }
                 r = call_value(i, fn, args, argc, method);
-                if (fn->tag == XS_FUNC) {
+                if (VAL_TAG(fn) == XS_FUNC) {
                     env_decref(fn->fn->closure);
                     fn->fn->closure = orig_closure;
                 }
@@ -1733,7 +1733,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (fv) return call_value(i, fv, args, argc, method);
     }
 
-    if (obj->tag == XS_ACTOR && obj->actor) {
+    if (VAL_TAG(obj) == XS_ACTOR && obj->actor) {
         XSActor *actor = obj->actor;
         if (strcmp(method, "send") == 0 && argc >= 1) {
             if (actor->handle_fn) {
@@ -1772,7 +1772,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         Value *mfn = map_get(actor->methods, method);
         if (mfn) {
-            Env *wrapper = env_new(mfn->tag == XS_FUNC ? mfn->fn->closure : actor->closure);
+            Env *wrapper = env_new(VAL_TAG(mfn) == XS_FUNC ? mfn->fn->closure : actor->closure);
             env_define(wrapper, "self", value_incref(obj), 0);
             if (actor->state) {
                 int nk = 0; char **ks = map_keys(actor->state, &nk);
@@ -1784,13 +1784,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 free(ks);
             }
             Env *orig_closure = NULL;
-            if (mfn->tag == XS_FUNC) {
+            if (VAL_TAG(mfn) == XS_FUNC) {
                 orig_closure = mfn->fn->closure;
                 env_incref(wrapper);
                 mfn->fn->closure = wrapper;
             }
             Value *r = call_value(i, mfn, args, argc, method);
-            if (mfn->tag == XS_FUNC) {
+            if (VAL_TAG(mfn) == XS_FUNC) {
                 env_decref(mfn->fn->closure);
                 mfn->fn->closure = orig_closure;
             }
@@ -1814,7 +1814,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     }
 
     // --- string methods
-    if (obj->tag == XS_STR) {
+    if (VAL_TAG(obj) == XS_STR) {
         const char *s = obj->s;
         int slen = (int)strlen(s);
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) return xs_int(slen);
@@ -1835,25 +1835,25 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return xs_str_n(s+start, end-start+1);
         }
         if (strcmp(method, "starts_with") == 0 || strcmp(method, "startswith") == 0) {
-            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
             return strncmp(s, args[0]->s, strlen(args[0]->s)) == 0 ?
                    value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "ends_with") == 0 || strcmp(method, "endswith") == 0) {
-            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
             int plen = (int)strlen(args[0]->s);
             if (plen > slen) return value_incref(XS_FALSE_VAL);
             return strcmp(s + slen - plen, args[0]->s) == 0 ?
                    value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "contains") == 0 || strcmp(method, "includes") == 0) {
-            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
             return strstr(s, args[0]->s) ?
                    value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "split") == 0) {
             Value *arr = xs_array_new();
-            const char *sep = (argc > 0 && args[0]->tag == XS_STR) ? args[0]->s : " ";
+            const char *sep = (argc > 0 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : " ";
             int seplen = (int)strlen(sep);
             const char *cur = s;
             if (seplen == 0) {
@@ -1871,12 +1871,12 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         if (strcmp(method, "replace") == 0) {
             if (argc < 2) return value_incref(obj);
-            const char *from = (args[0]->tag==XS_STR)?args[0]->s:"";
-            const char *to   = (args[1]->tag==XS_STR)?args[1]->s:"";
+            const char *from = (VAL_TAG(args[0])==XS_STR)?args[0]->s:"";
+            const char *to   = (VAL_TAG(args[1])==XS_STR)?args[1]->s:"";
             int flen=(int)strlen(from), tlen=(int)strlen(to);
             if (flen == 0) return value_incref(obj);
             int max_replace = -1; /* -1 means replace all */
-            if (argc >= 3 && args[2]->tag == XS_INT) max_replace = (int)args[2]->i;
+            if (argc >= 3 && VAL_TAG(args[2]) == XS_INT) max_replace = (int)VAL_INT(args[2]);
             /* count occurrences (up to max_replace if set) */
             int count=0; const char *p=s;
             while ((p=strstr(p,from))) { count++; p+=flen; if (max_replace>=0 && count>=max_replace) break; }
@@ -1914,7 +1914,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return arr;
         }
         if (strcmp(method, "parse_int") == 0 || strcmp(method, "parse") == 0) {
-            int base = (argc > 0 && args[0]->tag == XS_INT) ? (int)args[0]->i : 10;
+            int base = (argc > 0 && VAL_TAG(args[0]) == XS_INT) ? (int)VAL_INT(args[0]) : 10;
             char *endptr = NULL;
             long long val = strtoll(s, &endptr, base);
             if (endptr == s) return value_incref(XS_NULL_VAL);
@@ -1925,7 +1925,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return slen==0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "repeat") == 0) {
-            int n2 = (argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int n2 = (argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (n2 < 0) n2 = 0;
             if (n2 > 0 && slen > (int)(INT_MAX - 1) / n2) return xs_str("");
             char *r = xs_malloc(slen*n2+1); int pos = 0;
@@ -1934,7 +1934,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             Value *v=xs_str(r); free(r); return v;
         }
         if (strcmp(method, "join") == 0) {
-            if (argc<1||args[0]->tag!=XS_ARRAY) return value_incref(obj);
+            if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return value_incref(obj);
             /* s.join(arr) → join arr elements with sep=s */
             XSArray *arr2 = args[0]->arr;
             int total=0;
@@ -1954,8 +1954,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         /* substr/slice: str.slice(start, end) or str[i..j] */
         if (strcmp(method, "slice") == 0 || strcmp(method, "substr") == 0 || strcmp(method, "substring") == 0) {
             int start2=0, end2=slen;
-            if (argc>0&&args[0]->tag==XS_INT) start2=(int)args[0]->i;
-            if (argc>1&&args[1]->tag==XS_INT) end2=(int)args[1]->i;
+            if (argc>0&&VAL_TAG(args[0])==XS_INT) start2=(int)VAL_INT(args[0]);
+            if (argc>1&&VAL_TAG(args[1])==XS_INT) end2=(int)VAL_INT(args[1]);
             if (start2<0) start2=slen+start2;
             if (end2<0)   end2=slen+end2;
             if (start2<0) start2=0;
@@ -1963,7 +1963,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return (start2>=end2)?xs_str(""):xs_str_n(s+start2,end2-start2);
         }
         if (strcmp(method, "find") == 0 || strcmp(method, "index_of") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return xs_int(-1);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_int(-1);
             const char *pos=strstr(s,args[0]->s);
             return xs_int(pos?pos-s:-1);
         }
@@ -1996,7 +1996,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* count(substr) */
         if (strcmp(method, "count") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return xs_int(0);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_int(0);
             const char *sub=args[0]->s; int sublen=(int)strlen(sub);
             if (sublen==0) return xs_int(0);
             int cnt=0; const char *p=s;
@@ -2021,8 +2021,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* center(width, ch) */
         if (strcmp(method, "center") == 0) {
-            int width=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:slen;
-            char ch=(argc>1&&args[1]->tag==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
+            int width=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
+            char ch=(argc>1&&VAL_TAG(args[1])==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
             if (width<=slen) return value_incref(obj);
             int total=width-slen; int left=total/2; int right=total-left;
             char *r=xs_malloc(width+1);
@@ -2034,8 +2034,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* pad_left / lpad */
         if (strcmp(method, "pad_left") == 0 || strcmp(method, "lpad") == 0 || strcmp(method, "pad_start") == 0) {
-            int width=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:slen;
-            char ch=(argc>1&&args[1]->tag==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
+            int width=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
+            char ch=(argc>1&&VAL_TAG(args[1])==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
             if (width<=slen) return value_incref(obj);
             int pad=width-slen;
             char *r=xs_malloc(width+1);
@@ -2045,8 +2045,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* pad_right / rpad */
         if (strcmp(method, "pad_right") == 0 || strcmp(method, "rpad") == 0 || strcmp(method, "pad_end") == 0) {
-            int width=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:slen;
-            char ch=(argc>1&&args[1]->tag==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
+            int width=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
+            char ch=(argc>1&&VAL_TAG(args[1])==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
             if (width<=slen) return value_incref(obj);
             int pad=width-slen;
             char *r=xs_malloc(width+1);
@@ -2057,14 +2057,14 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* remove_prefix */
         if (strcmp(method, "remove_prefix") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return value_incref(obj);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(obj);
             int plen=(int)strlen(args[0]->s);
             if (plen<=slen && strncmp(s,args[0]->s,plen)==0) return xs_str(s+plen);
             return value_incref(obj);
         }
         /* remove_suffix */
         if (strcmp(method, "remove_suffix") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return value_incref(obj);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(obj);
             int plen=(int)strlen(args[0]->s);
             if (plen<=slen && strcmp(s+slen-plen,args[0]->s)==0) return xs_str_n(s,slen-plen);
             return value_incref(obj);
@@ -2126,7 +2126,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* char_at */
         if (strcmp(method, "char_at") == 0) {
-            int idx=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int idx=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (idx<0) idx=slen+idx;
             if (idx<0||idx>=slen) return value_incref(XS_NULL_VAL);
             return xs_str_n(s+idx,1);
@@ -2139,8 +2139,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* truncate(max_len, suffix) */
         if (strcmp(method, "truncate") == 0) {
-            int maxlen=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:slen;
-            const char *suf=(argc>1&&args[1]->tag==XS_STR)?args[1]->s:"...";
+            int maxlen=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
+            const char *suf=(argc>1&&VAL_TAG(args[1])==XS_STR)?args[1]->s:"...";
             if (slen<=maxlen) return value_incref(obj);
             int suflen=(int)strlen(suf);
             int cutlen=maxlen-suflen; if (cutlen<0) cutlen=0;
@@ -2150,7 +2150,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* rfind */
         if (strcmp(method, "rfind") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return xs_int(-1);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_int(-1);
             int sublen=(int)strlen(args[0]->s);
             int last=-1;
             const char *p=s;
@@ -2159,7 +2159,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* split_at */
         if (strcmp(method, "split_at") == 0) {
-            int idx=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int idx=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (idx<0) idx=slen+idx;
             if (idx<0) idx=0;
             if (idx>slen) idx=slen;
@@ -2207,27 +2207,27 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* from_chars: "".from_chars([...]): build string from char array */
         if (strcmp(method, "from_chars") == 0) {
-            if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_str("");
+            if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_str("");
             XSArray *arr2 = args[0]->arr;
             int total = 0;
             for (int j = 0; j < arr2->len; j++) {
-                if (arr2->items[j]->tag == XS_STR) total += (int)strlen(arr2->items[j]->s);
+                if (VAL_TAG(arr2->items[j]) == XS_STR) total += (int)strlen(arr2->items[j]->s);
                 else total += 1;
             }
             char *res = xs_malloc(total + 1); int ri = 0;
             for (int j = 0; j < arr2->len; j++) {
-                if (arr2->items[j]->tag == XS_STR) {
+                if (VAL_TAG(arr2->items[j]) == XS_STR) {
                     int l = (int)strlen(arr2->items[j]->s);
                     memcpy(res + ri, arr2->items[j]->s, l); ri += l;
-                } else if (arr2->items[j]->tag == XS_INT) {
-                    res[ri++] = (char)arr2->items[j]->i;
+                } else if (VAL_TAG(arr2->items[j]) == XS_INT) {
+                    res[ri++] = (char)VAL_INT(arr2->items[j]);
                 }
             }
             res[ri] = '\0';
             Value *v = xs_str(res); free(res); return v;
         }
         if (strcmp(method, "is_a") == 0) {
-            if (argc >= 1 && args[0]->tag == XS_STR) {
+            if (argc >= 1 && VAL_TAG(args[0]) == XS_STR) {
                 return xs_bool(strcmp(args[0]->s, "str") == 0 ||
                                strcmp(args[0]->s, "String") == 0);
             }
@@ -2236,7 +2236,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     }
 
     // --- array methods
-    if (obj->tag == XS_ARRAY || obj->tag == XS_TUPLE) {
+    if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
         XSArray *arr = obj->arr;
         if (strcmp(method, "len") == 0) return xs_int(arr->len);
         if (strcmp(method, "push") == 0 || strcmp(method, "append") == 0) {
@@ -2355,7 +2355,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     if (cmp_fn) {
                         Value *ca[2] = {arr->items[b2], key};
                         Value *r = call_value(i, cmp_fn, ca, 2, "sort");
-                        cmp = (r->tag==XS_INT)?(int)r->i:0;
+                        cmp = (VAL_TAG(r)==XS_INT)?(int)VAL_INT(r):0;
                         value_decref(r);
                     } else {
                         cmp = value_cmp(arr->items[b2], key);
@@ -2415,7 +2415,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return copy;
         }
         if (strcmp(method, "join") == 0) {
-            const char *sep = (argc>0&&args[0]->tag==XS_STR)?args[0]->s:"";
+            const char *sep = (argc>0&&VAL_TAG(args[0])==XS_STR)?args[0]->s:"";
             int seplen=(int)strlen(sep), total=0;
             char **strs = xs_malloc(arr->len*sizeof(char*));
             for (int j=0;j<arr->len;j++) {
@@ -2433,8 +2433,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         if (strcmp(method, "slice") == 0) {
             int start2=0, end2=arr->len;
-            if (argc>0&&args[0]->tag==XS_INT) start2=(int)args[0]->i;
-            if (argc>1&&args[1]->tag==XS_INT) end2=(int)args[1]->i;
+            if (argc>0&&VAL_TAG(args[0])==XS_INT) start2=(int)VAL_INT(args[0]);
+            if (argc>1&&VAL_TAG(args[1])==XS_INT) end2=(int)VAL_INT(args[1]);
             if (start2<0) start2=arr->len+start2;
             if (end2<0)   end2=arr->len+end2;
             if (start2<0) start2=0;
@@ -2452,7 +2452,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (strcmp(method, "flatten") == 0 || strcmp(method, "flat") == 0) {
             Value *res=xs_array_new();
             for (int j=0;j<arr->len;j++) {
-                if (arr->items[j]->tag==XS_ARRAY) {
+                if (VAL_TAG(arr->items[j])==XS_ARRAY) {
                     XSArray *inner=arr->items[j]->arr;
                     for (int k=0;k<inner->len;k++) array_push(res->arr, value_incref(inner->items[k]));
                 } else {
@@ -2462,7 +2462,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return res;
         }
         if (strcmp(method, "zip") == 0) {
-            if (argc<1||args[0]->tag!=XS_ARRAY) return value_incref(obj);
+            if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return value_incref(obj);
             XSArray *other=args[0]->arr;
             int n2=arr->len<other->len?arr->len:other->len;
             Value *res=xs_array_new();
@@ -2476,8 +2476,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         if (strcmp(method, "enumerate") == 0) {
             int64_t start_idx = 0;
-            if (argc >= 1 && args[0]->tag == XS_INT) start_idx = args[0]->i;
-            else if (argc >= 1 && args[0]->tag == XS_FLOAT) start_idx = (int64_t)args[0]->f;
+            if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) start_idx = VAL_INT(args[0]);
+            else if (argc >= 1 && VAL_TAG(args[0]) == XS_FLOAT) start_idx = (int64_t)args[0]->f;
             Value *res=xs_array_new();
             for (int j=0;j<arr->len;j++) {
                 Value *tup=xs_tuple_new();
@@ -2490,8 +2490,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (strcmp(method, "sum") == 0) {
             int64_t si=0; double sf=0; int is_f=0;
             for (int j=0;j<arr->len;j++) {
-                if (arr->items[j]->tag==XS_FLOAT){is_f=1;sf+=arr->items[j]->f;}
-                else if(arr->items[j]->tag==XS_INT) si+=arr->items[j]->i;
+                if (VAL_TAG(arr->items[j])==XS_FLOAT){is_f=1;sf+=arr->items[j]->f;}
+                else if(VAL_TAG(arr->items[j])==XS_INT) si+=VAL_INT(arr->items[j]);
             }
             return is_f?xs_float(sf+(double)si):xs_int(si);
         }
@@ -2508,8 +2508,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return value_incref(m);
         }
         if (strcmp(method, "remove") == 0) {
-            if (argc<1||args[0]->tag!=XS_INT) return value_incref(XS_NULL_VAL);
-            int idx=(int)args[0]->i;
+            if (argc<1||VAL_TAG(args[0])!=XS_INT) return value_incref(XS_NULL_VAL);
+            int idx=(int)VAL_INT(args[0]);
             if (idx<0) idx=arr->len+idx;
             if (idx<0||idx>=arr->len) return value_incref(XS_NULL_VAL);
             Value *v=arr->items[idx];
@@ -2519,7 +2519,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         if (strcmp(method, "insert") == 0) {
             if (argc<2) return value_incref(XS_NULL_VAL);
-            int idx=(int)((args[0]->tag==XS_INT)?args[0]->i:0);
+            int idx=(int)((VAL_TAG(args[0])==XS_INT)?VAL_INT(args[0]):0);
             if (idx<0) idx=arr->len+idx;
             if (idx<0) idx=0;
             if (idx>arr->len) idx=arr->len;
@@ -2538,7 +2538,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             Value *res=xs_array_new();
             for (int j=0;j<arr->len;j++) array_push(res->arr, value_incref(arr->items[j]));
             for (int j=0;j<argc;j++) {
-                if (args[j]->tag==XS_ARRAY) {
+                if (VAL_TAG(args[j])==XS_ARRAY) {
                     XSArray *other=args[j]->arr;
                     for (int k=0;k<other->len;k++) array_push(res->arr, value_incref(other->items[k]));
                 }
@@ -2567,7 +2567,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             int64_t cnt=0;
             for (int j=0;j<arr->len;j++) {
                 Value *a[1]={arr->items[j]};
-                if (args[0]->tag==XS_FUNC||args[0]->tag==XS_NATIVE) {
+                if (VAL_TAG(args[0])==XS_FUNC||VAL_TAG(args[0])==XS_NATIVE) {
                     Value *r=call_value(i, args[0], a, 1, "count");
                     int ok=value_truthy(r); value_decref(r);
                     if (!i->cf.signal && ok) cnt++;
@@ -2580,7 +2580,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* take(n) */
         if (strcmp(method, "take") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (n2>arr->len) n2=arr->len;
             Value *res=xs_array_new();
             for (int j=0;j<n2;j++) array_push(res->arr, value_incref(arr->items[j]));
@@ -2588,7 +2588,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* skip(n) / drop(n) */
         if (strcmp(method, "skip") == 0 || strcmp(method, "drop") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (n2<0) n2=0;
             if (n2>arr->len) n2=arr->len;
             Value *res=xs_array_new();
@@ -2597,7 +2597,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* chunk(n) */
         if (strcmp(method, "chunk") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:1;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):1;
             if (n2<1) n2=1;
             Value *res=xs_array_new();
             for (int j=0;j<arr->len;j+=n2) {
@@ -2648,7 +2648,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* window(n) */
         if (strcmp(method, "window") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:1;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):1;
             if (n2<1) n2=1;
             Value *res=xs_array_new();
             for (int j=0;j+n2<=arr->len;j++) {
@@ -2666,8 +2666,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 Value *a[1]={arr->items[j]};
                 Value *r=call_value(i, args[0], a, 1, "sum_by");
                 if (!i->cf.signal) {
-                    if (r->tag==XS_FLOAT){is_f=1;sf+=r->f;}
-                    else if(r->tag==XS_INT) si+=r->i;
+                    if (VAL_TAG(r)==XS_FLOAT){is_f=1;sf+=r->f;}
+                    else if(VAL_TAG(r)==XS_INT) si+=VAL_INT(r);
                 }
                 value_decref(r);
                 if (i->cf.signal) break;
@@ -2708,7 +2708,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* zip_with(other, fn) */
         if (strcmp(method, "zip_with") == 0) {
-            if (argc<2||args[0]->tag!=XS_ARRAY) return value_incref(XS_NULL_VAL);
+            if (argc<2||VAL_TAG(args[0])!=XS_ARRAY) return value_incref(XS_NULL_VAL);
             XSArray *other=args[0]->arr;
             int n2=arr->len<other->len?arr->len:other->len;
             Value *res=xs_array_new();
@@ -2731,7 +2731,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* rotate(n) */
         if (strcmp(method, "rotate") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
             if (arr->len==0) return xs_array_new();
             n2=((n2%arr->len)+arr->len)%arr->len;
             Value *res=xs_array_new();
@@ -2791,8 +2791,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             if (arr->len==0) return xs_int(1);
             int64_t pi=1; double pf=1.0; int is_f=0;
             for (int j=0;j<arr->len;j++) {
-                if (arr->items[j]->tag==XS_FLOAT){is_f=1;pf*=arr->items[j]->f;}
-                else if(arr->items[j]->tag==XS_INT) pi*=arr->items[j]->i;
+                if (VAL_TAG(arr->items[j])==XS_FLOAT){is_f=1;pf*=arr->items[j]->f;}
+                else if(VAL_TAG(arr->items[j])==XS_INT) pi*=VAL_INT(arr->items[j]);
             }
             return is_f?xs_float(pf*(double)pi):xs_int(pi);
         }
@@ -2824,7 +2824,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         /* sample(n) */
         if (strcmp(method, "sample") == 0) {
-            int n2=(argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:1;
+            int n2=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):1;
             if (n2>arr->len) n2=arr->len;
             /* build index array and partial Fisher-Yates */
             int *idx=xs_malloc(arr->len*sizeof(int));
@@ -2846,7 +2846,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 Value *a[1]={arr->items[j]};
                 Value *r=call_value(i, args[0], a, 1, "flat_map");
                 if (!i->cf.signal) {
-                    if (r->tag==XS_ARRAY) {
+                    if (VAL_TAG(r)==XS_ARRAY) {
                         for (int k=0;k<r->arr->len;k++) array_push(res->arr, value_incref(r->arr->items[k]));
                         value_decref(r);
                     } else {
@@ -2874,7 +2874,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             for (int j=0;j<arr->len;j++) {
                 char *ks=value_str(arr->items[j]);
                 Value *cur=map_get(res->map, ks);
-                int64_t cnt2=cur&&cur->tag==XS_INT?cur->i:0;
+                int64_t cnt2=cur&&VAL_TAG(cur)==XS_INT?VAL_INT(cur):0;
                 Value *nv=xs_int(cnt2+1);
                 map_set(res->map, ks, nv);
                 value_decref(nv); free(ks);
@@ -2887,7 +2887,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     }
 
     // --- map methods
-    if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+    if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
         XSMap *m = obj->map;
         /* Generator: .next() drives the worker via the resume channel
            and reads one value. End-of-stream is signaled by a
@@ -2896,13 +2896,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             Value *gtype = map_get(m, "__type");
             Value *ych   = map_get(m, "_yield_chan");
             Value *rch   = map_get(m, "_resume_chan");
-            if (gtype && gtype->tag == XS_STR &&
+            if (gtype && VAL_TAG(gtype) == XS_STR &&
                 strcmp(gtype->s, "generator") == 0 &&
                 ych && rch) {
                 if (strcmp(method, "next") == 0) {
                     Value *done = map_get(m, "_done");
                     Value *result = xs_map_new();
-                    if (done && done->tag == XS_BOOL && done->i) {
+                    if (done && VAL_TAG(done) == XS_BOOL && VAL_INT(done)) {
                         Value *nv = value_incref(XS_NULL_VAL);
                         map_set(result->map, "value", nv); value_decref(nv);
                         Value *dv = value_incref(XS_TRUE_VAL);
@@ -2913,9 +2913,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     xs_chan_send(rch, go); value_decref(go);
                     Value *v = xs_chan_recv(ych, i);
                     int eos = 0;
-                    if (v && v->tag == XS_MAP) {
+                    if (v && VAL_TAG(v) == XS_MAP) {
                         Value *e = map_get(v->map, "_gen_eos");
-                        if (e && e->tag == XS_BOOL && e->i) eos = 1;
+                        if (e && VAL_TAG(e) == XS_BOOL && VAL_INT(e)) eos = 1;
                     }
                     if (eos) {
                         Value *dv = value_incref(XS_TRUE_VAL);
@@ -2941,7 +2941,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
            as receiver (the bound natives don't get self prepended). */
         {
             Value *cid = map_get(m, "_chan_id");
-            if (cid && cid->tag == XS_INT) {
+            if (cid && VAL_TAG(cid) == XS_INT) {
                 if (strcmp(method,"send")==0) {
                     if (argc < 1) return value_incref(XS_NULL_VAL);
                     return xs_chan_send(obj, args[0]);
@@ -2963,13 +2963,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         /* Generator iterator protocol */
         {
             Value *ct = map_get(m, "__type");
-            if (ct && ct->tag == XS_STR && strcmp(ct->s, "generator") == 0) {
+            if (ct && VAL_TAG(ct) == XS_STR && strcmp(ct->s, "generator") == 0) {
                 if (strcmp(method, "next") == 0) {
                     Value *yields = map_get(m, "_yields");
                     Value *idx_v  = map_get(m, "_index");
-                    int idx = idx_v && idx_v->tag == XS_INT ? (int)idx_v->i : 0;
+                    int idx = idx_v && VAL_TAG(idx_v) == XS_INT ? (int)VAL_INT(idx_v) : 0;
                     Value *result = xs_map_new();
-                    if (yields && yields->tag == XS_ARRAY && idx < yields->arr->len) {
+                    if (yields && VAL_TAG(yields) == XS_ARRAY && idx < yields->arr->len) {
                         map_set(result->map, "value", value_incref(yields->arr->items[idx]));
                         Value *dv = value_incref(XS_FALSE_VAL);
                         map_set(result->map, "done", dv); value_decref(dv);
@@ -2990,12 +2990,12 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
          * (e.g. {get: fn, set: fn} state accessor objects) */
         {
             Value *fn = map_get(m, method);
-            if (fn && fn->tag == XS_FUNC) {
+            if (fn && VAL_TAG(fn) == XS_FUNC) {
                 return call_value(i, fn, args, argc, method);
             }
             /* for native fns on maps that have _hook_idx (hook handles),
                prepend the map as self so the native can access fields */
-            if (fn && fn->tag == XS_NATIVE) {
+            if (fn && VAL_TAG(fn) == XS_NATIVE) {
                 if (map_has(m, "_hook_idx")) {
                     Value **new_args = xs_malloc((argc + 1) * sizeof(Value*));
                     new_args[0] = obj;
@@ -3011,7 +3011,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if ((strcmp(method,"elapsed")==0||strcmp(method,"elapsed_ms")==0) &&
             map_has(m,"_start")) {
             Value *sv = map_get(m, "_start");
-            double start = sv ? (sv->tag==XS_FLOAT ? sv->f : (double)sv->i) : 0.0;
+            double start = sv ? (VAL_TAG(sv)==XS_FLOAT ? sv->f : (double)VAL_INT(sv)) : 0.0;
             struct timespec ts2; clock_gettime(CLOCK_REALTIME, &ts2);
             double now2 = (double)ts2.tv_sec + (double)ts2.tv_nsec/1e9;
             double elapsed = now2 - start;
@@ -3028,7 +3028,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         /* Collections early dispatch (must be before generic len/is_empty/get) */
         {
             Value *ct = map_get(m, "_type");
-            if (ct && ct->tag == XS_STR) {
+            if (ct && VAL_TAG(ct) == XS_STR) {
                 /* All collection types: route to full dispatch for any method */
                 if (strcmp(ct->s,"Stack")==0||strcmp(ct->s,"PriorityQueue")==0||
                     strcmp(ct->s,"Deque")==0||strcmp(ct->s,"Set")==0||
@@ -3046,7 +3046,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         map_set(m,"_val",value_incref(args[0]));
                         /* call subscribers */
                         Value *subs=map_get(m,"_subs");
-                        if (subs&&subs->tag==XS_ARRAY) {
+                        if (subs&&VAL_TAG(subs)==XS_ARRAY) {
                             for (int si=0;si<subs->arr->len;si++)
                                 { Value *r=call_value(i, subs->arr->items[si], args, 1, "signal_sub"); if(r) value_decref(r); }
                         }
@@ -3055,7 +3055,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     if (strcmp(method,"subscribe")==0) {
                         if (argc<1) return value_incref(XS_NULL_VAL);
                         Value *subs=map_get(m,"_subs");
-                        if (subs&&subs->tag==XS_ARRAY)
+                        if (subs&&VAL_TAG(subs)==XS_ARRAY)
                             array_push(subs->arr, value_incref(args[0]));
                         return value_incref(XS_NULL_VAL);
                     }
@@ -3125,22 +3125,22 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
         if (strcmp(method, "has") == 0 || strcmp(method, "contains_key") == 0 ||
             strcmp(method, "has_key") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
             return map_has(m,args[0]->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "get") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_NULL_VAL);
             Value *v=map_get(m,args[0]->s);
             if (v) return value_incref(v);
             return argc>1?value_incref(args[1]):value_incref(XS_NULL_VAL);
         }
         if (strcmp(method, "set") == 0 || strcmp(method, "insert") == 0) {
-            if (argc<2||args[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+            if (argc<2||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_NULL_VAL);
             map_set(m, args[0]->s, value_incref(args[1]));
             return value_incref(XS_NULL_VAL);
         }
         if (strcmp(method, "remove") == 0 || strcmp(method, "delete") == 0) {
-            if (argc<1||args[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+            if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_NULL_VAL);
             map_del(m, args[0]->s);
             return value_incref(XS_NULL_VAL);
         }
@@ -3207,7 +3207,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 free(ks[j]);
             }
             free(ks);
-            if (argc>0 && (args[0]->tag==XS_MAP||args[0]->tag==XS_MODULE)) {
+            if (argc>0 && (VAL_TAG(args[0])==XS_MAP||VAL_TAG(args[0])==XS_MODULE)) {
                 int nk2=0; char **ks2=map_keys(args[0]->map,&nk2);
                 for (int j=0;j<nk2;j++) {
                     Value *v=map_get(args[0]->map,ks2[j]);
@@ -3222,11 +3222,11 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         collections_full_dispatch:;
         {
             Value *type_val = map_get(m, "_type");
-            if (type_val && type_val->tag == XS_STR) {
+            if (type_val && VAL_TAG(type_val) == XS_STR) {
                 const char *ctype = type_val->s;
                 Value *data = map_get(m, "_data");
                 /* Stack */
-                if (strcmp(ctype, "Stack") == 0 && data && data->tag == XS_ARRAY) {
+                if (strcmp(ctype, "Stack") == 0 && data && VAL_TAG(data) == XS_ARRAY) {
                     XSArray *arr = data->arr;
                     if (strcmp(method, "push") == 0) {
                         if (argc >= 1) array_push(arr, value_incref(args[0]));
@@ -3259,7 +3259,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     }
                 }
                 /* Deque */
-                if (strcmp(ctype, "Deque") == 0 && data && data->tag == XS_ARRAY) {
+                if (strcmp(ctype, "Deque") == 0 && data && VAL_TAG(data) == XS_ARRAY) {
                     XSArray *arr = data->arr;
                     if (strcmp(method, "push_back") == 0) {
                         if (argc >= 1) array_push(arr, value_incref(args[0]));
@@ -3309,7 +3309,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 /* Set */
                 if (strcmp(ctype, "Set") == 0) {
                     Value *sdata = map_get(m, "_data");
-                    if (sdata && sdata->tag == XS_MAP) {
+                    if (sdata && VAL_TAG(sdata) == XS_MAP) {
                         XSMap *sd = sdata->map;
                         if (strcmp(method, "add") == 0) {
                             if (argc >= 1) {
@@ -3359,9 +3359,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                                 free(ks[j]);
                             }
                             free(ks);
-                            if (argc >= 1 && args[0]->tag == XS_MAP) {
+                            if (argc >= 1 && VAL_TAG(args[0]) == XS_MAP) {
                                 Value *odata = map_get(args[0]->map, "_data");
-                                if (odata && odata->tag == XS_MAP) {
+                                if (odata && VAL_TAG(odata) == XS_MAP) {
                                     int nk2 = 0; char **ks2 = map_keys(odata->map, &nk2);
                                     for (int j = 0; j < nk2; j++) {
                                         Value *tv = value_incref(XS_TRUE_VAL);
@@ -3377,9 +3377,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             Value *ns = xs_map_new();
                             Value *nt = xs_str("Set"); map_set(ns->map, "_type", nt); value_decref(nt);
                             Value *nd = xs_map_new(); map_set(ns->map, "_data", nd); value_decref(nd);
-                            if (argc >= 1 && args[0]->tag == XS_MAP) {
+                            if (argc >= 1 && VAL_TAG(args[0]) == XS_MAP) {
                                 Value *odata = map_get(args[0]->map, "_data");
-                                if (odata && odata->tag == XS_MAP) {
+                                if (odata && VAL_TAG(odata) == XS_MAP) {
                                     int nk = 0; char **ks = map_keys(sd, &nk);
                                     for (int j = 0; j < nk; j++) {
                                         if (map_has(odata->map, ks[j])) {
@@ -3398,9 +3398,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             Value *nt = xs_str("Set"); map_set(ns->map, "_type", nt); value_decref(nt);
                             Value *nd = xs_map_new(); map_set(ns->map, "_data", nd); value_decref(nd);
                             int nk = 0; char **ks = map_keys(sd, &nk);
-                            if (argc >= 1 && args[0]->tag == XS_MAP) {
+                            if (argc >= 1 && VAL_TAG(args[0]) == XS_MAP) {
                                 Value *odata = map_get(args[0]->map, "_data");
-                                if (odata && odata->tag == XS_MAP) {
+                                if (odata && VAL_TAG(odata) == XS_MAP) {
                                     for (int j = 0; j < nk; j++) {
                                         if (!map_has(odata->map, ks[j])) {
                                             Value *tv = value_incref(XS_TRUE_VAL);
@@ -3431,11 +3431,11 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 if (strcmp(ctype, "OrderedMap") == 0) {
                     Value *om_keys = map_get(m, "_keys");
                     Value *om_data = map_get(m, "_data");
-                    if (om_keys && om_keys->tag == XS_ARRAY && om_data && om_data->tag == XS_MAP) {
+                    if (om_keys && VAL_TAG(om_keys) == XS_ARRAY && om_data && VAL_TAG(om_data) == XS_MAP) {
                         XSArray *ka = om_keys->arr;
                         XSMap *dm = om_data->map;
                         if (strcmp(method, "set") == 0) {
-                            if (argc < 2 || args[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+                            if (argc < 2 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_NULL_VAL);
                             const char *key = args[0]->s;
                             if (!map_has(dm, key))
                                 array_push(ka, value_incref(args[0]));
@@ -3443,17 +3443,17 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             return value_incref(XS_NULL_VAL);
                         }
                         if (strcmp(method, "get") == 0) {
-                            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+                            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_NULL_VAL);
                             Value *v = map_get(dm, args[0]->s);
                             if (v) return value_incref(v);
                             return argc > 1 ? value_incref(args[1]) : value_incref(XS_NULL_VAL);
                         }
                         if (strcmp(method, "delete") == 0) {
-                            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+                            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_NULL_VAL);
                             const char *key = args[0]->s;
                             map_del(dm, key);
                             for (int j = 0; j < ka->len; j++) {
-                                if (ka->items[j]->tag == XS_STR && strcmp(ka->items[j]->s, key) == 0) {
+                                if (VAL_TAG(ka->items[j]) == XS_STR && strcmp(ka->items[j]->s, key) == 0) {
                                     value_decref(ka->items[j]);
                                     for (int k = j; k < ka->len - 1; k++)
                                         ka->items[k] = ka->items[k+1];
@@ -3464,7 +3464,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             return value_incref(XS_NULL_VAL);
                         }
                         if (strcmp(method, "has") == 0) {
-                            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+                            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
                             return map_has(dm, args[0]->s) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
                         }
                         if (strcmp(method, "keys") == 0) {
@@ -3476,7 +3476,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         if (strcmp(method, "values") == 0) {
                             Value *res = xs_array_new();
                             for (int j = 0; j < ka->len; j++) {
-                                if (ka->items[j]->tag == XS_STR) {
+                                if (VAL_TAG(ka->items[j]) == XS_STR) {
                                     Value *v = map_get(dm, ka->items[j]->s);
                                     array_push(res->arr, v ? value_incref(v) : value_incref(XS_NULL_VAL));
                                 }
@@ -3486,7 +3486,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         if (strcmp(method, "entries") == 0) {
                             Value *res = xs_array_new();
                             for (int j = 0; j < ka->len; j++) {
-                                if (ka->items[j]->tag == XS_STR) {
+                                if (VAL_TAG(ka->items[j]) == XS_STR) {
                                     Value *tup = xs_tuple_new();
                                     array_push(tup->arr, value_incref(ka->items[j]));
                                     Value *v = map_get(dm, ka->items[j]->s);
@@ -3500,13 +3500,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     }
                 }
                 /* PriorityQueue */
-                if (strcmp(ctype, "PriorityQueue") == 0 && data && data->tag == XS_ARRAY) {
+                if (strcmp(ctype, "PriorityQueue") == 0 && data && VAL_TAG(data) == XS_ARRAY) {
                     XSArray *arr = data->arr;
                     if (strcmp(method, "push") == 0) {
                         /* push(item, priority): store as [item, priority] tuple */
                         if (argc < 1) return value_incref(XS_NULL_VAL);
-                        double prio = (argc >= 2) ? (args[1]->tag==XS_INT?(double)args[1]->i:
-                                      args[1]->tag==XS_FLOAT?args[1]->f:0.0) : 0.0;
+                        double prio = (argc >= 2) ? (VAL_TAG(args[1])==XS_INT?(double)VAL_INT(args[1]):
+                                      VAL_TAG(args[1])==XS_FLOAT?args[1]->f:0.0) : 0.0;
                         Value *entry = xs_array_new();
                         array_push(entry->arr, value_incref(args[0]));
                         array_push(entry->arr, xs_float(prio));
@@ -3514,9 +3514,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         int pos = arr->len;
                         for (int j = 0; j < arr->len; j++) {
                             Value *ej = arr->items[j];
-                            if (ej->tag == XS_ARRAY && ej->arr->len >= 2) {
-                                double ep = ej->arr->items[1]->tag==XS_FLOAT?ej->arr->items[1]->f:
-                                            (double)ej->arr->items[1]->i;
+                            if (VAL_TAG(ej) == XS_ARRAY && ej->arr->len >= 2) {
+                                double ep = VAL_TAG(ej->arr->items[1])==XS_FLOAT?ej->arr->items[1]->f:
+                                            (double)VAL_INT(ej->arr->items[1]);
                                 if (prio > ep) { pos = j; break; }
                             }
                         }
@@ -3532,7 +3532,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         Value *entry = arr->items[0];
                         for (int j = 0; j < arr->len-1; j++) arr->items[j] = arr->items[j+1];
                         arr->len--;
-                        Value *item = (entry->tag==XS_ARRAY&&entry->arr->len>=1) ?
+                        Value *item = (VAL_TAG(entry)==XS_ARRAY&&entry->arr->len>=1) ?
                                       value_incref(entry->arr->items[0]) : value_incref(XS_NULL_VAL);
                         value_decref(entry);
                         return item;
@@ -3540,7 +3540,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     if (strcmp(method, "peek") == 0) {
                         if (arr->len == 0) return value_incref(XS_NULL_VAL);
                         Value *entry = arr->items[0];
-                        return (entry->tag==XS_ARRAY&&entry->arr->len>=1) ?
+                        return (VAL_TAG(entry)==XS_ARRAY&&entry->arr->len>=1) ?
                                value_incref(entry->arr->items[0]) : value_incref(XS_NULL_VAL);
                     }
                     if (strcmp(method, "len") == 0) return xs_int(arr->len);
@@ -3558,9 +3558,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     if (strcmp(method, "add") == 0) {
                         if (argc < 1) return value_incref(XS_NULL_VAL);
                         char *key = value_str(args[0]);
-                        int64_t inc = (argc >= 2 && args[1]->tag == XS_INT) ? args[1]->i : 1;
+                        int64_t inc = (argc >= 2 && VAL_TAG(args[1]) == XS_INT) ? VAL_INT(args[1]) : 1;
                         Value *cur = map_get(m, key);
-                        int64_t val = cur && cur->tag == XS_INT ? cur->i + inc : inc;
+                        int64_t val = cur && VAL_TAG(cur) == XS_INT ? VAL_INT(cur) + inc : inc;
                         Value *nv = xs_int(val);
                         map_set(m, key, nv); value_decref(nv);
                         free(key);
@@ -3572,7 +3572,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         for (int j = 0; j < nk; j++) {
                             if (strcmp(ks[j], "_type") != 0) {
                                 Value *v = map_get(m, ks[j]);
-                                if (v && v->tag == XS_INT) total += v->i;
+                                if (v && VAL_TAG(v) == XS_INT) total += VAL_INT(v);
                             }
                             free(ks[j]);
                         }
@@ -3604,7 +3604,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         return res;
                     }
                     if (strcmp(method, "most_common") == 0) {
-                        int topn = (argc>=1&&args[0]->tag==XS_INT)?(int)args[0]->i:m->len;
+                        int topn = (argc>=1&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):m->len;
                         /* collect non-meta entries */
                         int nk=0; char **ks=map_keys(m,&nk);
                         /* simple selection sort for top-N */
@@ -3622,7 +3622,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             for (int j=0;j<nk;j++) {
                                 if (strcmp(ks[j],"_type")==0) { free(ks[j]); continue; }
                                 Value *v=map_get(m,ks[j]);
-                                counts[vi] = v&&v->tag==XS_INT?v->i:0;
+                                counts[vi] = v&&VAL_TAG(v)==XS_INT?VAL_INT(v):0;
                                 keys2[vi] = ks[j]; vi++;
                             }
                             free(ks);
@@ -3656,10 +3656,10 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
     }
 
-    if (obj->tag == XS_REGEX && obj->s) {
+    if (VAL_TAG(obj) == XS_REGEX && obj->s) {
         const char *pat = obj->s;
         if (strcmp(method, "test") == 0 || strcmp(method, "is_match") == 0) {
-            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
             regex_t re;
             if (regcomp(&re, pat, REG_EXTENDED | REG_NOSUB) != 0) return value_incref(XS_FALSE_VAL);
             int ok = (regexec(&re, args[0]->s, 0, NULL, 0) == 0);
@@ -3667,7 +3667,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return ok ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "match") == 0 || strcmp(method, "find") == 0) {
-            if (argc < 1 || args[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+            if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_NULL_VAL);
             regex_t re;
             if (regcomp(&re, pat, REG_EXTENDED) != 0) return value_incref(XS_NULL_VAL);
             regmatch_t m[1];
@@ -3681,7 +3681,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return value_incref(XS_NULL_VAL);
         }
         if (strcmp(method, "replace") == 0) {
-            if (argc < 2 || args[0]->tag != XS_STR || args[1]->tag != XS_STR)
+            if (argc < 2 || VAL_TAG(args[0]) != XS_STR || VAL_TAG(args[1]) != XS_STR)
                 return value_incref(XS_NULL_VAL);
             regex_t re;
             if (regcomp(&re, pat, REG_EXTENDED) != 0) return value_incref(args[0]);
@@ -3711,18 +3711,18 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
     }
 
-    if (obj->tag == XS_INT || obj->tag == XS_FLOAT || obj->tag == XS_BIGINT) {
-        double num_f = (obj->tag==XS_FLOAT)?obj->f:(obj->tag==XS_BIGINT)?bigint_to_double(obj->bigint):(double)obj->i;
-        int64_t num_i = (obj->tag==XS_INT)?obj->i:(obj->tag==XS_BIGINT)?bigint_to_i64(obj->bigint):(int64_t)obj->f;
+    if (VAL_TAG(obj) == XS_INT || VAL_TAG(obj) == XS_FLOAT || VAL_TAG(obj) == XS_BIGINT) {
+        double num_f = (VAL_TAG(obj)==XS_FLOAT)?obj->f:(VAL_TAG(obj)==XS_BIGINT)?bigint_to_double(obj->bigint):(double)VAL_INT(obj);
+        int64_t num_i = (VAL_TAG(obj)==XS_INT)?VAL_INT(obj):(VAL_TAG(obj)==XS_BIGINT)?bigint_to_i64(obj->bigint):(int64_t)obj->f;
         if (strcmp(method, "abs") == 0) {
-            if (obj->tag==XS_FLOAT) return xs_float(fabs(obj->f));
-            if (obj->tag==XS_BIGINT) return xs_bigint_val(bigint_abs(obj->bigint));
+            if (VAL_TAG(obj)==XS_FLOAT) return xs_float(fabs(obj->f));
+            if (VAL_TAG(obj)==XS_BIGINT) return xs_bigint_val(bigint_abs(obj->bigint));
             return xs_int(num_i<0?-num_i:num_i);
         }
         if (strcmp(method, "pow") == 0) {
-            double exp_v=(argc>0)?(args[0]->tag==XS_INT?(double)args[0]->i:args[0]->f):1.0;
+            double exp_v=(argc>0)?(VAL_TAG(args[0])==XS_INT?(double)VAL_INT(args[0]):args[0]->f):1.0;
             double r=pow(num_f, exp_v);
-            if (obj->tag==XS_INT && args[0]->tag==XS_INT && exp_v>=0)
+            if (VAL_TAG(obj)==XS_INT && VAL_TAG(args[0])==XS_INT && exp_v>=0)
                 return xs_int((int64_t)r);
             return xs_float(r);
         }
@@ -3744,15 +3744,15 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return value_incref(obj);
         }
         if (strcmp(method, "floor") == 0) {
-            if (obj->tag==XS_INT) return value_incref(obj);
+            if (VAL_TAG(obj)==XS_INT) return value_incref(obj);
             return xs_int((int64_t)floor(obj->f));
         }
         if (strcmp(method, "ceil") == 0) {
-            if (obj->tag==XS_INT) return value_incref(obj);
+            if (VAL_TAG(obj)==XS_INT) return value_incref(obj);
             return xs_int((int64_t)ceil(obj->f));
         }
         if (strcmp(method, "round") == 0) {
-            if (obj->tag==XS_INT) return value_incref(obj);
+            if (VAL_TAG(obj)==XS_INT) return value_incref(obj);
             return xs_int((int64_t)round(obj->f));
         }
         if (strcmp(method, "to_int") == 0 || strcmp(method, "as_int") == 0) {
@@ -3766,29 +3766,29 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             char *r=value_str(obj); Value *v=xs_str(r); free(r); return v;
         }
         if (strcmp(method, "is_nan") == 0) {
-            if (obj->tag!=XS_FLOAT) return value_incref(XS_FALSE_VAL);
+            if (VAL_TAG(obj)!=XS_FLOAT) return value_incref(XS_FALSE_VAL);
             return isnan(obj->f)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "is_inf") == 0) {
-            if (obj->tag!=XS_FLOAT) return value_incref(XS_FALSE_VAL);
+            if (VAL_TAG(obj)!=XS_FLOAT) return value_incref(XS_FALSE_VAL);
             return isinf(obj->f)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "is_even") == 0) {
-            if (obj->tag==XS_BIGINT) {
+            if (VAL_TAG(obj)==XS_BIGINT) {
                 int even = (obj->bigint->len==0) || (obj->bigint->limbs[0]%2==0);
                 return even?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
             }
             return (num_i%2==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "is_odd") == 0) {
-            if (obj->tag==XS_BIGINT) {
+            if (VAL_TAG(obj)==XS_BIGINT) {
                 int odd = (obj->bigint->len>0) && (obj->bigint->limbs[0]%2!=0);
                 return odd?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
             }
             return (num_i%2!=0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
         if (strcmp(method, "sign") == 0) {
-            if (obj->tag==XS_FLOAT) {
+            if (VAL_TAG(obj)==XS_FLOAT) {
                 if (obj->f>0.0) return xs_int(1);
                 if (obj->f<0.0) return xs_int(-1);
                 return xs_int(0);
@@ -3870,7 +3870,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         (void)num_f; (void)num_i;
     }
 
-    if (obj->tag == XS_ENUM_VAL) {
+    if (VAL_TAG(obj) == XS_ENUM_VAL) {
         const char *variant = obj->en->variant;
         Value *inner = (obj->en->arr_data && obj->en->arr_data->len>0)
                        ? obj->en->arr_data->items[0] : XS_NULL_VAL;
@@ -3915,7 +3915,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 en->arr_data->items[0]=r;
                 en->refcount=1;
                 Value *ev=xs_calloc(1,sizeof(Value));
-                ev->tag=XS_ENUM_VAL; ev->refcount=1; ev->en=en;
+                ev->tag = XS_ENUM_VAL; ev->refcount=1; ev->en=en;
                 return ev;
             }
             return value_incref(obj); /* None/Err pass through */
@@ -3942,7 +3942,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 en->arr_data->items[0]=r;
                 en->refcount=1;
                 Value *ev=xs_calloc(1,sizeof(Value));
-                ev->tag=XS_ENUM_VAL; ev->refcount=1; ev->en=en;
+                ev->tag = XS_ENUM_VAL; ev->refcount=1; ev->en=en;
                 return ev;
             }
             return value_incref(obj); /* Ok passes through */
@@ -3959,7 +3959,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 en->arr_data->items[0]=value_incref(inner);
                 en->refcount=1;
                 Value *ev=xs_calloc(1,sizeof(Value));
-                ev->tag=XS_ENUM_VAL; ev->refcount=1; ev->en=en;
+                ev->tag = XS_ENUM_VAL; ev->refcount=1; ev->en=en;
                 return ev;
             }
             /* Err → None */
@@ -3968,12 +3968,12 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             en->variant=xs_strdup("None");
             en->refcount=1;
             Value *ev=xs_calloc(1,sizeof(Value));
-            ev->tag=XS_ENUM_VAL; ev->refcount=1; ev->en=en;
+            ev->tag = XS_ENUM_VAL; ev->refcount=1; ev->en=en;
             return ev;
         }
     }
 
-    if (obj->tag == XS_SIGNAL) {
+    if (VAL_TAG(obj) == XS_SIGNAL) {
         XSSignal *sig = obj->signal;
         if (strcmp(method, "get") == 0) {
             if (sig->compute) {
@@ -4011,7 +4011,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         return value_incref(XS_NULL_VAL);
     }
 
-    if (obj->tag == XS_RANGE) {
+    if (VAL_TAG(obj) == XS_RANGE) {
         if (strcmp(method, "len") == 0) {
             int64_t span = obj->range->end - obj->range->start;
             if (obj->range->inclusive) span += (span >= 0) ? 1 : -1;
@@ -4048,8 +4048,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return res2;
         }
         if (strcmp(method, "contains") == 0) {
-            if (argc<1||args[0]->tag!=XS_INT) return value_incref(XS_FALSE_VAL);
-            int64_t v2=args[0]->i;
+            if (argc<1||VAL_TAG(args[0])!=XS_INT) return value_incref(XS_FALSE_VAL);
+            int64_t v2=VAL_INT(args[0]);
             int64_t step = obj->range->step ? obj->range->step : 1;
             int ok;
             if (step > 0) {
@@ -4065,13 +4065,13 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
     }
 
-    if (obj->tag == XS_ENUM_VAL && obj->en->type_name) {
+    if (VAL_TAG(obj) == XS_ENUM_VAL && obj->en->type_name) {
         Value *type_mod = env_get(i->env, obj->en->type_name);
-        if (type_mod && (type_mod->tag == XS_MODULE || type_mod->tag == XS_MAP)) {
+        if (type_mod && (VAL_TAG(type_mod) == XS_MODULE || VAL_TAG(type_mod) == XS_MAP)) {
             Value *impl_val = map_get(type_mod->map, "__impl__");
-            if (impl_val && (impl_val->tag == XS_MAP || impl_val->tag == XS_MODULE)) {
+            if (impl_val && (VAL_TAG(impl_val) == XS_MAP || VAL_TAG(impl_val) == XS_MODULE)) {
                 Value *fn = map_get(impl_val->map, method);
-                if (fn && (fn->tag == XS_FUNC || fn->tag == XS_NATIVE)) {
+                if (fn && (VAL_TAG(fn) == XS_FUNC || VAL_TAG(fn) == XS_NATIVE)) {
                     Value **new_args = xs_malloc((argc+1)*sizeof(Value*));
                     new_args[0] = obj;
                     for (int j = 0; j < argc; j++) new_args[j+1] = args[j];
@@ -4083,11 +4083,11 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         }
     }
 
-    if (obj->tag == XS_CLASS_VAL && obj->cls) {
+    if (VAL_TAG(obj) == XS_CLASS_VAL && obj->cls) {
         Value *sfn = NULL;
         if (obj->cls->static_methods) sfn = map_get(obj->cls->static_methods, method);
         if (!sfn && obj->cls->methods) sfn = map_get(obj->cls->methods, method);
-        if (sfn && (sfn->tag == XS_FUNC || sfn->tag == XS_NATIVE))
+        if (sfn && (VAL_TAG(sfn) == XS_FUNC || VAL_TAG(sfn) == XS_NATIVE))
             return call_value(i, sfn, args, argc, method);
     }
 
@@ -4115,7 +4115,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     static const char *map_methods[] = {"len","keys","values","contains","remove","clear","entries","merge","filter","map","clone",NULL};
     static const char *num_methods[] = {"abs","to_str","floor","ceil","round","clamp",NULL};
     const char **methods_list = NULL;
-    switch (obj->tag) {
+    switch (VAL_TAG(obj)) {
         case XS_STR: methods_list = str_methods; break;
         case XS_ARRAY: case XS_TUPLE: methods_list = arr_methods; break;
         case XS_MAP: methods_list = map_methods; break;
@@ -4169,7 +4169,7 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
     if (strcmp(op,"??")==0) {
         Value *l = EVAL(i, n->binop.left);
-        if (l->tag != XS_NULL) return l;
+        if (VAL_TAG(l) != XS_NULL) return l;
         value_decref(l);
         return EVAL(i, n->binop.right);
     }
@@ -4184,15 +4184,15 @@ static Value *eval_binop(Interp *i, Node *n) {
     Value *result = NULL;
 
     if (strcmp(op, "<=>") == 0) {
-        if (left->tag == XS_INT && right->tag == XS_INT) {
-            int64_t cmp = (left->i > right->i) - (left->i < right->i);
+        if (VAL_TAG(left) == XS_INT && VAL_TAG(right) == XS_INT) {
+            int64_t cmp = (VAL_INT(left) > VAL_INT(right)) - (VAL_INT(left) < VAL_INT(right));
             result = xs_int(cmp);
-        } else if ((left->tag == XS_INT || left->tag == XS_FLOAT) &&
-                   (right->tag == XS_INT || right->tag == XS_FLOAT)) {
-            double a = (left->tag == XS_INT) ? (double)left->i : left->f;
-            double b = (right->tag == XS_INT) ? (double)right->i : right->f;
+        } else if ((VAL_TAG(left) == XS_INT || VAL_TAG(left) == XS_FLOAT) &&
+                   (VAL_TAG(right) == XS_INT || VAL_TAG(right) == XS_FLOAT)) {
+            double a = (VAL_TAG(left) == XS_INT) ? (double)VAL_INT(left) : left->f;
+            double b = (VAL_TAG(right) == XS_INT) ? (double)VAL_INT(right) : right->f;
             result = xs_int((a > b) - (a < b));
-        } else if (left->tag == XS_STR && right->tag == XS_STR) {
+        } else if (VAL_TAG(left) == XS_STR && VAL_TAG(right) == XS_STR) {
             int cmp = strcmp(left->s, right->s);
             result = xs_int((cmp > 0) - (cmp < 0));
         } else {
@@ -4202,17 +4202,17 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
 
     /* struct/class operator overloading: check before numeric paths */
-    if (left->tag == XS_STRUCT_VAL || left->tag == XS_ENUM_VAL) {
+    if (VAL_TAG(left) == XS_STRUCT_VAL || VAL_TAG(left) == XS_ENUM_VAL) {
         Value *op_fn = env_get(i->env, op);
-        if (op_fn && (op_fn->tag == XS_FUNC || op_fn->tag == XS_NATIVE)) {
+        if (op_fn && (VAL_TAG(op_fn) == XS_FUNC || VAL_TAG(op_fn) == XS_NATIVE)) {
             Value *call_args[2] = { left, right };
             result = call_value(i, op_fn, call_args, 2, op);
             goto done;
         }
     }
 
-    if (left->tag == XS_INT && right->tag == XS_INT) {
-        int64_t a = left->i, b = right->i;
+    if (VAL_TAG(left) == XS_INT && VAL_TAG(right) == XS_INT) {
+        int64_t a = VAL_INT(left), b = VAL_INT(right);
         if (op[0]=='=' && op[1]=='=') { result=a==b?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
         if (op[0]=='<' && op[1]=='\0') { result=a<b?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
         if (op[0]=='>' && op[1]=='\0') { result=a>b?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
@@ -4255,9 +4255,9 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='>' && op[1]=='>') { result=xs_int(a>>b); goto done; }
     }
 
-    if ((left->tag == XS_INT || left->tag == XS_BIGINT) &&
-        (right->tag == XS_INT || right->tag == XS_BIGINT) &&
-        (left->tag == XS_BIGINT || right->tag == XS_BIGINT)) {
+    if ((VAL_TAG(left) == XS_INT || VAL_TAG(left) == XS_BIGINT) &&
+        (VAL_TAG(right) == XS_INT || VAL_TAG(right) == XS_BIGINT) &&
+        (VAL_TAG(left) == XS_BIGINT || VAL_TAG(right) == XS_BIGINT)) {
         if (op[0]=='+' && op[1]=='\0') { result=xs_numeric_add(left,right); goto done; }
         if (op[0]=='-' && op[1]=='\0') { result=xs_numeric_sub(left,right); goto done; }
         if (op[0]=='*' && op[1]=='\0') { result=xs_numeric_mul(left,right); goto done; }
@@ -4274,10 +4274,10 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='>' && op[1]=='=') { result=cmp>=0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
     }
 
-    if ((left->tag==XS_INT||left->tag==XS_FLOAT||left->tag==XS_BIGINT) &&
-        (right->tag==XS_INT||right->tag==XS_FLOAT||right->tag==XS_BIGINT)) {
-        double a = left->tag==XS_FLOAT ? left->f : (left->tag==XS_BIGINT ? bigint_to_double(left->bigint) : (double)left->i);
-        double b2 = right->tag==XS_FLOAT ? right->f : (right->tag==XS_BIGINT ? bigint_to_double(right->bigint) : (double)right->i);
+    if ((VAL_TAG(left)==XS_INT||VAL_TAG(left)==XS_FLOAT||VAL_TAG(left)==XS_BIGINT) &&
+        (VAL_TAG(right)==XS_INT||VAL_TAG(right)==XS_FLOAT||VAL_TAG(right)==XS_BIGINT)) {
+        double a = VAL_TAG(left)==XS_FLOAT ? left->f : (VAL_TAG(left)==XS_BIGINT ? bigint_to_double(left->bigint) : (double)VAL_INT(left));
+        double b2 = VAL_TAG(right)==XS_FLOAT ? right->f : (VAL_TAG(right)==XS_BIGINT ? bigint_to_double(right->bigint) : (double)VAL_INT(right));
         if (op[0]=='+') { result=xs_float(a+b2); goto done; }
         if (op[0]=='-') { result=xs_float(a-b2); goto done; }
         if (op[0]=='*' && op[1]=='\0') { result=xs_float(a*b2); goto done; }
@@ -4296,7 +4296,7 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='>' && op[1]=='=') { result=a>=b2?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
     }
 
-    if ((left->tag == XS_STR || right->tag == XS_STR) && op[0]=='+' && op[1]=='\0') {
+    if ((VAL_TAG(left) == XS_STR || VAL_TAG(right) == XS_STR) && op[0]=='+' && op[1]=='\0') {
         char *ls = value_str(left);
         char *rs = value_str(right);
         int la=(int)strlen(ls), lb=(int)strlen(rs);
@@ -4305,7 +4305,7 @@ static Value *eval_binop(Interp *i, Node *n) {
         free(ls); free(rs);
         result=xs_str(buf); free(buf); goto done;
     }
-    if (left->tag == XS_STR) {
+    if (VAL_TAG(left) == XS_STR) {
         if (op[0]=='+') {
             char *rs = value_str(right);
             int la = (int)strlen(left->s), lb = (int)strlen(rs);
@@ -4323,12 +4323,12 @@ static Value *eval_binop(Interp *i, Node *n) {
             free(rs); result=xs_str(buf); free(buf); goto done;
         }
         if (op[0]=='=' && op[1]=='=') {
-            result = (right->tag==XS_STR && strcmp(left->s,right->s)==0) ?
+            result = (VAL_TAG(right)==XS_STR && strcmp(left->s,right->s)==0) ?
                      value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
             goto done;
         }
         if (op[0]=='!' && op[1]=='=') {
-            result = (right->tag!=XS_STR || strcmp(left->s,right->s)!=0) ?
+            result = (VAL_TAG(right)!=XS_STR || strcmp(left->s,right->s)!=0) ?
                      value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
             goto done;
         }
@@ -4336,8 +4336,8 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='>' && op[1]=='=') { result=value_cmp(left,right)>=0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
         if (op[0]=='<') { result=value_cmp(left,right)<0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
         if (op[0]=='>') { result=value_cmp(left,right)>0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
-        if (op[0]=='*' && right->tag==XS_INT) {
-            int n2 = (int)right->i; if (n2<0) n2=0;
+        if (op[0]=='*' && VAL_TAG(right)==XS_INT) {
+            int n2 = (int)VAL_INT(right); if (n2<0) n2=0;
             int slen=(int)strlen(left->s);
             char *buf=xs_malloc(slen*n2+1); buf[0]='\0';
             for (int j=0;j<n2;j++) strcat(buf,left->s);
@@ -4346,11 +4346,11 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
 
     if (op[0]=='+' && op[1]=='+') {
-        if (left->tag==XS_ARRAY) {
+        if (VAL_TAG(left)==XS_ARRAY) {
             Value *res=xs_array_new();
             XSArray *la=left->arr;
             for (int j=0;j<la->len;j++) array_push(res->arr, value_incref(la->items[j]));
-            if (right->tag==XS_ARRAY) {
+            if (VAL_TAG(right)==XS_ARRAY) {
                 XSArray *ra=right->arr;
                 for (int j=0;j<ra->len;j++) array_push(res->arr, value_incref(ra->items[j]));
             }
@@ -4362,7 +4362,7 @@ static Value *eval_binop(Interp *i, Node *n) {
        this branch the two arrays fell through to the float coerce and
        silently produced null. */
     if (op[0]=='+' && op[1]=='\0' &&
-        left->tag==XS_ARRAY && right->tag==XS_ARRAY) {
+        VAL_TAG(left)==XS_ARRAY && VAL_TAG(right)==XS_ARRAY) {
         Value *res=xs_array_new();
         for (int j=0;j<left->arr->len;j++)
             array_push(res->arr, left->arr->items[j]);
@@ -4372,54 +4372,54 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
 
     if (strcmp(op, "is") == 0) {
-        const char *tname = (right->tag == XS_STR) ? right->s : "";
+        const char *tname = (VAL_TAG(right) == XS_STR) ? right->s : "";
         int match = 0;
         if (strcmp(tname, "int") == 0 || strcmp(tname, "i64") == 0)
-            match = (left->tag == XS_INT);
+            match = (VAL_TAG(left) == XS_INT);
         else if (strcmp(tname, "float") == 0 || strcmp(tname, "f64") == 0)
-            match = (left->tag == XS_FLOAT);
+            match = (VAL_TAG(left) == XS_FLOAT);
         else if (strcmp(tname, "str") == 0 || strcmp(tname, "string") == 0)
-            match = (left->tag == XS_STR);
+            match = (VAL_TAG(left) == XS_STR);
         else if (strcmp(tname, "bool") == 0)
-            match = (left->tag == XS_BOOL);
+            match = (VAL_TAG(left) == XS_BOOL);
         else if (strcmp(tname, "array") == 0)
-            match = (left->tag == XS_ARRAY);
+            match = (VAL_TAG(left) == XS_ARRAY);
         else if (strcmp(tname, "map") == 0)
-            match = (left->tag == XS_MAP);
+            match = (VAL_TAG(left) == XS_MAP);
         else if (strcmp(tname, "null") == 0)
-            match = (left->tag == XS_NULL);
+            match = (VAL_TAG(left) == XS_NULL);
         else if (strcmp(tname, "fn") == 0 || strcmp(tname, "function") == 0)
-            match = (left->tag == XS_FUNC || left->tag == XS_NATIVE);
+            match = (VAL_TAG(left) == XS_FUNC || VAL_TAG(left) == XS_NATIVE);
         else if (strcmp(tname, "tuple") == 0)
-            match = (left->tag == XS_TUPLE);
-        else if (left->tag == XS_STRUCT_VAL && left->st)
+            match = (VAL_TAG(left) == XS_TUPLE);
+        else if (VAL_TAG(left) == XS_STRUCT_VAL && left->st)
             match = (strcmp(left->st->type_name, tname) == 0);
-        else if (left->tag == XS_ENUM_VAL && left->en)
+        else if (VAL_TAG(left) == XS_ENUM_VAL && left->en)
             match = (strcmp(left->en->type_name, tname) == 0);
-        else if (left->tag == XS_INST && left->inst && left->inst->class_)
+        else if (VAL_TAG(left) == XS_INST && left->inst && left->inst->class_)
             match = (strcmp(left->inst->class_->name, tname) == 0);
         result = match ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
         goto done;
     }
 
     if (strcmp(op,"in")==0) {
-        if (right->tag==XS_ARRAY) {
+        if (VAL_TAG(right)==XS_ARRAY) {
             for (int j=0;j<right->arr->len;j++)
                 if (value_equal(left,right->arr->items[j])) { result=value_incref(XS_TRUE_VAL); goto done; }
             result=value_incref(XS_FALSE_VAL); goto done;
         }
-        if (right->tag==XS_MAP || right->tag==XS_MODULE) {
-            if (left->tag==XS_STR) result=map_has(right->map,left->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
+        if (VAL_TAG(right)==XS_MAP || VAL_TAG(right)==XS_MODULE) {
+            if (VAL_TAG(left)==XS_STR) result=map_has(right->map,left->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
             else result=value_incref(XS_FALSE_VAL);
             goto done;
         }
-        if (right->tag==XS_STR && left->tag==XS_STR) {
+        if (VAL_TAG(right)==XS_STR && VAL_TAG(left)==XS_STR) {
             result=strstr(right->s,left->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
             goto done;
         }
-        if (right->tag==XS_RANGE) {
-            if (left->tag==XS_INT) {
-                int64_t v2=left->i;
+        if (VAL_TAG(right)==XS_RANGE) {
+            if (VAL_TAG(left)==XS_INT) {
+                int64_t v2=VAL_INT(left);
                 int ok=v2>=right->range->start &&
                        (right->range->inclusive?v2<=right->range->end:v2<right->range->end);
                 result=ok?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
@@ -4439,7 +4439,7 @@ static Value *eval_binop(Interp *i, Node *n) {
     }
 
     /* operator overloading via dunder methods */
-    if (left->tag == XS_INST) {
+    if (VAL_TAG(left) == XS_INST) {
         const char *dunder = NULL;
         if (op[0]=='+' && op[1]=='\0') dunder = "__add__";
         else if (op[0]=='-' && op[1]=='\0') dunder = "__sub__";
@@ -4464,11 +4464,11 @@ static Value *eval_binop(Interp *i, Node *n) {
             op_fn = map_get(left->inst->methods, "__eq__");
             if (!op_fn && left->inst->class_)
                 op_fn = map_get(left->inst->class_->methods, "__eq__");
-            if (op_fn && (op_fn->tag == XS_FUNC || op_fn->tag == XS_NATIVE)) {
+            if (op_fn && (VAL_TAG(op_fn) == XS_FUNC || VAL_TAG(op_fn) == XS_NATIVE)) {
                 int has_self = 0;
-                if (op_fn->tag == XS_FUNC && op_fn->fn->nparams > 0) {
+                if (VAL_TAG(op_fn) == XS_FUNC && op_fn->fn->nparams > 0) {
                     Node *p0 = op_fn->fn->params[0];
-                    if (p0->tag == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
+                    if (VAL_TAG(p0) == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
                         has_self = 1;
                 }
                 Value *call_args[2] = { left, right };
@@ -4485,14 +4485,14 @@ static Value *eval_binop(Interp *i, Node *n) {
             op_fn = map_get(left->inst->methods, "__lt__");
             if (!op_fn && left->inst->class_)
                 op_fn = map_get(left->inst->class_->methods, "__lt__");
-            if (op_fn && right->tag == XS_INST) {
+            if (op_fn && VAL_TAG(right) == XS_INST) {
                 Value *call_args[2] = { right, left };
                 result = call_value(i, op_fn, call_args, 2, "__lt__");
                 goto done;
             }
             op_fn = NULL;
         }
-        if (op_fn && (op_fn->tag == XS_FUNC || op_fn->tag == XS_NATIVE)) {
+        if (op_fn && (VAL_TAG(op_fn) == XS_FUNC || VAL_TAG(op_fn) == XS_NATIVE)) {
             Value *call_args[2] = { left, right };
             result = call_value(i, op_fn, call_args, 2, dunder ? dunder : op);
             goto done;
@@ -4518,7 +4518,7 @@ done:
 
 static void interp_for_each(Interp *i, Value *iter,
                               Node *pat, Node *body) {
-    if (iter->tag == XS_ARRAY || iter->tag == XS_TUPLE) {
+    if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) {
         XSArray *arr = iter->arr;
         for (int j = 0; j < arr->len; j++) {
             push_env(i);
@@ -4529,7 +4529,7 @@ static void interp_for_each(Interp *i, Value *iter,
             if (i->cf.signal == CF_CONTINUE) { CF_CLEAR(i); continue; }
             if (i->cf.signal) break;
         }
-    } else if (iter->tag == XS_RANGE) {
+    } else if (VAL_TAG(iter) == XS_RANGE) {
         XSRange *r = iter->range;
         int64_t step = r->step ? r->step : 1;
         int64_t end2 = r->inclusive ? r->end + (step > 0 ? 1 : -1) : r->end;
@@ -4544,7 +4544,7 @@ static void interp_for_each(Interp *i, Value *iter,
             if (i->cf.signal == CF_CONTINUE) { CF_CLEAR(i); continue; }
             if (i->cf.signal) break;
         }
-    } else if (iter->tag == XS_STR) {
+    } else if (VAL_TAG(iter) == XS_STR) {
         const char *s = iter->s;
         for (int j = 0; s[j]; j++) {
             Value *v = xs_str_n(s+j, 1);
@@ -4557,9 +4557,9 @@ static void interp_for_each(Interp *i, Value *iter,
             if (i->cf.signal == CF_CONTINUE) { CF_CLEAR(i); continue; }
             if (i->cf.signal) break;
         }
-    } else if (iter->tag == XS_MAP || iter->tag == XS_MODULE) {
+    } else if (VAL_TAG(iter) == XS_MAP || VAL_TAG(iter) == XS_MODULE) {
         int nkeys = 0;
-        int want_pairs = (pat && pat->tag == NODE_PAT_TUPLE);
+        int want_pairs = (pat && VAL_TAG(pat) == NODE_PAT_TUPLE);
         char **keys = map_keys(iter->map, &nkeys);
         for (int j = 0; j < nkeys; j++) {
             Value *v;
@@ -4606,10 +4606,10 @@ static void list_comp_recurse(Interp *i, Node *n, Value *result, int cl) {
     int iter_len = 0;
     Value **iter_items = NULL;
     Value *range_arr = NULL;
-    if (iter_val->tag == XS_ARRAY || iter_val->tag == XS_TUPLE) {
+    if (VAL_TAG(iter_val) == XS_ARRAY || VAL_TAG(iter_val) == XS_TUPLE) {
         iter_len = iter_val->arr->len;
         iter_items = iter_val->arr->items;
-    } else if (iter_val->tag == XS_RANGE) {
+    } else if (VAL_TAG(iter_val) == XS_RANGE) {
         range_arr = xs_array_new();
         int64_t start = iter_val->range->start;
         int64_t end = iter_val->range->end;
@@ -4649,7 +4649,7 @@ Value *interp_eval(Interp *i, Node *n) {
         for (int _h = 0; _h < g_n_before_eval; _h++) {
             EvalHook *hook = &g_before_eval[_h];
             if (!hook->callback) continue;
-            if (hook->tag_filter >= 0 && hook->tag_filter != (int)n->tag) continue;
+            if (hook->tag_filter >= 0 && hook->tag_filter != (int)VAL_TAG(n)) continue;
             Value *node_map = node_to_xs_map(n);
             Value *args[1] = { node_map };
             Value *result = call_value(i, hook->callback, args, 1, "before_eval");
@@ -4660,7 +4660,7 @@ Value *interp_eval(Interp *i, Node *n) {
                 g_in_eval_hook = 0;
                 return value_incref(XS_NULL_VAL);
             }
-            if (!result || result->tag == XS_NULL) {
+            if (!result || VAL_TAG(result) == XS_NULL) {
                 if (result) value_decref(result);
                 g_in_eval_hook = 0;
                 return value_incref(XS_NULL_VAL);
@@ -4671,7 +4671,7 @@ Value *interp_eval(Interp *i, Node *n) {
         g_in_eval_hook = 0;
     }
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:   return xs_int(n->lit_int.ival);
     case NODE_LIT_BIGINT: {
         XSBigInt *b = bigint_from_str(n->lit_bigint.bigint_str, 10);
@@ -4691,7 +4691,7 @@ Value *interp_eval(Interp *i, Node *n) {
         for (int j = 0; j < n->lit_string.parts.len; j++) {
             Node *part = n->lit_string.parts.items[j];
             char *piece;
-            if (part->tag == NODE_LIT_STRING) {
+            if (VAL_TAG(part) == NODE_LIT_STRING) {
                 piece = xs_strdup(part->lit_string.sval ? part->lit_string.sval : "");
             } else {
                 Value *v = EVAL(i, part);
@@ -4721,9 +4721,9 @@ Value *interp_eval(Interp *i, Node *n) {
         }
         for (int j = 0; j < n->lit_array.elems.len; j++) {
             Node *elem = n->lit_array.elems.items[j];
-            if (elem->tag == NODE_SPREAD) {
+            if (VAL_TAG(elem) == NODE_SPREAD) {
                 Value *sv = EVAL(i, elem->spread.expr);
-                if (sv->tag == XS_ARRAY) {
+                if (VAL_TAG(sv) == XS_ARRAY) {
                     for (int k=0;k<sv->arr->len;k++) array_push(arr->arr, value_incref(sv->arr->items[k]));
                 }
                 value_decref(sv);
@@ -4758,10 +4758,10 @@ Value *interp_eval(Interp *i, Node *n) {
             int iter_len = 0;
             Value **iter_items = NULL;
             Value *range_arr = NULL;
-            if (iter_val->tag == XS_ARRAY || iter_val->tag == XS_TUPLE) {
+            if (VAL_TAG(iter_val) == XS_ARRAY || VAL_TAG(iter_val) == XS_TUPLE) {
                 iter_len = iter_val->arr->len;
                 iter_items = iter_val->arr->items;
-            } else if (iter_val->tag == XS_RANGE) {
+            } else if (VAL_TAG(iter_val) == XS_RANGE) {
                 range_arr = xs_array_new();
                 int64_t start = iter_val->range->start;
                 int64_t end   = iter_val->range->end;
@@ -4784,11 +4784,11 @@ Value *interp_eval(Interp *i, Node *n) {
                 Value *k = EVAL(i, n->map_comp.key);
                 Value *v = EVAL(i, n->map_comp.value);
                 if (!i->cf.signal) {
-                    if (k->tag == XS_STR) {
+                    if (VAL_TAG(k) == XS_STR) {
                         map_set(result->map, k->s, value_incref(v));
-                    } else if (k->tag == XS_INT) {
+                    } else if (VAL_TAG(k) == XS_INT) {
                         char buf[32];
-                        snprintf(buf, sizeof(buf), "%lld", (long long)k->i);
+                        snprintf(buf, sizeof(buf), "%lld", (long long)VAL_INT(k));
                         map_set(result->map, buf, value_incref(v));
                     }
                 }
@@ -4816,10 +4816,10 @@ Value *interp_eval(Interp *i, Node *n) {
         Value *map = xs_map_new();
         for (int j = 0; j < n->lit_map.keys.len && j < n->lit_map.vals.len; j++) {
             Node *kn = n->lit_map.keys.items[j];
-            if (kn->tag == NODE_SPREAD) {
+            if (VAL_TAG(kn) == NODE_SPREAD) {
                 /* Spread: merge source map into target */
                 Value *src = EVAL(i, kn->spread.expr);
-                if (src && src->tag == XS_MAP) {
+                if (src && VAL_TAG(src) == XS_MAP) {
                     int nk = 0;
                     char **keys = map_keys(src->map, &nk);
                     for (int ki = 0; ki < nk; ki++) {
@@ -4834,11 +4834,11 @@ Value *interp_eval(Interp *i, Node *n) {
             }
             Value *vv = EVAL(i, n->lit_map.vals.items[j]);
             /* Identifier keys (e.g. { x: 5 }) are treated as string keys "x" */
-            if (kn->tag == NODE_IDENT) {
+            if (VAL_TAG(kn) == NODE_IDENT) {
                 map_set(map->map, kn->ident.name, value_incref(vv));
             } else {
                 Value *kv = EVAL(i, kn);
-                if (kv->tag == XS_STR) {
+                if (VAL_TAG(kv) == XS_STR) {
                     map_set(map->map, kv->s, value_incref(vv));
                 }
                 value_decref(kv);
@@ -4876,11 +4876,11 @@ Value *interp_eval(Interp *i, Node *n) {
         v = value_incref(v);
         for (int j = 1; j < n->scope.nparts; j++) {
             Value *next = NULL;
-            if (v->tag == XS_MODULE || v->tag == XS_MAP)
+            if (VAL_TAG(v) == XS_MODULE || VAL_TAG(v) == XS_MAP)
                 next = map_get(v->map, n->scope.parts[j]);
-            else if (v->tag == XS_INST)
+            else if (VAL_TAG(v) == XS_INST)
                 next = map_get(v->inst->fields, n->scope.parts[j]);
-            else if (v->tag == XS_CLASS_VAL)
+            else if (VAL_TAG(v) == XS_CLASS_VAL)
                 next = map_get(v->cls->methods, n->scope.parts[j]);
             value_decref(v);
             v = next ? value_incref(next) : value_incref(XS_NULL_VAL);
@@ -4912,13 +4912,13 @@ Value *interp_eval(Interp *i, Node *n) {
     case NODE_UNARY: {
         if (n->unary.op[0] == '?') {
             Value *v = EVAL(i, n->unary.expr);
-            if (v->tag == XS_ENUM_VAL && strcmp(v->en->variant, "Err") == 0) {
+            if (VAL_TAG(v) == XS_ENUM_VAL && strcmp(v->en->variant, "Err") == 0) {
                 if (i->cf.value) value_decref(i->cf.value);
                 i->cf.signal = CF_RETURN;
                 i->cf.value  = v; /* transfer ownership */
                 return value_incref(XS_NULL_VAL);
             }
-            if (v->tag == XS_ENUM_VAL && strcmp(v->en->variant, "Ok") == 0) {
+            if (VAL_TAG(v) == XS_ENUM_VAL && strcmp(v->en->variant, "Ok") == 0) {
                 Value *inner = (v->en->arr_data && v->en->arr_data->len > 0)
                                ? value_incref(v->en->arr_data->items[0])
                                : value_incref(XS_NULL_VAL);
@@ -4930,14 +4930,14 @@ Value *interp_eval(Interp *i, Node *n) {
         Value *v = EVAL(i, n->unary.expr);
         Value *result = NULL;
         if (n->unary.op[0] == '-') {
-            if (v->tag == XS_INT)   result = xs_safe_neg(v->i);
-            else if (v->tag == XS_BIGINT) result = xs_numeric_neg(v);
-            else if (v->tag==XS_FLOAT) result = xs_float(-v->f);
+            if (VAL_TAG(v) == XS_INT)   result = xs_safe_neg(VAL_INT(v));
+            else if (VAL_TAG(v) == XS_BIGINT) result = xs_numeric_neg(v);
+            else if (VAL_TAG(v)==XS_FLOAT) result = xs_float(-v->f);
             else result = value_incref(XS_NULL_VAL);
         } else if (n->unary.op[0] == '!') {
             result = value_truthy(v) ? value_incref(XS_FALSE_VAL) : value_incref(XS_TRUE_VAL);
         } else if (n->unary.op[0] == '~') {
-            result = (v->tag==XS_INT) ? xs_int(~v->i) : value_incref(XS_NULL_VAL);
+            result = (VAL_TAG(v)==XS_INT) ? xs_int(~VAL_INT(v)) : value_incref(XS_NULL_VAL);
         } else {
             result = value_incref(v);
         }
@@ -4964,8 +4964,8 @@ Value *interp_eval(Interp *i, Node *n) {
             else if (strcmp(aop,"**=") == 0) strcpy(opbuf,"**");
             else strcpy(opbuf,"=");
             Value *computed = NULL;
-            if (old->tag==XS_INT && val->tag==XS_INT) {
-                int64_t a=old->i, b=val->i;
+            if (VAL_TAG(old)==XS_INT && VAL_TAG(val)==XS_INT) {
+                int64_t a=VAL_INT(old), b=VAL_INT(val);
                 if (opbuf[0]=='+') computed=xs_int(a+b);
                 else if(opbuf[0]=='-') computed=xs_int(a-b);
                 else if(opbuf[0]=='*'&&opbuf[1]=='\0') computed=xs_int(a*b);
@@ -4975,16 +4975,16 @@ Value *interp_eval(Interp *i, Node *n) {
                 else if(opbuf[0]=='|') computed=xs_int(a|b);
                 else if(opbuf[0]=='^') computed=xs_int(a^b);
                 else computed=value_incref(val);
-            } else if ((old->tag==XS_FLOAT||old->tag==XS_INT) &&
-                       (val->tag==XS_FLOAT||val->tag==XS_INT)) {
-                double a2=(old->tag==XS_FLOAT)?old->f:(double)old->i;
-                double b3=(val->tag==XS_FLOAT)?val->f:(double)val->i;
+            } else if ((VAL_TAG(old)==XS_FLOAT||VAL_TAG(old)==XS_INT) &&
+                       (VAL_TAG(val)==XS_FLOAT||VAL_TAG(val)==XS_INT)) {
+                double a2=(VAL_TAG(old)==XS_FLOAT)?old->f:(double)VAL_INT(old);
+                double b3=(VAL_TAG(val)==XS_FLOAT)?val->f:(double)VAL_INT(val);
                 if (opbuf[0]=='+') computed=xs_float(a2+b3);
                 else if(opbuf[0]=='-') computed=xs_float(a2-b3);
                 else if(opbuf[0]=='*') computed=xs_float(a2*b3);
                 else if(opbuf[0]=='/') computed=b3?xs_float(a2/b3):xs_float(0);
                 else computed=value_incref(val);
-            } else if (old->tag==XS_STR && opbuf[0]=='+') {
+            } else if (VAL_TAG(old)==XS_STR && opbuf[0]=='+') {
                 char *rs=value_str(val);
                 int la=(int)strlen(old->s),lb=(int)strlen(rs);
                 char *buf=xs_malloc(la+lb+1);
@@ -4998,7 +4998,7 @@ Value *interp_eval(Interp *i, Node *n) {
             result=computed; val=computed;
         }
 
-        if (target->tag == NODE_IDENT) {
+        if (VAL_TAG(target) == NODE_IDENT) {
             TRACE_STORE(i, target->ident.name, result);
 #ifdef XSC_ENABLE_TRACER
             trace_provenance_for_node(i, target->ident.name, n->assign.value);
@@ -5016,18 +5016,18 @@ Value *interp_eval(Interp *i, Node *n) {
                 value_decref(result);
                 return value_incref(XS_NULL_VAL);
             }
-        } else if (target->tag == NODE_INDEX) {
+        } else if (VAL_TAG(target) == NODE_INDEX) {
             Value *obj = EVAL(i, target->index.obj);
             Value *idx = EVAL(i, target->index.index);
-            if (obj->tag == XS_ARRAY || obj->tag == XS_TUPLE) {
-                int ai = (int)((idx->tag==XS_INT)?idx->i:0);
+            if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
+                int ai = (int)((VAL_TAG(idx)==XS_INT)?VAL_INT(idx):0);
                 if (ai < 0) ai = obj->arr->len + ai;
                 if (ai >= 0 && ai < obj->arr->len) {
                     value_decref(obj->arr->items[ai]);
                     obj->arr->items[ai] = value_incref(result);
                 }
-            } else if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
-                if (idx->tag == XS_STR) {
+            } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
+                if (VAL_TAG(idx) == XS_STR) {
                     map_set(obj->map, idx->s, value_incref(result));
                 } else {
                     char *ks = value_str(idx);
@@ -5042,35 +5042,35 @@ Value *interp_eval(Interp *i, Node *n) {
                that referenced `arr` ever fired. */
             {
                 Node *cur = target;
-                while (cur && cur->tag != NODE_IDENT) {
-                    if (cur->tag == NODE_INDEX) cur = cur->index.obj;
-                    else if (cur->tag == NODE_FIELD) cur = cur->field.obj;
+                while (cur && VAL_TAG(cur) != NODE_IDENT) {
+                    if (VAL_TAG(cur) == NODE_INDEX) cur = cur->index.obj;
+                    else if (VAL_TAG(cur) == NODE_FIELD) cur = cur->field.obj;
                     else break;
                 }
-                if (cur && cur->tag == NODE_IDENT)
+                if (cur && VAL_TAG(cur) == NODE_IDENT)
                     env_notify_reactive(i->env, cur->ident.name);
             }
-        } else if (target->tag == NODE_FIELD) {
+        } else if (VAL_TAG(target) == NODE_FIELD) {
             Value *obj = EVAL(i, target->field.obj);
-            if (obj->tag == XS_INST) {
+            if (VAL_TAG(obj) == XS_INST) {
                 map_set(obj->inst->fields, target->field.name, value_incref(result));
-            } else if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+            } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 map_set(obj->map, target->field.name, value_incref(result));
-            } else if (obj->tag == XS_STRUCT_VAL) {
+            } else if (VAL_TAG(obj) == XS_STRUCT_VAL) {
                 map_set(obj->st->fields, target->field.name, value_incref(result));
-            } else if (obj->tag == XS_ACTOR && obj->actor) {
+            } else if (VAL_TAG(obj) == XS_ACTOR && obj->actor) {
                 map_set(obj->actor->state, target->field.name, value_incref(result));
             }
             value_decref(obj);
             /* Reactive notify: see comment above. */
             {
                 Node *cur = target;
-                while (cur && cur->tag != NODE_IDENT) {
-                    if (cur->tag == NODE_INDEX) cur = cur->index.obj;
-                    else if (cur->tag == NODE_FIELD) cur = cur->field.obj;
+                while (cur && VAL_TAG(cur) != NODE_IDENT) {
+                    if (VAL_TAG(cur) == NODE_INDEX) cur = cur->index.obj;
+                    else if (VAL_TAG(cur) == NODE_FIELD) cur = cur->field.obj;
                     else break;
                 }
-                if (cur && cur->tag == NODE_IDENT)
+                if (cur && VAL_TAG(cur) == NODE_IDENT)
                     env_notify_reactive(i->env, cur->ident.name);
             }
         }
@@ -5097,7 +5097,7 @@ Value *interp_eval(Interp *i, Node *n) {
     }
 
     case NODE_CALL: {
-        if (n->call.callee->tag == NODE_IDENT &&
+        if (VAL_TAG(n->call.callee) == NODE_IDENT &&
             strcmp(n->call.callee->ident.name, "dbg") == 0) {
             int argc = n->call.args.len;
             Value *last = NULL;
@@ -5106,7 +5106,7 @@ Value *interp_eval(Interp *i, Node *n) {
                 Value *val = EVAL(i, arg_node);
                 if (i->cf.signal) { value_decref(val); return value_incref(XS_NULL_VAL); }
                 char *repr = value_repr(val);
-                if (arg_node->tag == NODE_IDENT) {
+                if (VAL_TAG(arg_node) == NODE_IDENT) {
                     fprintf(stderr, "[dbg] %s = %s\n", arg_node->ident.name, repr);
                 } else {
                     fprintf(stderr, "[dbg] %s\n", repr);
@@ -5127,9 +5127,9 @@ Value *interp_eval(Interp *i, Node *n) {
         Value **args = argc ? xs_malloc(argc * sizeof(Value*)) : NULL;
         for (int j = 0; j < argc; j++) {
             Node *an = n->call.args.items[j];
-            if (an->tag == NODE_SPREAD) {
+            if (VAL_TAG(an) == NODE_SPREAD) {
                 Value *sv = EVAL(i, an->spread.expr);
-                if (sv->tag == XS_ARRAY) {
+                if (VAL_TAG(sv) == XS_ARRAY) {
                     int extra = sv->arr->len;
                     int new_argc = j + extra + (argc - j - 1);
                     Value **new_args = new_argc ? xs_malloc(new_argc*sizeof(Value*)) : NULL;
@@ -5158,9 +5158,9 @@ do_call: ;
         /* named arguments: merge kwargs into positional args */
         if (n->call.kwargs.len > 0) {
             Value *fn_val = callee;
-            if (fn_val->tag == XS_OVERLOAD && fn_val->overload->len > 0)
+            if (VAL_TAG(fn_val) == XS_OVERLOAD && fn_val->overload->len > 0)
                 fn_val = fn_val->overload->items[0];
-            if (fn_val->tag == XS_FUNC && fn_val->fn->nparams > 0) {
+            if (VAL_TAG(fn_val) == XS_FUNC && fn_val->fn->nparams > 0) {
                 XSFunc *fn = fn_val->fn;
                 int total = fn->nparams;
                 Value **merged = xs_malloc(total * sizeof(Value*));
@@ -5173,7 +5173,7 @@ do_call: ;
                     Node *kval = n->call.kwargs.items[j].val;
                     for (int p = 0; p < fn->nparams; p++) {
                         Node *param = fn->params[p];
-                        const char *pname = (param->tag == NODE_PAT_IDENT)
+                        const char *pname = (VAL_TAG(param) == NODE_PAT_IDENT)
                             ? param->pat_ident.name : NULL;
                         if (pname && strcmp(pname, kname) == 0) {
                             if (merged[p]) value_decref(merged[p]);
@@ -5215,10 +5215,10 @@ do_call: ;
 
     case NODE_METHOD_CALL: {
         Value *obj = EVAL(i, n->method_call.obj);
-        if (n->method_call.optional && obj->tag == XS_NULL) {
+        if (n->method_call.optional && VAL_TAG(obj) == XS_NULL) {
             return obj;
         }
-        if (!obj || obj->tag == XS_NULL) {
+        if (!obj || VAL_TAG(obj) == XS_NULL) {
             if (obj) value_decref(obj);
             return value_incref(XS_NULL_VAL);
         }
@@ -5231,8 +5231,8 @@ do_call: ;
         Value *result = NULL;
         int ic_sid = ic_site_id(n->node_id);
         uint32_t ic_mh = ic_method_hash(n->method_call.method);
-        Value *ic_cached = ic_lookup(ic_sid, (int64_t)obj->tag, ic_mh);
-        if (ic_cached && ic_cached->tag == XS_FUNC) {
+        Value *ic_cached = ic_lookup(ic_sid, (int64_t)VAL_TAG(obj), ic_mh);
+        if (ic_cached && VAL_TAG(ic_cached) == XS_FUNC) {
             /* cache hit: skip the full method resolution */
             result = call_value(i, ic_cached, args, argc, n->method_call.method);
         }
@@ -5248,7 +5248,7 @@ do_call: ;
             for (int _h = 0; _h < g_n_after_eval; _h++) {
                 EvalHook *hook = &g_after_eval[_h];
                 if (!hook->callback) continue;
-                if (hook->tag_filter >= 0 && hook->tag_filter != (int)n->tag) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)VAL_TAG(n)) continue;
                 Value *node_map = node_to_xs_map(n);
                 Value *hargs[2] = { node_map, result };
                 Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
@@ -5265,10 +5265,10 @@ do_call: ;
         Value *idx = EVAL(i, n->index.index);
         Value *result = NULL;
 
-        if (obj->tag == XS_ARRAY || obj->tag == XS_TUPLE) {
-            if (idx->tag == XS_INT) {
-                result = value_incref(array_get(obj->arr, (int)idx->i));
-            } else if (idx->tag == XS_RANGE) {
+        if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
+            if (VAL_TAG(idx) == XS_INT) {
+                result = value_incref(array_get(obj->arr, (int)VAL_INT(idx)));
+            } else if (VAL_TAG(idx) == XS_RANGE) {
                 XSRange *r = idx->range;
                 Value *slice = xs_array_new();
                 int64_t step = r->step ? r->step : 1;
@@ -5279,8 +5279,8 @@ do_call: ;
                 }
                 result = slice;
             } else result = value_incref(XS_NULL_VAL);
-        } else if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
-            if (idx->tag == XS_STR) {
+        } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
+            if (VAL_TAG(idx) == XS_STR) {
                 Value *v = map_get(obj->map, idx->s);
                 result = v ? value_incref(v) : value_incref(XS_NULL_VAL);
             } else {
@@ -5288,12 +5288,12 @@ do_call: ;
                 Value *v = map_get(obj->map, ks); free(ks);
                 result = v ? value_incref(v) : value_incref(XS_NULL_VAL);
             }
-        } else if (obj->tag == XS_STR) {
-            if (idx->tag == XS_INT) {
-                int ai=(int)idx->i; int slen=(int)strlen(obj->s);
+        } else if (VAL_TAG(obj) == XS_STR) {
+            if (VAL_TAG(idx) == XS_INT) {
+                int ai=(int)VAL_INT(idx); int slen=(int)strlen(obj->s);
                 if (ai<0) ai=slen+ai;
                 result=(ai>=0&&ai<slen)?xs_str_n(obj->s+ai,1):value_incref(XS_NULL_VAL);
-            } else if (idx->tag == XS_RANGE) {
+            } else if (VAL_TAG(idx) == XS_RANGE) {
                 int slen = (int)strlen(obj->s);
                 int64_t start = idx->range->start;
                 int64_t end = idx->range->end;
@@ -5305,23 +5305,23 @@ do_call: ;
                 if (start >= end) result = xs_str("");
                 else result = xs_str_n(obj->s + start, (int)(end - start));
             } else result = value_incref(XS_NULL_VAL);
-        } else if (obj->tag == XS_RANGE) {
+        } else if (VAL_TAG(obj) == XS_RANGE) {
             /* range[int] → range.start + int */
-            if (idx->tag == XS_INT) {
-                int64_t ri = obj->range->start + idx->i;
+            if (VAL_TAG(idx) == XS_INT) {
+                int64_t ri = obj->range->start + VAL_INT(idx);
                 int64_t rend = obj->range->inclusive ? obj->range->end : obj->range->end - 1;
                 result = (ri <= rend) ? xs_int(ri) : value_incref(XS_NULL_VAL);
             } else result = value_incref(XS_NULL_VAL);
-        } else if (obj->tag == XS_INST && obj->inst) {
+        } else if (VAL_TAG(obj) == XS_INST && obj->inst) {
             /* __index__ dunder method on instances */
             Value *fn = map_get(obj->inst->methods, "__index__");
             if (!fn && obj->inst->class_ && obj->inst->class_->methods)
                 fn = map_get(obj->inst->class_->methods, "__index__");
-            if (fn && (fn->tag == XS_FUNC || fn->tag == XS_NATIVE)) {
+            if (fn && (VAL_TAG(fn) == XS_FUNC || VAL_TAG(fn) == XS_NATIVE)) {
                 int has_self = 0;
-                if (fn->tag == XS_FUNC && fn->fn->nparams > 0) {
+                if (VAL_TAG(fn) == XS_FUNC && fn->fn->nparams > 0) {
                     Node *p0 = fn->fn->params[0];
-                    if (p0->tag == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
+                    if (VAL_TAG(p0) == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
                         has_self = 1;
                 }
                 if (has_self) {
@@ -5334,15 +5334,15 @@ do_call: ;
             } else {
                 result = value_incref(XS_NULL_VAL);
             }
-        } else if (obj->tag == XS_NULL) {
+        } else if (VAL_TAG(obj) == XS_NULL) {
             xs_runtime_error(n->span, "null index", NULL,
                 "cannot index a null value");
             result = value_incref(XS_NULL_VAL);
-        } else if (obj->tag == XS_INT || obj->tag == XS_FLOAT ||
-                   obj->tag == XS_BOOL || obj->tag == XS_BIGINT) {
+        } else if (VAL_TAG(obj) == XS_INT || VAL_TAG(obj) == XS_FLOAT ||
+                   VAL_TAG(obj) == XS_BOOL || VAL_TAG(obj) == XS_BIGINT) {
             xs_runtime_error(n->span, "not indexable", NULL,
                 "cannot index a value of tag %d (only arrays, tuples, maps, strings, ranges)",
-                (int)obj->tag);
+                (int)VAL_TAG(obj));
             result = value_incref(XS_NULL_VAL);
         } else {
             result = value_incref(XS_NULL_VAL);
@@ -5355,7 +5355,7 @@ do_call: ;
             for (int _h = 0; _h < g_n_after_eval; _h++) {
                 EvalHook *hook = &g_after_eval[_h];
                 if (!hook->callback) continue;
-                if (hook->tag_filter >= 0 && hook->tag_filter != (int)n->tag) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)VAL_TAG(n)) continue;
                 Value *node_map = node_to_xs_map(n);
                 Value *hargs[2] = { node_map, result };
                 Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
@@ -5369,33 +5369,33 @@ do_call: ;
 
     case NODE_FIELD: {
         Value *obj = EVAL(i, n->field.obj);
-        if (n->field.optional && obj->tag == XS_NULL) return obj;
-        if (!obj || obj->tag == XS_NULL) {
+        if (n->field.optional && VAL_TAG(obj) == XS_NULL) return obj;
+        if (!obj || VAL_TAG(obj) == XS_NULL) {
             if (obj) value_decref(obj);
             return value_incref(XS_NULL_VAL);
         }
         Value *result = NULL;
         const char *name = n->field.name;
-        if (obj->tag == XS_INST) {
+        if (VAL_TAG(obj) == XS_INST) {
             Value *v = map_get(obj->inst->fields, name);
             if (!v) v = map_get(obj->inst->methods, name);
             if (v) result = value_incref(v);
         }
-        if (!result && (obj->tag == XS_MAP || obj->tag == XS_MODULE)) {
+        if (!result && (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE)) {
             Value *v = map_get(obj->map, name);
             if (v) result = value_incref(v);
         }
-        if (!result && obj->tag == XS_STRUCT_VAL) {
+        if (!result && VAL_TAG(obj) == XS_STRUCT_VAL) {
             Value *v = map_get(obj->st->fields, name);
             if (v) result = value_incref(v);
         }
-        if (!result && obj->tag == XS_ENUM_VAL) {
+        if (!result && VAL_TAG(obj) == XS_ENUM_VAL) {
             if (obj->en->map_data) {
                 Value *v = map_get(obj->en->map_data, name);
                 if (v) result = value_incref(v);
             }
         }
-        if (!result && obj->tag == XS_CLASS_VAL) {
+        if (!result && VAL_TAG(obj) == XS_CLASS_VAL) {
             /* Static methods first, then regular methods, then fields */
             Value *v = NULL;
             if (obj->cls->static_methods) v = map_get(obj->cls->static_methods, name);
@@ -5403,13 +5403,13 @@ do_call: ;
             if (!v) v = map_get(obj->cls->fields, name);
             if (v) result = value_incref(v);
         }
-        if (!result && obj->tag == XS_ACTOR && obj->actor) {
+        if (!result && VAL_TAG(obj) == XS_ACTOR && obj->actor) {
             Value *v = map_get(obj->actor->state, name);
             if (!v && obj->actor->methods) v = map_get(obj->actor->methods, name);
             if (v) result = value_incref(v);
         }
         /* Numeric field access for tuples/arrays: tup.0, tup.1, etc. */
-        if (!result && (obj->tag == XS_TUPLE || obj->tag == XS_ARRAY)) {
+        if (!result && (VAL_TAG(obj) == XS_TUPLE || VAL_TAG(obj) == XS_ARRAY)) {
             char *endp;
             long idx = strtol(name, &endp, 10);
             if (*endp == '\0' && endp != name) {
@@ -5422,14 +5422,14 @@ do_call: ;
         /* Property-style: .len, .is_empty, etc. */
         if (!result) {
             if (strcmp(name,"len")==0) {
-                if (obj->tag==XS_ARRAY||obj->tag==XS_TUPLE) result=xs_int(obj->arr->len);
-                else if (obj->tag==XS_STR) result=xs_int((int64_t)strlen(obj->s));
-                else if (obj->tag==XS_MAP||obj->tag==XS_MODULE) result=xs_int(obj->map->len);
+                if (VAL_TAG(obj)==XS_ARRAY||VAL_TAG(obj)==XS_TUPLE) result=xs_int(obj->arr->len);
+                else if (VAL_TAG(obj)==XS_STR) result=xs_int((int64_t)strlen(obj->s));
+                else if (VAL_TAG(obj)==XS_MAP||VAL_TAG(obj)==XS_MODULE) result=xs_int(obj->map->len);
             } else if (strcmp(name,"is_empty")==0) {
                 int empty=0;
-                if (obj->tag==XS_ARRAY||obj->tag==XS_TUPLE) empty=obj->arr->len==0;
-                else if (obj->tag==XS_STR) empty=!obj->s||!obj->s[0];
-                else if (obj->tag==XS_MAP) empty=obj->map->len==0;
+                if (VAL_TAG(obj)==XS_ARRAY||VAL_TAG(obj)==XS_TUPLE) empty=obj->arr->len==0;
+                else if (VAL_TAG(obj)==XS_STR) empty=!obj->s||!obj->s[0];
+                else if (VAL_TAG(obj)==XS_MAP) empty=obj->map->len==0;
                 result=empty?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
             }
         }
@@ -5534,7 +5534,7 @@ do_call: ;
     } \
     if (i->cf.signal) break;
 
-        if (iter->tag == XS_ARRAY || iter->tag == XS_TUPLE) {
+        if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) {
             XSArray *arr = iter->arr;
             for (int fi = 0; fi < arr->len; fi++) {
                 push_env(i);
@@ -5543,7 +5543,7 @@ do_call: ;
                 pop_env(i);
                 FOR_BREAK_CHECK
             }
-        } else if (iter->tag == XS_RANGE) {
+        } else if (VAL_TAG(iter) == XS_RANGE) {
             XSRange *r = iter->range;
             int64_t step = r->step ? r->step : 1;
             int64_t end2 = r->inclusive ? r->end + (step > 0 ? 1 : -1) : r->end;
@@ -5556,7 +5556,7 @@ do_call: ;
                 pop_env(i);
                 FOR_BREAK_CHECK
             }
-        } else if (iter->tag == XS_STR) {
+        } else if (VAL_TAG(iter) == XS_STR) {
             const char *s = iter->s;
             for (int fi = 0; s[fi]; fi++) {
                 Value *v = xs_str_n(s+fi, 1);
@@ -5567,7 +5567,7 @@ do_call: ;
                 pop_env(i);
                 FOR_BREAK_CHECK
             }
-        } else if (iter->tag == XS_MAP && map_get(iter->map, "__type") &&
+        } else if (VAL_TAG(iter) == XS_MAP && map_get(iter->map, "__type") &&
                    map_get(iter->map, "__type")->tag == XS_STR &&
                    strcmp(map_get(iter->map, "__type")->s, "generator") == 0) {
             /* Generator iterator: drive the worker via .next() until
@@ -5576,9 +5576,9 @@ do_call: ;
                on its own when the channel handle is dropped). */
             while (1) {
                 Value *res = eval_method(i, iter, "next", NULL, 0);
-                if (!res || res->tag != XS_MAP) { if (res) value_decref(res); break; }
+                if (!res || VAL_TAG(res) != XS_MAP) { if (res) value_decref(res); break; }
                 Value *done = map_get(res->map, "done");
-                if (done && done->tag == XS_BOOL && done->i) { value_decref(res); break; }
+                if (done && VAL_TAG(done) == XS_BOOL && VAL_INT(done)) { value_decref(res); break; }
                 Value *val = map_get(res->map, "value");
                 push_env(i);
                 bind_pattern(i, n->for_loop.pattern, val ? val : XS_NULL_VAL, i->env, 1);
@@ -5587,22 +5587,22 @@ do_call: ;
                 value_decref(res);
                 FOR_BREAK_CHECK
             }
-        } else if ((iter->tag == XS_INST &&
+        } else if ((VAL_TAG(iter) == XS_INST &&
                     (map_has(iter->inst->methods, "next") ||
                      map_has(iter->inst->fields, "next"))) ||
-                   (iter->tag == XS_MAP && map_has(iter->map, "next"))) {
+                   (VAL_TAG(iter) == XS_MAP && map_has(iter->map, "next"))) {
             /* Iterator protocol: call .iter() if present, then loop .next() */
             Value *iter_obj = NULL;
             /* Check for .iter() method first */
             int has_iter = 0;
-            if (iter->tag == XS_INST)
+            if (VAL_TAG(iter) == XS_INST)
                 has_iter = map_has(iter->inst->methods, "iter") ||
                             map_has(iter->inst->fields, "iter");
-            else if (iter->tag == XS_MAP)
+            else if (VAL_TAG(iter) == XS_MAP)
                 has_iter = map_has(iter->map, "iter");
             if (has_iter) {
                 iter_obj = eval_method(i, iter, "iter", NULL, 0);
-                if (!iter_obj || iter_obj->tag == XS_NULL) {
+                if (!iter_obj || VAL_TAG(iter_obj) == XS_NULL) {
                     if (iter_obj) value_decref(iter_obj);
                     iter_obj = value_incref(iter); /* .iter() returned null: use iter directly */
                 }
@@ -5613,7 +5613,7 @@ do_call: ;
                 Value *result = eval_method(i, iter_obj, "next", NULL, 0);
                 if (!result) break;
                 /* Stop when not Some(v): None returns XS_NULL or a non-Some enum */
-                if (result->tag != XS_ENUM_VAL ||
+                if (VAL_TAG(result) != XS_ENUM_VAL ||
                     !result->en->variant ||
                     strcmp(result->en->variant, "Some") != 0) {
                     value_decref(result);
@@ -5692,12 +5692,12 @@ do_call: ;
     case NODE_RETURN: {
         /* Tail call optimization: if returning a plain call, signal CF_TAIL_CALL
            so call_value can loop instead of recursing */
-        if (n->ret.value && n->ret.value->tag == NODE_CALL) {
+        if (n->ret.value && VAL_TAG(n->ret.value) == NODE_CALL) {
             Node *cn = n->ret.value;
             Value *callee = EVAL(i, cn->call.callee);
             if (i->cf.signal) { value_decref(callee); return value_incref(XS_NULL_VAL); }
             /* Only trampoline for XS_FUNC calls (not natives, classes, etc.) */
-            if (callee->tag == XS_FUNC) {
+            if (VAL_TAG(callee) == XS_FUNC) {
                 int argc = cn->call.args.len;
                 Value **args = argc ? xs_malloc(argc * sizeof(Value*)) : NULL;
                 for (int j = 0; j < argc; j++) {
@@ -5735,9 +5735,9 @@ do_call: ;
     case NODE_YIELD: {
         /* Check if we're inside a tag (have __block in scope) */
         Value *block = env_get(i->env, "__block");
-        if (block && (block->tag == XS_FUNC || block->tag == XS_NATIVE
+        if (block && (VAL_TAG(block) == XS_FUNC || VAL_TAG(block) == XS_NATIVE
 #ifdef XSC_ENABLE_VM
-                      || block->tag == XS_CLOSURE
+                      || VAL_TAG(block) == XS_CLOSURE
 #endif
                       )) {
             /* Tag mode: yield means "call the block" */
@@ -5830,7 +5830,7 @@ do_call: ;
         for (int j = 0; j < nparams; j++) {
             Param *pm = &n->lambda.params.items[j];
             if (pm->pattern) {
-                if (pm->pattern->tag == NODE_IDENT) {
+                if (VAL_TAG(pm->pattern) == NODE_IDENT) {
                     Node *pn = node_new(NODE_PAT_IDENT, pm->pattern->span);
                     pn->pat_ident.name    = xs_strdup(pm->pattern->ident.name);
                     pn->pat_ident.mutable = 0;
@@ -5874,7 +5874,7 @@ do_call: ;
         if (has_decls == -1) {
             has_decls = 0;
             for (int j = 0; j < n->block.stmts.len; j++) {
-                NodeTag t = n->block.stmts.items[j]->tag;
+                NodeTag t = VAL_TAG(n->block.stmts.items[j]);
                 if (t==NODE_LET||t==NODE_VAR||t==NODE_CONST||
                     t==NODE_FN_DECL||t==NODE_CLASS_DECL||
                     t==NODE_STRUCT_DECL||t==NODE_ENUM_DECL) {
@@ -5909,9 +5909,9 @@ do_call: ;
                         for (int h = 0; h < hcount; h++) {
                             if (hooks[h].target && strcmp(hooks[h].hook_kind, "destructor") == 0) {
                                 Value *target_val = env_get(i->env, hooks[h].target);
-                                if (target_val && target_val->tag == XS_MAP) {
+                                if (target_val && VAL_TAG(target_val) == XS_MAP) {
                                     Value *destroy_fn = map_get(target_val->map, "destroy");
-                                    if (destroy_fn && (destroy_fn->tag == XS_CLOSURE || destroy_fn->tag == XS_NATIVE)) {
+                                    if (destroy_fn && (VAL_TAG(destroy_fn) == XS_CLOSURE || VAL_TAG(destroy_fn) == XS_NATIVE)) {
                                         Value *r = call_value(i, destroy_fn, NULL, 0, "destructor_hook");
                                         if (r) value_decref(r);
                                     }
@@ -5933,8 +5933,8 @@ do_call: ;
     case NODE_RANGE: {
         Value *start = n->range.start ? EVAL(i, n->range.start) : xs_int(0);
         Value *end   = n->range.end   ? EVAL(i, n->range.end)   : xs_int(0);
-        int64_t sv = (start->tag==XS_INT)?start->i:(int64_t)start->f;
-        int64_t ev = (end->tag==XS_INT)?end->i:(int64_t)end->f;
+        int64_t sv = (VAL_TAG(start)==XS_INT)?VAL_INT(start):(int64_t)start->f;
+        int64_t ev = (VAL_TAG(end)==XS_INT)?VAL_INT(end):(int64_t)end->f;
         value_decref(start); value_decref(end);
         return xs_range(sv, ev, n->range.inclusive);
     }
@@ -5955,10 +5955,10 @@ do_call: ;
             cls = env_get(i->env, first);
         }
 
-        if (cls && cls->tag == XS_CLASS_VAL) {
+        if (cls && VAL_TAG(cls) == XS_CLASS_VAL) {
             Value *args_empty[1];
             Value *inst = call_value(i, cls, args_empty, 0, path);
-            if (inst && inst->tag == XS_INST) {
+            if (inst && VAL_TAG(inst) == XS_INST) {
                 for (int j=0;j<n->struct_init.fields.len;j++) {
                     char *fname = n->struct_init.fields.items[j].key;
                     if (cls->cls->fields && !map_has(cls->cls->fields, fname)) {
@@ -5971,7 +5971,7 @@ do_call: ;
                 /* Apply spread/rest base first (explicit fields override) */
                 if (n->struct_init.rest) {
                     Value *base = EVAL(i, n->struct_init.rest);
-                    if (base && base->tag == XS_INST) {
+                    if (base && VAL_TAG(base) == XS_INST) {
                         int nk=0; char **ks=map_keys(base->inst->fields,&nk);
                         for (int j=0;j<nk;j++) {
                             Value *v=map_get(base->inst->fields,ks[j]);
@@ -5979,7 +5979,7 @@ do_call: ;
                             free(ks[j]);
                         }
                         free(ks);
-                    } else if (base && (base->tag == XS_MAP || base->tag == XS_MODULE)) {
+                    } else if (base && (VAL_TAG(base) == XS_MAP || VAL_TAG(base) == XS_MODULE)) {
                         int nk=0; char **ks=map_keys(base->map,&nk);
                         for (int j=0;j<nk;j++) {
                             Value *v=map_get(base->map,ks[j]);
@@ -6007,7 +6007,7 @@ do_call: ;
                         if (!found) {
                             /* Check if the field has a non-null default */
                             Value *def = map_get(cls->cls->fields, keys[j]);
-                            if (!def || def->tag == XS_NULL) {
+                            if (!def || VAL_TAG(def) == XS_NULL) {
                                 fprintf(stderr, "xs: error at %s:%d:%d: missing field '%s' in struct '%s'\n",
                                         n->span.file ? n->span.file : "<unknown>",
                                         n->span.line, n->span.col, keys[j], path);
@@ -6035,7 +6035,7 @@ do_call: ;
         }
         if (n->struct_init.rest) {
             Value *base = EVAL(i, n->struct_init.rest);
-            if (base->tag == XS_MAP || base->tag == XS_MODULE) {
+            if (VAL_TAG(base) == XS_MAP || VAL_TAG(base) == XS_MODULE) {
                 int nk=0; char **ks=map_keys(base->map,&nk);
                 for (int j=0;j<nk;j++) {
                     if (!map_has(m->map, ks[j])) {
@@ -6060,28 +6060,28 @@ do_call: ;
             strcmp(t,"i128")==0||strcmp(t,"isize")==0||
             strcmp(t,"u64")==0||strcmp(t,"u32")==0||strcmp(t,"u8")==0||
             strcmp(t,"u16")==0||strcmp(t,"u128")==0||strcmp(t,"usize")==0) {
-            if (v->tag==XS_INT)   result=value_incref(v);
-            else if(v->tag==XS_FLOAT) result=xs_int((int64_t)v->f);
-            else if(v->tag==XS_CHAR)  result=xs_int((unsigned char)(v->s?v->s[0]:0));
-            else if(v->tag==XS_STR) {
+            if (VAL_TAG(v)==XS_INT)   result=value_incref(v);
+            else if(VAL_TAG(v)==XS_FLOAT) result=xs_int((int64_t)v->f);
+            else if(VAL_TAG(v)==XS_CHAR)  result=xs_int((unsigned char)(v->s?v->s[0]:0));
+            else if(VAL_TAG(v)==XS_STR) {
                 /* single-char string → ASCII value; otherwise parse as number */
                 if (v->s && v->s[0] && !v->s[1]) result=xs_int((unsigned char)v->s[0]);
                 else result=xs_int(atoll(v->s));
             }
-            else if(v->tag==XS_BOOL)  result=xs_int(v->i);
+            else if(VAL_TAG(v)==XS_BOOL)  result=xs_int(VAL_INT(v));
             else result=xs_int(0);
         } else if (strcmp(t,"f64")==0||strcmp(t,"float")==0||strcmp(t,"f32")==0) {
-            if (v->tag==XS_FLOAT) result=value_incref(v);
-            else if(v->tag==XS_INT)   result=xs_float((double)v->i);
-            else if(v->tag==XS_STR)   result=xs_float(atof(v->s));
+            if (VAL_TAG(v)==XS_FLOAT) result=value_incref(v);
+            else if(VAL_TAG(v)==XS_INT)   result=xs_float((double)VAL_INT(v));
+            else if(VAL_TAG(v)==XS_STR)   result=xs_float(atof(v->s));
             else result=xs_float(0.0);
         } else if (strcmp(t,"str")==0||strcmp(t,"String")==0) {
             char *s=value_str(v); result=xs_str(s); free(s);
         } else if (strcmp(t,"bool")==0) {
             result=value_truthy(v)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         } else if (strcmp(t,"char")==0) {
-            if (v->tag==XS_INT) result=xs_char((char)v->i);
-            else if(v->tag==XS_STR&&v->s[0]) result=xs_char(v->s[0]);
+            if (VAL_TAG(v)==XS_INT) result=xs_char((char)VAL_INT(v));
+            else if(VAL_TAG(v)==XS_STR&&v->s[0]) result=xs_char(v->s[0]);
             else result=xs_char(0);
         } else {
             result = value_incref(v);
@@ -6155,7 +6155,7 @@ do_call: ;
         for (int j = 0; j < frame->params.len && j < argc; j++) {
             Param *pm = &frame->params.items[j];
             const char *pname = pm->name ? pm->name :
-                (pm->pattern && pm->pattern->tag == NODE_PAT_IDENT ?
+                (pm->pattern && VAL_TAG(pm->pattern) == NODE_PAT_IDENT ?
                  pm->pattern->pat_ident.name : NULL);
             if (pname)
                 env_define(handler_call_env, pname, args[j], 1);
@@ -6206,10 +6206,10 @@ do_call: ;
            actually run. */
         Value *v = EVAL(i, n->await_.expr);
         if (i->cf.signal) { value_decref(v); return value_incref(XS_NULL_VAL); }
-        if (v->tag == XS_MAP) {
+        if (VAL_TAG(v) == XS_MAP) {
             Value *tid_val = map_get(v->map, "_task_id");
-            if (tid_val && tid_val->tag == XS_INT) {
-                int tid = (int)tid_val->i;
+            if (tid_val && VAL_TAG(tid_val) == XS_INT) {
+                int tid = (int)VAL_INT(tid_val);
                 Value *r = xs_await_task(tid);
                 Value *sv = xs_str("done"); map_set(v->map, "_status", sv); value_decref(sv);
                 map_set(v->map, "_result", r);
@@ -6217,14 +6217,14 @@ do_call: ;
                 return r;
             }
             Value *status = map_get(v->map, "_status");
-            if (status && status->tag == XS_STR && strcmp(status->s, "done") == 0) {
+            if (status && VAL_TAG(status) == XS_STR && strcmp(status->s, "done") == 0) {
                 Value *res = map_get(v->map, "_result");
                 Value *ret = res ? value_incref(res) : value_incref(XS_NULL_VAL);
                 value_decref(v);
                 return ret;
             }
         }
-        if (v->tag == XS_FUNC || v->tag == XS_NATIVE) {
+        if (VAL_TAG(v) == XS_FUNC || VAL_TAG(v) == XS_NATIVE) {
             Value *result = call_value(i, v, NULL, 0, "await");
             value_decref(v);
             return result;
@@ -6251,12 +6251,12 @@ do_call: ;
         for (int j = 0; j < tasks->len; j++) {
             if (i->cf.signal) break;
             Value *task = tasks->items[j];
-            if (task->tag == XS_FUNC || task->tag == XS_NATIVE) {
+            if (VAL_TAG(task) == XS_FUNC || VAL_TAG(task) == XS_NATIVE) {
                 Value *r = call_value(i, task, NULL, 0, "nursery_task");
                 /* If the task returned a callable (e.g. spawn fn() { ... }),
                    call it too so the user's function body actually runs. */
                 if (!i->cf.signal && r &&
-                    (r->tag == XS_FUNC || r->tag == XS_NATIVE)) {
+                    (VAL_TAG(r) == XS_FUNC || VAL_TAG(r) == XS_NATIVE)) {
                     Value *r2 = call_value(i, r, NULL, 0, "nursery_task");
                     value_decref(r2);
                 }
@@ -6280,9 +6280,9 @@ do_call: ;
         }
 
         /* Actor spawn: `spawn ActorClass` constructs a new actor instance. */
-        if (n->spawn_.expr->tag == NODE_IDENT) {
+        if (VAL_TAG(n->spawn_.expr) == NODE_IDENT) {
             Value *check = EVAL(i, n->spawn_.expr);
-            if (!i->cf.signal && check && check->tag == XS_ACTOR) {
+            if (!i->cf.signal && check && VAL_TAG(check) == XS_ACTOR) {
                 Value *inst = call_value(i, check, NULL, 0, "spawn");
                 value_decref(check);
                 return inst;
@@ -6308,7 +6308,7 @@ do_call: ;
         Value *target = EVAL(i, n->send_expr.target);
         Value *msg = EVAL(i, n->send_expr.message);
         Value *result = value_incref(XS_NULL_VAL);
-        if (target->tag == XS_ACTOR && target->actor && target->actor->handle_fn) {
+        if (VAL_TAG(target) == XS_ACTOR && target->actor && target->actor->handle_fn) {
             XSActor *actor = target->actor;
             /* Create env with actor state */
             Env *wrapper = env_new(actor->handle_fn->closure ? actor->handle_fn->closure : actor->closure);
@@ -6348,7 +6348,7 @@ do_call: ;
                 free(keys);
             }
             env_decref(wrapper);
-        } else if (target->tag == XS_INST) {
+        } else if (VAL_TAG(target) == XS_INST) {
             /* Fallback: treat ! on instances as calling .handle(msg) */
             Value *r = eval_method(i, target, "handle", &msg, 1);
             value_decref(result);
@@ -6410,8 +6410,8 @@ do_call: ;
         Value *dur = EVAL(i, n->pause_.duration);
         if (i->cf.signal) { value_decref(dur); return value_incref(XS_NULL_VAL); }
         double ms = 0;
-        if (dur->tag == XS_INT) ms = (double)dur->i;
-        else if (dur->tag == XS_FLOAT) ms = dur->f;
+        if (VAL_TAG(dur) == XS_INT) ms = (double)VAL_INT(dur);
+        else if (VAL_TAG(dur) == XS_FLOAT) ms = dur->f;
         value_decref(dur);
         if (ms > 0) {
 #ifdef _WIN32
@@ -6448,17 +6448,17 @@ do_call: ;
         }
         Value *result = EVAL(i, n->with_.body);
         /* call .close() on resource if it has one */
-        if (resource->tag == XS_STRUCT_VAL || resource->tag == XS_INST ||
-            resource->tag == XS_MAP) {
+        if (VAL_TAG(resource) == XS_STRUCT_VAL || VAL_TAG(resource) == XS_INST ||
+            VAL_TAG(resource) == XS_MAP) {
             Value *close_args[1] = { resource };
             Value *close_fn = NULL;
-            if (resource->tag == XS_STRUCT_VAL && resource->map)
+            if (VAL_TAG(resource) == XS_STRUCT_VAL && resource->map)
                 close_fn = map_get(resource->map, "close");
-            else if (resource->tag == XS_INST && resource->inst->fields)
+            else if (VAL_TAG(resource) == XS_INST && resource->inst->fields)
                 close_fn = map_get(resource->inst->fields, "close");
-            else if (resource->tag == XS_MAP)
+            else if (VAL_TAG(resource) == XS_MAP)
                 close_fn = map_get(resource->map, "close");
-            if (close_fn && (close_fn->tag == XS_FUNC || close_fn->tag == XS_NATIVE)) {
+            if (close_fn && (VAL_TAG(close_fn) == XS_FUNC || VAL_TAG(close_fn) == XS_NATIVE)) {
                 Value *cr = call_value(i, close_fn, close_args, 1, "close");
                 value_decref(cr);
             }
@@ -6471,7 +6471,7 @@ do_call: ;
         /* check for RT_HOOK_EXEC runtime hooks matching this node type */
         PluginPipeline *exec_pp = (PluginPipeline *)i->pipeline;
         if (exec_pp && exec_pp->nruntime_hooks > 0) {
-            const char *tag_name = node_tag_to_string(n->tag);
+            const char *tag_name = node_tag_to_string(VAL_TAG(n));
             for (int rh = 0; rh < exec_pp->nruntime_hooks; rh++) {
                 RuntimePluginHook *hook = &exec_pp->runtime_hooks[rh];
                 if (hook->kind != RT_HOOK_EXEC || !hook->callback) continue;
@@ -6482,7 +6482,7 @@ do_call: ;
                     Value *hr = call_value(i, hook->callback, hargs, 2, "exec_hook");
                     value_decref(node_map);
                     value_decref(env_map);
-                    if (hr && hr->tag != XS_NULL) return hr;
+                    if (hr && VAL_TAG(hr) != XS_NULL) return hr;
                     if (hr) value_decref(hr);
                 }
             }
@@ -6598,7 +6598,7 @@ static Env *s_plugin_host_globals = NULL;
 
 static Value *native_plugin_global_set(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 2 || !args[0] || args[0]->tag != XS_STR || !s_plugin_host_globals)
+    if (argc < 2 || !args[0] || VAL_TAG(args[0]) != XS_STR || !s_plugin_host_globals)
         return value_incref(XS_NULL_VAL);
     if (g_current_sandbox_flags & SANDBOX_INJECT_ONLY) {
         Value *existing = env_get(s_plugin_host_globals, args[0]->s);
@@ -6613,7 +6613,7 @@ static Value *native_plugin_global_set(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_global_get(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || args[0]->tag != XS_STR || !s_plugin_host_globals)
+    if (argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR || !s_plugin_host_globals)
         return value_incref(XS_NULL_VAL);
     Value *v = env_get(s_plugin_host_globals, args[0]->s);
     return v ? value_incref(v) : value_incref(XS_NULL_VAL);
@@ -6630,9 +6630,9 @@ static Value *native_plugin_global_names(Interp *interp, Value **args, int argc)
 
 static Value *native_plugin_add_method(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 3 || !args[0] || args[0]->tag != XS_STR ||
-        !args[1] || args[1]->tag != XS_STR ||
-        !args[2] || (args[2]->tag != XS_FUNC && args[2]->tag != XS_NATIVE))
+    if (argc < 3 || !args[0] || VAL_TAG(args[0]) != XS_STR ||
+        !args[1] || VAL_TAG(args[1]) != XS_STR ||
+        !args[2] || (VAL_TAG(args[2]) != XS_FUNC && VAL_TAG(args[2]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     plugin_register_method(args[0]->s, args[1]->s, args[2]);
     return value_incref(XS_NULL_VAL);
@@ -6640,7 +6640,7 @@ static Value *native_plugin_add_method(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_teardown(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_teardown_count < MAX_TEARDOWN_FNS) {
         g_teardown_fns[g_teardown_count++] = value_incref(args[0]);
@@ -6650,7 +6650,7 @@ static Value *native_plugin_teardown(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_requires(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || args[0]->tag != XS_STR)
+    if (argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR)
         return value_incref(XS_NULL_VAL);
     if (!plugin_is_loaded(args[0]->s)) {
         char buf[256];
@@ -7041,10 +7041,10 @@ static int node_tag_from_string(const char *s) {
 static Value *node_to_xs_map(Node *n) {
     if (!n) return value_incref(XS_NULL_VAL);
     Value *m = xs_map_new();
-    map_set(m->map, "tag", xs_str(node_tag_to_string(n->tag)));
+    map_set(m->map, "tag", xs_str(node_tag_to_string(VAL_TAG(n))));
     if (n->span.line > 0) map_set(m->map, "line", xs_int(n->span.line));
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         map_set(m->map, "value", xs_int(n->lit_int.ival));
         break;
@@ -7202,9 +7202,9 @@ static Value *node_to_xs_map(Node *n) {
 
 /* Convert an XS map back to a C Node* */
 static Node *node_from_xs_map(Value *map) {
-    if (!map || map->tag != XS_MAP) return NULL;
+    if (!map || VAL_TAG(map) != XS_MAP) return NULL;
     Value *tag_v = map_get(map->map, "tag");
-    if (!tag_v || tag_v->tag != XS_STR) return NULL;
+    if (!tag_v || VAL_TAG(tag_v) != XS_STR) return NULL;
     const char *tag_s = tag_v->s;
     int tag_i = node_tag_from_string(tag_s);
     Span sp = span_zero();
@@ -7212,19 +7212,19 @@ static Node *node_from_xs_map(Value *map) {
     if (tag_i == NODE_LIT_INT) {
         Node *n = node_new(NODE_LIT_INT, sp);
         Value *v = map_get(map->map, "value");
-        n->lit_int.ival = (v && v->tag == XS_INT) ? v->i : 0;
+        n->lit_int.ival = (v && VAL_TAG(v) == XS_INT) ? VAL_INT(v) : 0;
         return n;
     }
     if (tag_i == NODE_LIT_FLOAT) {
         Node *n = node_new(NODE_LIT_FLOAT, sp);
         Value *v = map_get(map->map, "value");
-        n->lit_float.fval = (v && v->tag == XS_FLOAT) ? v->f : 0.0;
+        n->lit_float.fval = (v && VAL_TAG(v) == XS_FLOAT) ? v->f : 0.0;
         return n;
     }
     if (tag_i == NODE_LIT_STRING) {
         Node *n = node_new(NODE_LIT_STRING, sp);
         Value *v = map_get(map->map, "value");
-        n->lit_string.sval = xs_strdup((v && v->tag == XS_STR) ? v->s : "");
+        n->lit_string.sval = xs_strdup((v && VAL_TAG(v) == XS_STR) ? v->s : "");
         n->lit_string.interpolated = 0;
         n->lit_string.parts = nodelist_new();
         return n;
@@ -7241,13 +7241,13 @@ static Node *node_from_xs_map(Value *map) {
     if (tag_i == NODE_IDENT) {
         Node *n = node_new(NODE_IDENT, sp);
         Value *v = map_get(map->map, "name");
-        n->ident.name = xs_strdup((v && v->tag == XS_STR) ? v->s : "");
+        n->ident.name = xs_strdup((v && VAL_TAG(v) == XS_STR) ? v->s : "");
         return n;
     }
     if (tag_i == NODE_BINOP) {
         Node *n = node_new(NODE_BINOP, sp);
         Value *op = map_get(map->map, "op");
-        strncpy(n->binop.op, (op && op->tag == XS_STR) ? op->s : "+", sizeof(n->binop.op)-1);
+        strncpy(n->binop.op, (op && VAL_TAG(op) == XS_STR) ? op->s : "+", sizeof(n->binop.op)-1);
         Value *l = map_get(map->map, "left");
         Value *r = map_get(map->map, "right");
         n->binop.left = node_from_xs_map(l);
@@ -7259,7 +7259,7 @@ static Node *node_from_xs_map(Value *map) {
     if (tag_i == NODE_UNARY) {
         Node *n = node_new(NODE_UNARY, sp);
         Value *op = map_get(map->map, "op");
-        const char *ops = (op && op->tag == XS_STR) ? op->s : "-";
+        const char *ops = (op && VAL_TAG(op) == XS_STR) ? op->s : "-";
         if (strcmp(ops, "not") == 0) ops = "!";
         strncpy(n->unary.op, ops, sizeof(n->unary.op)-1);
         Value *e = map_get(map->map, "expr");
@@ -7276,7 +7276,7 @@ static Node *node_from_xs_map(Value *map) {
         n->call.args = nodelist_new();
         n->call.kwargs = nodepairlist_new();
         Value *args = map_get(map->map, "args");
-        if (args && args->tag == XS_ARRAY) {
+        if (args && VAL_TAG(args) == XS_ARRAY) {
             for (int j = 0; j < args->arr->len; j++) {
                 Node *an = node_from_xs_map(args->arr->items[j]);
                 if (an) nodelist_push(&n->call.args, an);
@@ -7305,14 +7305,14 @@ static Node *node_from_xs_map(Value *map) {
         n->block.has_decls = -1;
         n->block.is_unsafe = 0;
         Value *stmts = map_get(map->map, "stmts");
-        if (stmts && stmts->tag == XS_ARRAY) {
+        if (stmts && VAL_TAG(stmts) == XS_ARRAY) {
             for (int j = 0; j < stmts->arr->len; j++) {
                 Node *sn = node_from_xs_map(stmts->arr->items[j]);
                 if (sn) nodelist_push(&n->block.stmts, sn);
             }
         }
         Value *expr = map_get(map->map, "expr");
-        if (expr && expr->tag == XS_MAP)
+        if (expr && VAL_TAG(expr) == XS_MAP)
             n->block.expr = node_from_xs_map(expr);
         return n;
     }
@@ -7320,13 +7320,13 @@ static Node *node_from_xs_map(Value *map) {
         Node *n = node_new((NodeTag)tag_i, sp);
         Value *name = map_get(map->map, "name");
         Value *val = map_get(map->map, "value");
-        const char *nm = (name && name->tag == XS_STR) ? name->s : "";
+        const char *nm = (name && VAL_TAG(name) == XS_STR) ? name->s : "";
         Node *pat = node_new(NODE_PAT_IDENT, sp);
         pat->pat_ident.name = xs_strdup(nm);
         pat->pat_ident.mutable = (tag_i == NODE_VAR) ? 1 : 0;
         n->let.pattern = pat;
         n->let.name = xs_strdup(nm);
-        n->let.value = (val && val->tag == XS_MAP) ? node_from_xs_map(val) : NULL;
+        n->let.value = (val && VAL_TAG(val) == XS_MAP) ? node_from_xs_map(val) : NULL;
         n->let.mutable = (tag_i == NODE_VAR) ? 1 : 0;
         n->let.type_ann = NULL;
         return n;
@@ -7334,7 +7334,7 @@ static Node *node_from_xs_map(Value *map) {
     if (tag_i == NODE_RETURN) {
         Node *n = node_new(NODE_RETURN, sp);
         Value *val = map_get(map->map, "value");
-        n->ret.value = (val && val->tag == XS_MAP) ? node_from_xs_map(val) : NULL;
+        n->ret.value = (val && VAL_TAG(val) == XS_MAP) ? node_from_xs_map(val) : NULL;
         return n;
     }
     if (tag_i == NODE_ASSIGN) {
@@ -7378,16 +7378,16 @@ static Node *node_from_xs_map(Value *map) {
         n->lambda.params = paramlist_new();
         n->lambda.is_generator = 0;
         Value *params = map_get(map->map, "params");
-        if (params && params->tag == XS_ARRAY) {
+        if (params && VAL_TAG(params) == XS_ARRAY) {
             for (int j = 0; j < params->arr->len; j++) {
                 Value *pv = params->arr->items[j];
                 Param p = {0};
                 p.span = sp;
                 const char *pname = "_";
-                if (pv && pv->tag == XS_STR) pname = pv->s;
-                else if (pv && pv->tag == XS_MAP) {
+                if (pv && VAL_TAG(pv) == XS_STR) pname = pv->s;
+                else if (pv && VAL_TAG(pv) == XS_MAP) {
                     Value *nv = map_get(pv->map, "name");
-                    if (nv && nv->tag == XS_STR) pname = nv->s;
+                    if (nv && VAL_TAG(nv) == XS_STR) pname = nv->s;
                 }
                 p.name = xs_strdup(pname);
                 Node *pat = node_new(NODE_PAT_IDENT, sp);
@@ -7398,23 +7398,23 @@ static Node *node_from_xs_map(Value *map) {
             }
         }
         Value *body = map_get(map->map, "body");
-        n->lambda.body = (body && body->tag == XS_MAP) ? node_from_xs_map(body) : NULL;
+        n->lambda.body = (body && VAL_TAG(body) == XS_MAP) ? node_from_xs_map(body) : NULL;
         if (!n->lambda.body) n->lambda.body = node_new(NODE_LIT_NULL, sp);
         return n;
     }
     if (tag_i == NODE_FN_DECL) {
         Node *n = node_new(NODE_FN_DECL, sp);
         Value *name = map_get(map->map, "name");
-        n->fn_decl.name = xs_strdup((name && name->tag == XS_STR) ? name->s : "");
+        n->fn_decl.name = xs_strdup((name && VAL_TAG(name) == XS_STR) ? name->s : "");
         n->fn_decl.params = paramlist_new();
         Value *params = map_get(map->map, "params");
-        if (params && params->tag == XS_ARRAY) {
+        if (params && VAL_TAG(params) == XS_ARRAY) {
             for (int j = 0; j < params->arr->len; j++) {
                 Value *pv = params->arr->items[j];
                 Param p = {0};
                 p.span = sp;
                 const char *pname = "_";
-                if (pv && pv->tag == XS_STR) pname = pv->s;
+                if (pv && VAL_TAG(pv) == XS_STR) pname = pv->s;
                 p.name = xs_strdup(pname);
                 Node *pat = node_new(NODE_PAT_IDENT, sp);
                 pat->pat_ident.name = xs_strdup(pname);
@@ -7424,7 +7424,7 @@ static Node *node_from_xs_map(Value *map) {
             }
         }
         Value *body = map_get(map->map, "body");
-        n->fn_decl.body = (body && body->tag == XS_MAP) ? node_from_xs_map(body) : NULL;
+        n->fn_decl.body = (body && VAL_TAG(body) == XS_MAP) ? node_from_xs_map(body) : NULL;
         if (!n->fn_decl.body) n->fn_decl.body = node_new(NODE_LIT_NULL, sp);
         n->fn_decl.is_async = 0;
         n->fn_decl.is_pub = 0;
@@ -7441,7 +7441,7 @@ static Node *node_from_xs_map(Value *map) {
     }
     if (tag_i == NODE_EXPR_STMT) {
         Value *expr = map_get(map->map, "expr");
-        if (expr && expr->tag == XS_MAP) {
+        if (expr && VAL_TAG(expr) == XS_MAP) {
             Node *n = node_new(NODE_EXPR_STMT, sp);
             n->expr_stmt.expr = node_from_xs_map(expr);
             n->expr_stmt.has_semicolon = 0;
@@ -7451,8 +7451,8 @@ static Node *node_from_xs_map(Value *map) {
     if (tag_i == NODE_LIT_DURATION) {
         Node *n = node_new(NODE_LIT_DURATION, sp);
         Value *v = map_get(map->map, "ms");
-        n->lit_duration.ms = (v && v->tag == XS_FLOAT) ? v->f :
-                             (v && v->tag == XS_INT) ? (double)v->i : 0.0;
+        n->lit_duration.ms = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
+                             (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
         return n;
     }
     if (tag_i == NODE_LIT_COLOR) {
@@ -7461,30 +7461,30 @@ static Node *node_from_xs_map(Value *map) {
         Value *g = map_get(map->map, "g");
         Value *b = map_get(map->map, "b");
         Value *a = map_get(map->map, "a");
-        n->lit_color.r = (r && r->tag == XS_INT) ? r->i : 0;
-        n->lit_color.g = (g && g->tag == XS_INT) ? g->i : 0;
-        n->lit_color.b = (b && b->tag == XS_INT) ? b->i : 0;
-        n->lit_color.a = (a && a->tag == XS_INT) ? a->i : 255;
+        n->lit_color.r = (r && VAL_TAG(r) == XS_INT) ? VAL_INT(r) : 0;
+        n->lit_color.g = (g && VAL_TAG(g) == XS_INT) ? VAL_INT(g) : 0;
+        n->lit_color.b = (b && VAL_TAG(b) == XS_INT) ? VAL_INT(b) : 0;
+        n->lit_color.a = (a && VAL_TAG(a) == XS_INT) ? VAL_INT(a) : 255;
         return n;
     }
     if (tag_i == NODE_LIT_DATE) {
         Node *n = node_new(NODE_LIT_DATE, sp);
         Value *v = map_get(map->map, "value");
-        n->lit_date.value = xs_strdup((v && v->tag == XS_STR) ? v->s : "");
+        n->lit_date.value = xs_strdup((v && VAL_TAG(v) == XS_STR) ? v->s : "");
         return n;
     }
     if (tag_i == NODE_LIT_SIZE) {
         Node *n = node_new(NODE_LIT_SIZE, sp);
         Value *v = map_get(map->map, "bytes");
-        n->lit_size.bytes = (v && v->tag == XS_FLOAT) ? v->f :
-                            (v && v->tag == XS_INT) ? (double)v->i : 0.0;
+        n->lit_size.bytes = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
+                            (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
         return n;
     }
     if (tag_i == NODE_LIT_ANGLE) {
         Node *n = node_new(NODE_LIT_ANGLE, sp);
         Value *v = map_get(map->map, "radians");
-        n->lit_angle.radians = (v && v->tag == XS_FLOAT) ? v->f :
-                               (v && v->tag == XS_INT) ? (double)v->i : 0.0;
+        n->lit_angle.radians = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
+                               (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
         return n;
     }
     if (tag_i == NODE_EVERY) {
@@ -7514,7 +7514,7 @@ static Node *node_from_xs_map(Value *map) {
         Value *fb = map_get(map->map, "fallback");
         n->timeout_.duration = node_from_xs_map(dur);
         n->timeout_.body = node_from_xs_map(body);
-        n->timeout_.fallback = (fb && fb->tag == XS_MAP) ? node_from_xs_map(fb) : NULL;
+        n->timeout_.fallback = (fb && VAL_TAG(fb) == XS_MAP) ? node_from_xs_map(fb) : NULL;
         if (!n->timeout_.duration) n->timeout_.duration = node_new(NODE_LIT_NULL, sp);
         if (!n->timeout_.body) n->timeout_.body = node_new(NODE_LIT_NULL, sp);
         return n;
@@ -7548,11 +7548,11 @@ static Value *native_plugin_before_eval(Interp *interp, Value **args, int argc) 
     int tag_filter = -1;
     Value *callback = NULL;
 
-    if (argc >= 2 && args[0] && args[0]->tag == XS_STR &&
-        args[1] && (args[1]->tag == XS_FUNC || args[1]->tag == XS_NATIVE)) {
+    if (argc >= 2 && args[0] && VAL_TAG(args[0]) == XS_STR &&
+        args[1] && (VAL_TAG(args[1]) == XS_FUNC || VAL_TAG(args[1]) == XS_NATIVE)) {
         tag_filter = node_tag_from_string(args[0]->s);
         callback = args[1];
-    } else if (args[0] && (args[0]->tag == XS_FUNC || args[0]->tag == XS_NATIVE)) {
+    } else if (args[0] && (VAL_TAG(args[0]) == XS_FUNC || VAL_TAG(args[0]) == XS_NATIVE)) {
         callback = args[0];
     } else {
         return value_incref(XS_NULL_VAL);
@@ -7578,11 +7578,11 @@ static Value *native_plugin_after_eval(Interp *interp, Value **args, int argc) {
     int tag_filter = -1;
     Value *callback = NULL;
 
-    if (argc >= 2 && args[0] && args[0]->tag == XS_STR &&
-        args[1] && (args[1]->tag == XS_FUNC || args[1]->tag == XS_NATIVE)) {
+    if (argc >= 2 && args[0] && VAL_TAG(args[0]) == XS_STR &&
+        args[1] && (VAL_TAG(args[1]) == XS_FUNC || VAL_TAG(args[1]) == XS_NATIVE)) {
         tag_filter = node_tag_from_string(args[0]->s);
         callback = args[1];
-    } else if (args[0] && (args[0]->tag == XS_FUNC || args[0]->tag == XS_NATIVE)) {
+    } else if (args[0] && (VAL_TAG(args[0]) == XS_FUNC || VAL_TAG(args[0]) == XS_NATIVE)) {
         callback = args[0];
     } else {
         return value_incref(XS_NULL_VAL);
@@ -7601,7 +7601,7 @@ static Value *native_plugin_after_eval(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_on_unknown(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_syntax_handlers >= 16) return value_incref(XS_NULL_VAL);
     int idx = g_n_syntax_handlers++;
@@ -7612,7 +7612,7 @@ static Value *native_plugin_on_unknown(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_on_unknown_expr(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_syntax_expr_handlers >= 16) return value_incref(XS_NULL_VAL);
     int idx = g_n_syntax_expr_handlers++;
@@ -7622,7 +7622,7 @@ static Value *native_plugin_on_unknown_expr(Interp *interp, Value **args, int ar
 
 static Value *native_plugin_on_postfix(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_postfix_handlers >= 16) return value_incref(XS_NULL_VAL);
     int idx = g_n_postfix_handlers++;
@@ -7634,7 +7634,7 @@ static Value *native_plugin_on_postfix(Interp *interp, Value **args, int argc) {
 
 static Value *native_plugin_add_keyword(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || args[0]->tag != XS_STR)
+    if (argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR)
         return value_incref(XS_NULL_VAL);
     if (g_n_plugin_keywords >= MAX_PLUGIN_KEYWORDS) return value_incref(XS_NULL_VAL);
     /* check for duplicates */
@@ -7708,7 +7708,7 @@ static Value *native_parser_ident(Interp *interp, Value **args, int argc) {
 
 static Value *native_parser_expect(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (!g_active_parser || argc < 1 || !args[0] || args[0]->tag != XS_STR) {
+    if (!g_active_parser || argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR) {
         fprintf(stderr, "xs: error: parser methods can only be called during parsing\n");
         return value_incref(XS_NULL_VAL);
     }
@@ -7733,7 +7733,7 @@ static Value *native_parser_expect(Interp *interp, Value **args, int argc) {
 
 static Value *native_parser_at(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (!g_active_parser || argc < 1 || !args[0] || args[0]->tag != XS_STR)
+    if (!g_active_parser || argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR)
         return value_incref(XS_FALSE_VAL);
     Token *tok = parser_peek_token(g_active_parser, 0);
     const char *kind_str = args[0]->s;
@@ -7754,8 +7754,8 @@ static Value *native_parser_peek(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (!g_active_parser) return value_incref(XS_NULL_VAL);
     int offset = 0;
-    if (argc > 0 && args[0] && args[0]->tag == XS_INT)
-        offset = (int)args[0]->i;
+    if (argc > 0 && args[0] && VAL_TAG(args[0]) == XS_INT)
+        offset = (int)VAL_INT(args[0]);
     Token *tok = parser_peek_token(g_active_parser, offset);
     Value *m = xs_map_new();
     map_set(m->map, "kind", xs_str(token_kind_name(tok->kind)));
@@ -7798,7 +7798,7 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
         if (!handler) continue;
         Value *args[1] = { token_map };
         Value *ret = call_value(g_plugin_interp, handler, args, 1, "on_unknown");
-        if (ret && ret->tag == XS_MAP) {
+        if (ret && VAL_TAG(ret) == XS_MAP) {
             result = node_from_xs_map(ret);
             value_decref(ret);
             if (result) break;
@@ -7828,7 +7828,7 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
             Value *ret = call_value(g_plugin_interp, g_parser_productions[j].callback,
                                     args, 2, "parser.production");
             value_decref(parser_map);
-            if (ret && ret->tag == XS_MAP) {
+            if (ret && VAL_TAG(ret) == XS_MAP) {
                 result = node_from_xs_map(ret);
                 value_decref(ret);
                 if (result) break;
@@ -7862,7 +7862,7 @@ static Node *plugin_try_syntax_expr_handler_impl(Parser *p, Token *tok) {
         if (!handler) continue;
         Value *args[1] = { token_map };
         Value *ret = call_value(g_plugin_interp, handler, args, 1, "on_unknown_expr");
-        if (ret && ret->tag == XS_MAP) {
+        if (ret && VAL_TAG(ret) == XS_MAP) {
             result = node_from_xs_map(ret);
             value_decref(ret);
             if (result) break;
@@ -7891,15 +7891,15 @@ static Value *native_hook_remove(Interp *interp, Value **args, int argc) {
     /* the handle map is accessible via interp->env where "self" might be bound,
        but for simplicity we encode the hook info in a closure context.
        Actually: since XS calls map.remove() like a method, 'self' is args[0]. */
-    Value *self = (argc > 0 && args[0] && args[0]->tag == XS_MAP) ? args[0] : NULL;
+    Value *self = (argc > 0 && args[0] && VAL_TAG(args[0]) == XS_MAP) ? args[0] : NULL;
     if (!self) return value_incref(XS_NULL_VAL);
 
     Value *idx_v = map_get(self->map, "_hook_idx");
     Value *type_v = map_get(self->map, "_hook_type");
-    if (!idx_v || idx_v->tag != XS_INT || !type_v || type_v->tag != XS_STR)
+    if (!idx_v || VAL_TAG(idx_v) != XS_INT || !type_v || VAL_TAG(type_v) != XS_STR)
         return value_incref(XS_NULL_VAL);
 
-    int idx = (int)idx_v->i;
+    int idx = (int)VAL_INT(idx_v);
     const char *type = type_v->s;
 
     if (strcmp(type, "before_eval") == 0 && idx >= 0 && idx < g_n_before_eval) {
@@ -8023,8 +8023,8 @@ static Value *native_plugin_parser_override(Interp *interp, Value **args, int ar
         fprintf(stderr, "xs: sandbox: plugin.parser.override is disabled\n");
         return value_incref(XS_NULL_VAL);
     }
-    if (argc < 2 || !args[0] || args[0]->tag != XS_STR ||
-        !args[1] || (args[1]->tag != XS_FUNC && args[1]->tag != XS_NATIVE))
+    if (argc < 2 || !args[0] || VAL_TAG(args[0]) != XS_STR ||
+        !args[1] || (VAL_TAG(args[1]) != XS_FUNC && VAL_TAG(args[1]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_parser_overrides >= 32) return value_incref(XS_NULL_VAL);
 
@@ -8057,7 +8057,7 @@ static Value *native_plugin_parser_override(Interp *interp, Value **args, int ar
 
 static Value *native_plugin_lexer_transform(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_lexer_transforms >= 16) return value_incref(XS_NULL_VAL);
 
@@ -8070,7 +8070,7 @@ static Value *native_plugin_lexer_transform(Interp *interp, Value **args, int ar
 
 static Value *native_plugin_resolve_import(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_resolve_import >= 16) return value_incref(XS_NULL_VAL);
 
@@ -8083,7 +8083,7 @@ static Value *native_plugin_resolve_import(Interp *interp, Value **args, int arg
 
 static Value *native_plugin_on_error(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || (args[0]->tag != XS_FUNC && args[0]->tag != XS_NATIVE))
+    if (argc < 1 || !args[0] || (VAL_TAG(args[0]) != XS_FUNC && VAL_TAG(args[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     if (g_n_on_error >= 16) return value_incref(XS_NULL_VAL);
 
@@ -8205,7 +8205,7 @@ static Node *plugin_try_parser_override_impl(Parser *p, const char *keyword) {
 
     g_active_parser = saved_parser;
 
-    if (ret && ret->tag == XS_MAP) {
+    if (ret && VAL_TAG(ret) == XS_MAP) {
         Node *result = node_from_xs_map(ret);
         value_decref(ret);
         return result;
@@ -8479,13 +8479,13 @@ static void exec_plugin_load(Interp *i, Node *stmt, const char *resolved) {
         const char *pname = use_path;
         const char *pver = NULL;
         Value *pval = env_get(tmp->globals, "plugin");
-        if (pval && pval->tag == XS_MAP) {
+        if (pval && VAL_TAG(pval) == XS_MAP) {
             Value *meta = map_get(pval->map, "meta");
-            if (meta && meta->tag == XS_MAP) {
+            if (meta && VAL_TAG(meta) == XS_MAP) {
                 Value *name_v = map_get(meta->map, "name");
                 Value *ver_v = map_get(meta->map, "version");
-                if (name_v && name_v->tag == XS_STR) pname = name_v->s;
-                if (ver_v && ver_v->tag == XS_STR) pver = ver_v->s;
+                if (name_v && VAL_TAG(name_v) == XS_STR) pname = name_v->s;
+                if (ver_v && VAL_TAG(ver_v) == XS_STR) pver = ver_v->s;
             }
         }
         plugin_register_loaded(pname, pver);
@@ -8674,11 +8674,11 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
     if (!n || !pass) return n;
     /* check if this node's tag matches any visitor */
     for (int v = 0; v < pass->nvisitors; v++) {
-        int tag_match = (pass->visitor_tags[v] == (int)n->tag);
+        int tag_match = (pass->visitor_tags[v] == (int)VAL_TAG(n));
         if (!tag_match && pass->visitor_tags[v] == -1) {
             /* name-based matching for custom/unresolved tag names */
             if (pass->visitor_names && pass->visitor_names[v]) {
-                const char *cur_tag = node_tag_to_string(n->tag);
+                const char *cur_tag = node_tag_to_string(VAL_TAG(n));
                 tag_match = (strcmp(pass->visitor_names[v], cur_tag) == 0);
             } else {
                 tag_match = 1; /* wildcard: no name, match all */
@@ -8686,7 +8686,7 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
         }
         if (tag_match) {
             Value *cb = pass->visitors[v];
-            if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) continue;
+            if (!cb || (VAL_TAG(cb) != XS_FUNC && VAL_TAG(cb) != XS_NATIVE)) continue;
             /* reset sema chain position for each node visit */
             if (g_sema_chain) g_sema_chain_pos = 0;
             Value *node_map = node_to_xs_map(n);
@@ -8699,7 +8699,7 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
             Value *result = call_value(interp, cb, args, nargs, "pass_visitor");
             interp->diag = saved_diag;
             /* transform passes: if callback returns a map, replace the node */
-            if (pass->kind == PASS_TRANSFORM && result && result->tag == XS_MAP) {
+            if (pass->kind == PASS_TRANSFORM && result && VAL_TAG(result) == XS_MAP) {
                 Node *replacement = node_from_xs_map(result);
                 if (replacement) {
                     value_decref(result);
@@ -8721,7 +8721,7 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
 
     /* helper: fire on_scope_exit callback if present */
 #define FIRE_SCOPE_EXIT(block_node) do { \
-    if (pass->on_scope_exit && (pass->on_scope_exit->tag == XS_FUNC || pass->on_scope_exit->tag == XS_NATIVE)) { \
+    if (pass->on_scope_exit && (VAL_TAG(pass->on_scope_exit) == XS_FUNC || VAL_TAG(pass->on_scope_exit) == XS_NATIVE)) { \
         Value *scope_info = xs_map_new(); \
         map_set(scope_info->map, "line", xs_int((block_node)->span.line)); \
         map_set(scope_info->map, "col", xs_int((block_node)->span.col)); \
@@ -8737,7 +8737,7 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
 } while (0)
 
     /* recurse into children based on node tag */
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_PROGRAM:
         for (int j = 0; j < n->program.stmts.len; j++)
             WALK_CHILD(n->program.stmts.items[j]);
@@ -8972,9 +8972,9 @@ static Value *native_emit_runtime_hook(Interp *interp, Value **args, int argc) {
     PluginPipeline *pp = (PluginPipeline *)interp->pipeline;
     if (!pp) return value_incref(XS_NULL_VAL);
     int node_id = 0;
-    if (args[0] && args[0]->tag == XS_INT) node_id = (int)args[0]->i;
-    const char *kind = (args[1] && args[1]->tag == XS_STR) ? args[1]->s : "";
-    const char *target = (args[2] && args[2]->tag == XS_STR) ? args[2]->s : "";
+    if (args[0] && VAL_TAG(args[0]) == XS_INT) node_id = (int)VAL_INT(args[0]);
+    const char *kind = (args[1] && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : "";
+    const char *target = (args[2] && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
     pipeline_emit_hook(pp, node_id, kind, target, span_zero());
     return value_incref(XS_NULL_VAL);
 }
@@ -9007,8 +9007,8 @@ void interp_setup_tracer_suppress(Interp *i) {
 /* native __tracer_write_prov(var_name, json_string) - write rich provenance to trace */
 static Value *native_tracer_write_prov(Interp *interp, Value **args, int argc) {
     if (!interp->tracer || argc < 2) return xs_null();
-    const char *var = (args[0] && args[0]->tag == XS_STR) ? args[0]->s : "?";
-    const char *json = (args[1] && args[1]->tag == XS_STR) ? args[1]->s : "{}";
+    const char *var = (args[0] && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : "?";
+    const char *json = (args[1] && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : "{}";
     /* force-write bypasses suppression so explicit plugin provenance goes through */
     tracer_record_provenance_force((XSTracer*)interp->tracer, var, "plugin", json, 0);
     return xs_null();
@@ -9035,13 +9035,13 @@ void interp_exec(Interp *i, Node *stmt) {
 
     /* fire before_eval hooks for statement nodes so plugins can track them */
     if (g_has_eval_hooks && g_n_before_eval > 0 && !g_in_eval_hook &&
-        (stmt->tag == NODE_LET || stmt->tag == NODE_VAR ||
-         stmt->tag == NODE_RETURN || stmt->tag == NODE_THROW)) {
+        (VAL_TAG(stmt) == NODE_LET || VAL_TAG(stmt) == NODE_VAR ||
+         VAL_TAG(stmt) == NODE_RETURN || VAL_TAG(stmt) == NODE_THROW)) {
         g_in_eval_hook = 1;
         for (int _h = 0; _h < g_n_before_eval; _h++) {
             EvalHook *hook = &g_before_eval[_h];
             if (!hook->callback) continue;
-            if (hook->tag_filter >= 0 && hook->tag_filter != (int)stmt->tag) continue;
+            if (hook->tag_filter >= 0 && hook->tag_filter != (int)VAL_TAG(stmt)) continue;
             Value *node_map = node_to_xs_map(stmt);
             Value *args[1] = { node_map };
             Value *result = call_value(i, hook->callback, args, 1, "before_eval");
@@ -9052,7 +9052,7 @@ void interp_exec(Interp *i, Node *stmt) {
         g_in_eval_hook = 0;
     }
 
-    switch (stmt->tag) {
+    switch (VAL_TAG(stmt)) {
     case NODE_EXPR_STMT: {
         Value *v = EVAL(i, stmt->expr_stmt.expr);
         value_decref(v);
@@ -9093,7 +9093,7 @@ void interp_exec(Interp *i, Node *stmt) {
                 i->cf.value = xs_str(msg);
             }
         }
-        int mutable = (stmt->tag == NODE_VAR) || stmt->let.mutable;
+        int mutable = (VAL_TAG(stmt) == NODE_VAR) || stmt->let.mutable;
         if (stmt->let.name) {
             env_define(i->env, stmt->let.name, val, mutable);
             TRACE_STORE(i, stmt->let.name, val);
@@ -9108,8 +9108,8 @@ void interp_exec(Interp *i, Node *stmt) {
                 char from_name[64];
                 snprintf(from_name, sizeof(from_name), "__pipeline_from_%s", idx_str);
                 Value *from_val = env_get(i->env, from_name);
-                if (from_val && from_val->tag == XS_STR &&
-                    val && val->tag == XS_STR) {
+                if (from_val && VAL_TAG(from_val) == XS_STR &&
+                    val && VAL_TAG(val) == XS_STR) {
                     pipeline_add_constraint(
                         (PluginPipeline *)i->pipeline, from_val->s, val->s);
                 }
@@ -9123,7 +9123,7 @@ void interp_exec(Interp *i, Node *stmt) {
             for (int _h = 0; _h < g_n_after_eval; _h++) {
                 EvalHook *hook = &g_after_eval[_h];
                 if (!hook->callback) continue;
-                if (hook->tag_filter >= 0 && hook->tag_filter != (int)stmt->tag) continue;
+                if (hook->tag_filter >= 0 && hook->tag_filter != (int)VAL_TAG(stmt)) continue;
                 Value *node_map = node_to_xs_map(stmt);
                 Value *hargs[2] = { node_map, val };
                 Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
@@ -9221,9 +9221,9 @@ void interp_exec(Interp *i, Node *stmt) {
         Value *v = xs_func_new(fn);
         if (stmt->fn_decl.name) {
             Value *existing = env_get(i->env, stmt->fn_decl.name);
-            if (existing && existing->tag == XS_OVERLOAD) {
+            if (existing && VAL_TAG(existing) == XS_OVERLOAD) {
                 array_push(existing->overload, value_incref(v));
-            } else if (existing && (existing->tag == XS_FUNC || existing->tag == XS_NATIVE)) {
+            } else if (existing && (VAL_TAG(existing) == XS_FUNC || VAL_TAG(existing) == XS_NATIVE)) {
                 Value *oset = xs_overload_new();
                 array_push(oset->overload, value_incref(existing));
                 array_push(oset->overload, value_incref(v));
@@ -9250,7 +9250,7 @@ void interp_exec(Interp *i, Node *stmt) {
         cls->bases  = nbases ? xs_malloc(nbases * sizeof(XSClass*)) : NULL;
         for (int j = 0; j < nbases; j++) {
             Value *base_val = env_get(i->env, stmt->class_decl.bases[j]);
-            if (base_val && base_val->tag == XS_CLASS_VAL) {
+            if (base_val && VAL_TAG(base_val) == XS_CLASS_VAL) {
                 cls->bases[j] = base_val->cls;
             } else {
                 const char *base_sugg = find_similar_name(i->env, stmt->class_decl.bases[j]);
@@ -9302,7 +9302,7 @@ void interp_exec(Interp *i, Node *stmt) {
 
         for (int j = 0; j < stmt->class_decl.members.len; j++) {
             Node *mem = stmt->class_decl.members.items[j];
-            if (mem->tag == NODE_FN_DECL) {
+            if (VAL_TAG(mem) == NODE_FN_DECL) {
                 int np = mem->fn_decl.params.len;
                 Node **params = np ? xs_malloc(np*sizeof(Node*)) : NULL;
                 for (int k=0;k<np;k++) {
@@ -9322,7 +9322,7 @@ void interp_exec(Interp *i, Node *stmt) {
                         map_set(cls->methods, mem->fn_decl.name, fv);
                 }
                 else value_decref(fv);
-            } else if (mem->tag == NODE_LET || mem->tag == NODE_VAR) {
+            } else if (VAL_TAG(mem) == NODE_LET || VAL_TAG(mem) == NODE_VAR) {
                 Value *def = mem->let.value ? EVAL(i, mem->let.value) : value_incref(XS_NULL_VAL);
                 if (mem->let.name) map_set(cls->fields, mem->let.name, def);
                 else value_decref(def);
@@ -9356,7 +9356,7 @@ void interp_exec(Interp *i, Node *stmt) {
         /* Process methods: find handle and other methods */
         for (int j = 0; j < stmt->actor_decl.methods.len; j++) {
             Node *m = stmt->actor_decl.methods.items[j];
-            if (m->tag != NODE_FN_DECL) continue;
+            if (VAL_TAG(m) != NODE_FN_DECL) continue;
             int np = m->fn_decl.params.len;
             Node **params = np ? xs_malloc(np * sizeof(Node*)) : NULL;
             for (int k = 0; k < np; k++) {
@@ -9386,7 +9386,7 @@ void interp_exec(Interp *i, Node *stmt) {
         actor->closure = env_incref(i->env);
 
         Value *actor_val = xs_calloc(1, sizeof(Value));
-        actor_val->tag      = XS_ACTOR;
+        actor_val->tag = XS_ACTOR;
         actor_val->refcount = 1;
         actor_val->actor    = actor;
         env_define(i->env, stmt->actor_decl.name, actor_val, 1);
@@ -9464,7 +9464,7 @@ void interp_exec(Interp *i, Node *stmt) {
     case NODE_IMPL_DECL: {
         Value *cls_val = env_get(i->env, stmt->impl_decl.type_name);
         XSClass *cls = NULL;
-        if (cls_val && cls_val->tag == XS_CLASS_VAL) {
+        if (cls_val && VAL_TAG(cls_val) == XS_CLASS_VAL) {
             cls = cls_val->cls;
         }
         if (cls && stmt->impl_decl.trait_name) {
@@ -9472,20 +9472,20 @@ void interp_exec(Interp *i, Node *stmt) {
             cls->traits = xs_realloc(cls->traits, sizeof(char*) * cls->ntraits);
             cls->traits[idx] = xs_strdup(stmt->impl_decl.trait_name);
             Value *trait_val = env_get(i->env, stmt->impl_decl.trait_name);
-            if (trait_val && trait_val->tag == XS_MAP) {
+            if (trait_val && VAL_TAG(trait_val) == XS_MAP) {
                 Value *defaults = map_get(trait_val->map, "__defaults__");
-                if (defaults && defaults->tag == XS_MAP) {
+                if (defaults && VAL_TAG(defaults) == XS_MAP) {
                     int nk = 0; char **ks = map_keys(defaults->map, &nk);
                     for (int j = 0; j < nk; j++) {
                         int found = 0;
                         for (int m = 0; m < stmt->impl_decl.members.len; m++) {
                             Node *mem = stmt->impl_decl.members.items[m];
-                            if (mem->tag == NODE_FN_DECL && mem->fn_decl.name &&
+                            if (VAL_TAG(mem) == NODE_FN_DECL && mem->fn_decl.name &&
                                 strcmp(mem->fn_decl.name, ks[j]) == 0) { found = 1; break; }
                         }
                         if (!found) {
                             Value *dfn = map_get(defaults->map, ks[j]);
-                            if (dfn && dfn->tag == XS_FUNC) {
+                            if (dfn && VAL_TAG(dfn) == XS_FUNC) {
                                 map_set(cls->methods, ks[j], value_incref(dfn));
                             }
                         }
@@ -9496,7 +9496,7 @@ void interp_exec(Interp *i, Node *stmt) {
             }
         }
         XSMap *enum_impl = NULL;
-        if (cls_val && (cls_val->tag == XS_MODULE || cls_val->tag == XS_MAP)) {
+        if (cls_val && (VAL_TAG(cls_val) == XS_MODULE || VAL_TAG(cls_val) == XS_MAP)) {
             Value *impl_val = map_get(cls_val->map, "__impl__");
             if (!impl_val) {
                 Value *new_impl = xs_map_new();
@@ -9509,7 +9509,7 @@ void interp_exec(Interp *i, Node *stmt) {
         }
         for (int j = 0; j < stmt->impl_decl.members.len; j++) {
             Node *mem = stmt->impl_decl.members.items[j];
-            if (mem->tag == NODE_FN_DECL && mem->fn_decl.body) {
+            if (VAL_TAG(mem) == NODE_FN_DECL && mem->fn_decl.body) {
                 int np = mem->fn_decl.params.len;
                 Node **params = np ? xs_malloc(np*sizeof(Node*)) : NULL;
                 for (int k=0;k<np;k++) {
@@ -9567,8 +9567,8 @@ void interp_exec(Interp *i, Node *stmt) {
                                            hook_args, 2, "resolve_import");
                 value_decref(name_arg);
                 if (prev_fn) value_decref(prev_fn);
-                if (result && result->tag != XS_NULL &&
-                    (result->tag == XS_MAP || result->tag == XS_MODULE)) {
+                if (result && VAL_TAG(result) != XS_NULL &&
+                    (VAL_TAG(result) == XS_MAP || VAL_TAG(result) == XS_MODULE)) {
                     mod = result;
                     env_define(i->globals, modname, mod, 1);
                     value_decref(mod);
@@ -9592,7 +9592,7 @@ void interp_exec(Interp *i, Node *stmt) {
             if (stmt->import.nitems > 0) {
                 for (int j=0;j<stmt->import.nitems;j++) {
                     Value *item = NULL;
-                    if (mod->tag==XS_MODULE||mod->tag==XS_MAP)
+                    if (VAL_TAG(mod)==XS_MODULE||VAL_TAG(mod)==XS_MAP)
                         item = map_get(mod->map, stmt->import.items[j]);
                     if (item) env_define(i->env, stmt->import.items[j], item, 1);
                 }
@@ -9701,7 +9701,7 @@ void interp_exec(Interp *i, Node *stmt) {
         } else {
             for (int j = 0; j < stmt->use_.nnames; j++) {
                 Value *item = NULL;
-                if (mod->tag == XS_MODULE || mod->tag == XS_MAP)
+                if (VAL_TAG(mod) == XS_MODULE || VAL_TAG(mod) == XS_MAP)
                     item = map_get(mod->map, stmt->use_.names[j]);
                 if (item)
                     env_define(i->env, stmt->use_.name_aliases[j], item, 1);
@@ -9723,7 +9723,7 @@ void interp_exec(Interp *i, Node *stmt) {
         const char *plugin_id = stmt->plugin_decl.name ? stmt->plugin_decl.name : "";
 
         /* register meta */
-        if (stmt->plugin_decl.meta && stmt->plugin_decl.meta->tag == NODE_LIT_MAP) {
+        if (stmt->plugin_decl.meta && VAL_TAG(stmt->plugin_decl.meta) == NODE_LIT_MAP) {
             Node *meta = stmt->plugin_decl.meta;
             PluginMeta pm;
             memset(&pm, 0, sizeof(pm));
@@ -9732,53 +9732,53 @@ void interp_exec(Interp *i, Node *stmt) {
             for (int j = 0; j < meta->lit_map.keys.len; j++) {
                 Node *k = meta->lit_map.keys.items[j];
                 Node *v = meta->lit_map.vals.items[j];
-                if (!k || k->tag != NODE_LIT_STRING || !k->lit_string.sval) continue;
+                if (!k || VAL_TAG(k) != NODE_LIT_STRING || !k->lit_string.sval) continue;
                 const char *key = k->lit_string.sval;
-                if (strcmp(key, "version") == 0 && v && v->tag == NODE_LIT_STRING)
+                if (strcmp(key, "version") == 0 && v && VAL_TAG(v) == NODE_LIT_STRING)
                     pm.version = xs_strdup(v->lit_string.sval ? v->lit_string.sval : "");
-                else if (strcmp(key, "id") == 0 && v && v->tag == NODE_LIT_STRING) {
+                else if (strcmp(key, "id") == 0 && v && VAL_TAG(v) == NODE_LIT_STRING) {
                     free(pm.id);
                     pm.id = xs_strdup(v->lit_string.sval ? v->lit_string.sval : "");
                 }
-                else if (strcmp(key, "priority") == 0 && v && v->tag == NODE_LIT_INT)
+                else if (strcmp(key, "priority") == 0 && v && VAL_TAG(v) == NODE_LIT_INT)
                     pm.priority = (int)v->lit_int.ival;
-                else if (strcmp(key, "depends_on") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                else if (strcmp(key, "depends_on") == 0 && v && VAL_TAG(v) == NODE_LIT_ARRAY) {
                     pm.ndepends = v->lit_array.elems.len;
                     pm.depends_on = malloc(pm.ndepends * sizeof(char *));
                     for (int d = 0; d < pm.ndepends; d++) {
                         Node *e = v->lit_array.elems.items[d];
                         pm.depends_on[d] = xs_strdup(
-                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            (e && VAL_TAG(e) == NODE_LIT_STRING && e->lit_string.sval)
                             ? e->lit_string.sval : "");
                     }
                 }
-                else if (strcmp(key, "provides") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                else if (strcmp(key, "provides") == 0 && v && VAL_TAG(v) == NODE_LIT_ARRAY) {
                     pm.nprovides = v->lit_array.elems.len;
                     pm.provides = malloc(pm.nprovides * sizeof(char *));
                     for (int d = 0; d < pm.nprovides; d++) {
                         Node *e = v->lit_array.elems.items[d];
-                        const char *prov = (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                        const char *prov = (e && VAL_TAG(e) == NODE_LIT_STRING && e->lit_string.sval)
                             ? e->lit_string.sval : "";
                         pm.provides[d] = xs_strdup(apply_load_rename(prov));
                     }
                 }
-                else if (strcmp(key, "conflicts_with") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                else if (strcmp(key, "conflicts_with") == 0 && v && VAL_TAG(v) == NODE_LIT_ARRAY) {
                     pm.nconflicts = v->lit_array.elems.len;
                     pm.conflicts_with = malloc(pm.nconflicts * sizeof(char *));
                     for (int d = 0; d < pm.nconflicts; d++) {
                         Node *e = v->lit_array.elems.items[d];
                         pm.conflicts_with[d] = xs_strdup(
-                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            (e && VAL_TAG(e) == NODE_LIT_STRING && e->lit_string.sval)
                             ? e->lit_string.sval : "");
                     }
                 }
-                else if (strcmp(key, "modifies") == 0 && v && v->tag == NODE_LIT_ARRAY) {
+                else if (strcmp(key, "modifies") == 0 && v && VAL_TAG(v) == NODE_LIT_ARRAY) {
                     pm.nmodifies = v->lit_array.elems.len;
                     pm.modifies = malloc(pm.nmodifies * sizeof(char *));
                     for (int d = 0; d < pm.nmodifies; d++) {
                         Node *e = v->lit_array.elems.items[d];
                         pm.modifies[d] = xs_strdup(
-                            (e && e->tag == NODE_LIT_STRING && e->lit_string.sval)
+                            (e && VAL_TAG(e) == NODE_LIT_STRING && e->lit_string.sval)
                             ? e->lit_string.sval : "");
                     }
                 }
@@ -9792,14 +9792,14 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         /* process lexer section: register dynamic tokens */
-        if (stmt->plugin_decl.lexer_sec && stmt->plugin_decl.lexer_sec->tag == NODE_BLOCK) {
+        if (stmt->plugin_decl.lexer_sec && VAL_TAG(stmt->plugin_decl.lexer_sec) == NODE_BLOCK) {
             Node *blk = stmt->plugin_decl.lexer_sec;
             for (int j = 0; j < blk->block.stmts.len; j++) {
                 Node *s = blk->block.stmts.items[j];
-                if (s->tag == NODE_LET && s->let.name && strncmp(s->let.name, "__lx_", 5) == 0) {
+                if (VAL_TAG(s) == NODE_LET && s->let.name && strncmp(s->let.name, "__lx_", 5) == 0) {
                     const char *tok_name = apply_load_rename(s->let.name + 5);
                     const char *tok_pattern = "";
-                    if (s->let.value && s->let.value->tag == NODE_LIT_STRING && s->let.value->lit_string.sval)
+                    if (s->let.value && VAL_TAG(s->let.value) == NODE_LIT_STRING && s->let.value->lit_string.sval)
                         tok_pattern = s->let.value->lit_string.sval;
                     int kind = lexer_register_dyn_token(tok_name, tok_pattern);
                     pipeline_register_token(pp, tok_name, tok_pattern, plugin_id);
@@ -9810,11 +9810,11 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         /* process runtime section: register hook callbacks */
-        if (stmt->plugin_decl.runtime_sec && stmt->plugin_decl.runtime_sec->tag == NODE_BLOCK) {
+        if (stmt->plugin_decl.runtime_sec && VAL_TAG(stmt->plugin_decl.runtime_sec) == NODE_BLOCK) {
             Node *blk = stmt->plugin_decl.runtime_sec;
             for (int j = 0; j < blk->block.stmts.len; j++) {
                 Node *s = blk->block.stmts.items[j];
-                if (s->tag != NODE_LET || !s->let.name) continue;
+                if (VAL_TAG(s) != NODE_LET || !s->let.name) continue;
                 const char *nm = s->let.name;
                 /* parse __rt_KIND_TARGET */
                 RuntimeHookKind hk;
@@ -9833,7 +9833,7 @@ void interp_exec(Interp *i, Node *stmt) {
                     cb = interp_eval(i, s->let.value);
                     if (i->cf.signal) { if (cb) value_decref(cb); break; }
                 }
-                if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) {
+                if (!cb || (VAL_TAG(cb) != XS_FUNC && VAL_TAG(cb) != XS_NATIVE)) {
                     if (cb) value_decref(cb);
                     continue;
                 }
@@ -9867,7 +9867,7 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         /* process sema section: register rules (stubs - no dispatch yet) */
-        if (stmt->plugin_decl.sema_sec && stmt->plugin_decl.sema_sec->tag == NODE_BLOCK) {
+        if (stmt->plugin_decl.sema_sec && VAL_TAG(stmt->plugin_decl.sema_sec) == NODE_BLOCK) {
             /* look up meta priority for this plugin */
             int sema_priority = 50;
             for (int mi = 0; mi < pp->nmetas; mi++) {
@@ -9880,7 +9880,7 @@ void interp_exec(Interp *i, Node *stmt) {
             Node *blk = stmt->plugin_decl.sema_sec;
             for (int j = 0; j < blk->block.stmts.len; j++) {
                 Node *s = blk->block.stmts.items[j];
-                if (s->tag != NODE_LET || !s->let.name) continue;
+                if (VAL_TAG(s) != NODE_LET || !s->let.name) continue;
                 const char *nm = s->let.name;
                 if (strncmp(nm, "__sema_", 7) != 0) continue;
                 /* parse __sema_KIND_TARGET */
@@ -9917,7 +9917,7 @@ void interp_exec(Interp *i, Node *stmt) {
         /* process pass sections: extract phase, kind, visitors */
         for (int pi = 0; pi < stmt->plugin_decl.passes.len; pi++) {
             Node *pass_blk = stmt->plugin_decl.passes.items[pi];
-            if (!pass_blk || pass_blk->tag != NODE_BLOCK) continue;
+            if (!pass_blk || VAL_TAG(pass_blk) != NODE_BLOCK) continue;
 
             CustomPass cp;
             memset(&cp, 0, sizeof(cp));
@@ -9936,25 +9936,25 @@ void interp_exec(Interp *i, Node *stmt) {
 
             for (int pj = 0; pj < pass_blk->block.stmts.len; pj++) {
                 Node *ps = pass_blk->block.stmts.items[pj];
-                if (!ps || ps->tag != NODE_LET || !ps->let.name) continue;
+                if (!ps || VAL_TAG(ps) != NODE_LET || !ps->let.name) continue;
                 const char *pnm = ps->let.name;
                 if (strcmp(pnm, "__pass_name") == 0 && ps->let.value &&
-                    ps->let.value->tag == NODE_LIT_STRING) {
+                    VAL_TAG(ps->let.value) == NODE_LIT_STRING) {
                     free(cp.name);
                     const char *raw_name = ps->let.value->lit_string.sval ?
                                         ps->let.value->lit_string.sval : "";
                     cp.name = xs_strdup(apply_load_rename(raw_name));
                 } else if (strcmp(pnm, "__pass_phase") == 0 && ps->let.value &&
-                           ps->let.value->tag == NODE_LIT_STRING) {
+                           VAL_TAG(ps->let.value) == NODE_LIT_STRING) {
                     cp.is_after = (ps->let.value->lit_string.sval &&
                                    strcmp(ps->let.value->lit_string.sval, "after") == 0) ? 1 : 0;
                 } else if (strcmp(pnm, "__pass_phase_ref") == 0 && ps->let.value &&
-                           ps->let.value->tag == NODE_LIT_STRING) {
+                           VAL_TAG(ps->let.value) == NODE_LIT_STRING) {
                     free(cp.phase_ref);
                     cp.phase_ref = xs_strdup(ps->let.value->lit_string.sval ?
                                              ps->let.value->lit_string.sval : "parser");
                 } else if (strcmp(pnm, "__pass_kind") == 0 && ps->let.value &&
-                           ps->let.value->tag == NODE_LIT_STRING) {
+                           VAL_TAG(ps->let.value) == NODE_LIT_STRING) {
                     const char *ks = ps->let.value->lit_string.sval;
                     if (ks && strcmp(ks, "annotate") == 0) cp.kind = PASS_ANNOTATE;
                     else if (ks && strcmp(ks, "transform") == 0) cp.kind = PASS_TRANSFORM;
@@ -9966,7 +9966,7 @@ void interp_exec(Interp *i, Node *stmt) {
                         cb = interp_eval(i, ps->let.value);
                         if (i->cf.signal) { if (cb) value_decref(cb); break; }
                     }
-                    if (cb && (cb->tag == XS_FUNC || cb->tag == XS_NATIVE)) {
+                    if (cb && (VAL_TAG(cb) == XS_FUNC || VAL_TAG(cb) == XS_NATIVE)) {
                         if (cp.nvisitors >= vcap) {
                             vcap *= 2;
                             cp.visitors = realloc(cp.visitors, vcap * sizeof(Value *));
@@ -10004,11 +10004,11 @@ void interp_exec(Interp *i, Node *stmt) {
         }
 
         /* process parser section: register extend/production callbacks */
-        if (stmt->plugin_decl.parser_sec && stmt->plugin_decl.parser_sec->tag == NODE_BLOCK) {
+        if (stmt->plugin_decl.parser_sec && VAL_TAG(stmt->plugin_decl.parser_sec) == NODE_BLOCK) {
             Node *blk = stmt->plugin_decl.parser_sec;
             for (int j = 0; j < blk->block.stmts.len; j++) {
                 Node *s = blk->block.stmts.items[j];
-                if (s->tag != NODE_LET || !s->let.name) continue;
+                if (VAL_TAG(s) != NODE_LET || !s->let.name) continue;
                 const char *nm = s->let.name;
                 if (strncmp(nm, "__parser_", 9) != 0) continue;
                 /* evaluate the callback */
@@ -10017,7 +10017,7 @@ void interp_exec(Interp *i, Node *stmt) {
                     cb = interp_eval(i, s->let.value);
                     if (i->cf.signal) { if (cb) value_decref(cb); break; }
                 }
-                if (!cb || (cb->tag != XS_FUNC && cb->tag != XS_NATIVE)) {
+                if (!cb || (VAL_TAG(cb) != XS_FUNC && VAL_TAG(cb) != XS_NATIVE)) {
                     if (cb) value_decref(cb);
                     continue;
                 }
@@ -10099,7 +10099,7 @@ void interp_exec(Interp *i, Node *stmt) {
         Value *defaults_map = xs_map_new();
         for (int j = 0; j < stmt->trait_decl.methods.len; j++) {
             Node *meth = stmt->trait_decl.methods.items[j];
-            if (meth->tag == NODE_FN_DECL && meth->fn_decl.body) {
+            if (VAL_TAG(meth) == NODE_FN_DECL && meth->fn_decl.body) {
                 int np = meth->fn_decl.params.len;
                 Node **params = np ? xs_malloc(np*sizeof(Node*)) : NULL;
                 for (int k = 0; k < np; k++) {
@@ -10141,11 +10141,11 @@ void interp_exec(Interp *i, Node *stmt) {
     }
 
     case NODE_RETURN: {
-        if (stmt->ret.value && stmt->ret.value->tag == NODE_CALL) {
+        if (stmt->ret.value && VAL_TAG(stmt->ret.value) == NODE_CALL) {
             Node *cn = stmt->ret.value;
             Value *callee = EVAL(i, cn->call.callee);
             if (i->cf.signal) { value_decref(callee); break; }
-            if (callee->tag == XS_FUNC) {
+            if (VAL_TAG(callee) == XS_FUNC) {
                 int argc = cn->call.args.len;
                 Value **args = argc ? xs_malloc(argc * sizeof(Value*)) : NULL;
                 int ok = 1;
@@ -10421,7 +10421,7 @@ void interp_exec(Interp *i, Node *stmt) {
 static void hoist_functions(Interp *i, NodeList *stmts) {
     for (int j = 0; j < stmts->len; j++) {
         Node *stmt = stmts->items[j];
-        if (!stmt || stmt->tag != NODE_FN_DECL) continue;
+        if (!stmt || VAL_TAG(stmt) != NODE_FN_DECL) continue;
         if (!stmt->fn_decl.body || !stmt->fn_decl.name) continue;
 
         int nparams = stmt->fn_decl.params.len;
@@ -10472,7 +10472,7 @@ static void hoist_functions(Interp *i, NodeList *stmts) {
 }
 
 void interp_run(Interp *i, Node *program) {
-    if (!program || program->tag != NODE_PROGRAM) return;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
     g_current_interp = i;
     g_plugin_interp = i;
     i->current_program = program;
@@ -10628,7 +10628,7 @@ void interp_run(Interp *i, Node *program) {
     }
 run_done:;
     Value *main_fn = env_get(i->globals, "main");
-    if (main_fn && main_fn->tag == XS_FUNC) {
+    if (main_fn && VAL_TAG(main_fn) == XS_FUNC) {
         Value *res = call_value(i, main_fn, NULL, 0, "main");
         if (res) value_decref(res);
     }

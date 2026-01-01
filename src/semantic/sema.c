@@ -120,9 +120,9 @@ static void check_literal_type(SemaCtx *ctx, TypeExpr *te, Node *val) {
     if (g_tc_ran) return; /* full type checker already handled this */
     if (!te || !val) return;
     if (te->kind != TEXPR_NAMED || !te->name) return;
-    const char *lit = literal_type_name(val->tag);
+    const char *lit = literal_type_name(VAL_TAG(val));
     if (!lit) return;
-    if (!ann_matches_literal(te->name, val->tag)) {
+    if (!ann_matches_literal(te->name, VAL_TAG(val))) {
         Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "T0010",
             "type mismatch: expected '%s', got %s literal", te->name, lit);
         diag_annotate(d, val->span, 1, "expected '%s'", te->name);
@@ -139,7 +139,7 @@ static void walk_list(SemaCtx *ctx, NodeList *nl) {
 
 static void walk_children(SemaCtx *ctx, Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
         case NODE_PROGRAM:   walk_list(ctx, &n->program.stmts); break;
         case NODE_BLOCK:
             walk_list(ctx, &n->block.stmts);
@@ -205,7 +205,7 @@ static void walk_children(SemaCtx *ctx, Node *n) {
 
 static void walk(SemaCtx *ctx, Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
 
     case NODE_LET:
         if (ctx->strict && n->let.name && !n->let.type_ann) {
@@ -247,7 +247,7 @@ static void walk(SemaCtx *ctx, Node *n) {
         break;
 
     case NODE_ASSIGN:
-        if (n->assign.target->tag == NODE_IDENT) {
+        if (VAL_TAG(n->assign.target) == NODE_IDENT) {
             const char *name = n->assign.target->ident.name;
             if (!bind_is_mut(name)) {
                 Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "T0004",
@@ -299,7 +299,7 @@ static void walk(SemaCtx *ctx, Node *n) {
     }
 
     case NODE_CALL:
-        if (g_in_pure > 0 && n->call.callee->tag == NODE_IDENT) {
+        if (g_in_pure > 0 && VAL_TAG(n->call.callee) == NODE_IDENT) {
             static const char *impure[] = {
                 "println","print","eprintln","eprint",
                 "read_file","write_file","read_line","sleep","exit", NULL
@@ -325,9 +325,9 @@ static void walk(SemaCtx *ctx, Node *n) {
         walk(ctx, n->match.subject);
         const char **variants = NULL;
         int n_variants = 0;
-        if (n->match.subject && n->match.subject->tag == NODE_IDENT) {
+        if (n->match.subject && VAL_TAG(n->match.subject) == NODE_IDENT) {
             Symbol *subj_sym = sym_lookup(ctx->st, n->match.subject->ident.name);
-            if (subj_sym && subj_sym->decl && subj_sym->decl->tag == NODE_ENUM_DECL) {
+            if (subj_sym && subj_sym->decl && VAL_TAG(subj_sym->decl) == NODE_ENUM_DECL) {
                 EnumVariantList *vl = &subj_sym->decl->enum_decl.variants;
                 n_variants = vl->len;
                 if (n_variants > 0) {
@@ -340,7 +340,7 @@ static void walk(SemaCtx *ctx, Node *n) {
         /* try first arm's enum pattern as fallback */
         if (!variants && n->match.arms.len > 0) {
             Node *first_pat = n->match.arms.items[0].pattern;
-            if (first_pat && first_pat->tag == NODE_PAT_ENUM && first_pat->pat_enum.path) {
+            if (first_pat && VAL_TAG(first_pat) == NODE_PAT_ENUM && first_pat->pat_enum.path) {
                 const char *path = first_pat->pat_enum.path;
                 const char *sep = strstr(path, "::");
                 if (sep) {
@@ -351,7 +351,7 @@ static void walk(SemaCtx *ctx, Node *n) {
                         ename[elen] = '\0';
                         Symbol *enum_sym = sym_lookup(ctx->st, ename);
                         if (enum_sym && enum_sym->decl &&
-                            enum_sym->decl->tag == NODE_ENUM_DECL) {
+                            VAL_TAG(enum_sym->decl) == NODE_ENUM_DECL) {
                             EnumVariantList *vl = &enum_sym->decl->enum_decl.variants;
                             n_variants = vl->len;
                             if (n_variants > 0) {
@@ -410,15 +410,15 @@ static void walk(SemaCtx *ctx, Node *n) {
 /* collect declarations */
 static void collect_decls(SemaCtx *ctx, Node *prog) {
     (void)ctx;
-    if (!prog || prog->tag != NODE_PROGRAM) return;
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return;
     for (int i = 0; i < prog->program.stmts.len; i++) {
         Node *s = prog->program.stmts.items[i];
         if (!s) continue;
-        if (s->tag == NODE_FN_DECL     && s->fn_decl.name)     defname_add(s->fn_decl.name);
-        if (s->tag == NODE_TAG_DECL    && s->tag_decl.name)    defname_add(s->tag_decl.name);
-        if (s->tag == NODE_STRUCT_DECL  && s->struct_decl.name) defname_add(s->struct_decl.name);
-        if (s->tag == NODE_ENUM_DECL    && s->enum_decl.name)   defname_add(s->enum_decl.name);
-        if (s->tag == NODE_TRAIT_DECL   && s->trait_decl.name) {
+        if (VAL_TAG(s) == NODE_FN_DECL     && s->fn_decl.name)     defname_add(s->fn_decl.name);
+        if (VAL_TAG(s) == NODE_TAG_DECL    && s->tag_decl.name)    defname_add(s->tag_decl.name);
+        if (VAL_TAG(s) == NODE_STRUCT_DECL  && s->struct_decl.name) defname_add(s->struct_decl.name);
+        if (VAL_TAG(s) == NODE_ENUM_DECL    && s->enum_decl.name)   defname_add(s->enum_decl.name);
+        if (VAL_TAG(s) == NODE_TRAIT_DECL   && s->trait_decl.name) {
             defname_add(s->trait_decl.name);
             {
                 if (g_ntraits >= g_traits_cap) {
@@ -445,7 +445,7 @@ static void collect_decls(SemaCtx *ctx, Node *prog) {
                     }
                     for (int m = 0; m < s->trait_decl.methods.len && m < ti->n_methods; m++) {
                         Node *mn = s->trait_decl.methods.items[m];
-                        if (mn && mn->tag == NODE_FN_DECL) {
+                        if (mn && VAL_TAG(mn) == NODE_FN_DECL) {
                             ti->method_nodes[m]        = mn;
                             ti->method_param_counts[m] = mn->fn_decl.params.len;
                             ti->method_ret_types[m]    = (mn->fn_decl.ret_type &&
@@ -456,7 +456,7 @@ static void collect_decls(SemaCtx *ctx, Node *prog) {
                 }
             }
         }
-        if (s->tag == NODE_IMPL_DECL && s->impl_decl.trait_name && s->impl_decl.type_name)
+        if (VAL_TAG(s) == NODE_IMPL_DECL && s->impl_decl.trait_name && s->impl_decl.type_name)
             impl_add(s->impl_decl.trait_name, s->impl_decl.type_name);
     }
 }
@@ -465,7 +465,7 @@ static void collect_decls(SemaCtx *ctx, Node *prog) {
 static void check_orphans(SemaCtx *ctx, Node *prog) {
     for (int i = 0; i < prog->program.stmts.len; i++) {
         Node *s = prog->program.stmts.items[i];
-        if (!s || s->tag != NODE_IMPL_DECL) continue;
+        if (!s || VAL_TAG(s) != NODE_IMPL_DECL) continue;
         const char *tr = s->impl_decl.trait_name;
         const char *ty = s->impl_decl.type_name;
         if (!tr || !ty) continue;
@@ -484,7 +484,7 @@ static void check_orphans(SemaCtx *ctx, Node *prog) {
 static void check_impls(SemaCtx *ctx, Node *prog) {
     for (int i = 0; i < prog->program.stmts.len; i++) {
         Node *s = prog->program.stmts.items[i];
-        if (!s || s->tag != NODE_IMPL_DECL) continue;
+        if (!s || VAL_TAG(s) != NODE_IMPL_DECL) continue;
         const char *tr = s->impl_decl.trait_name;
         if (!tr) continue;
         TraitInfo *ti = NULL;
@@ -495,7 +495,7 @@ static void check_impls(SemaCtx *ctx, Node *prog) {
         const char *impl_m[256]; int nim = 0;
         for (int m = 0; m < s->impl_decl.members.len; m++) {
             Node *mem = s->impl_decl.members.items[m];
-            if (mem && mem->tag == NODE_FN_DECL && mem->fn_decl.name && nim < 256)
+            if (mem && VAL_TAG(mem) == NODE_FN_DECL && mem->fn_decl.name && nim < 256)
                 impl_m[nim++] = mem->fn_decl.name;
         }
         for (int m = 0; m < ti->n_methods; m++) {
@@ -506,7 +506,7 @@ static void check_impls(SemaCtx *ctx, Node *prog) {
                     found = 1;
                     for (int mm = 0; mm < s->impl_decl.members.len; mm++) {
                         Node *mem = s->impl_decl.members.items[mm];
-                        if (mem && mem->tag == NODE_FN_DECL && mem->fn_decl.name
+                        if (mem && VAL_TAG(mem) == NODE_FN_DECL && mem->fn_decl.name
                             && strcmp(mem->fn_decl.name, ti->methods[m]) == 0) {
                             impl_fn = mem;
                             break;
@@ -519,7 +519,7 @@ static void check_impls(SemaCtx *ctx, Node *prog) {
                 int has_default = 0;
                 if (ti->method_nodes && m < ti->n_methods && ti->method_nodes[m]) {
                     Node *mn = ti->method_nodes[m];
-                    if (mn->tag == NODE_FN_DECL && mn->fn_decl.body)
+                    if (VAL_TAG(mn) == NODE_FN_DECL && mn->fn_decl.body)
                         has_default = 1;
                 }
                 if (has_default) continue;
@@ -593,15 +593,15 @@ int sema_analyze(SemaCtx *ctx, Node *program, const char *filename) {
        so resolve_program can downgrade T0002 to a warning: plugins inject
        globals at runtime that sema can't see. */
     ctx->has_plugin_load = 0;
-    if (program && program->tag == NODE_PROGRAM) {
+    if (program && VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *s = program->program.stmts.items[i];
             if (!s) continue;
-            if (s->tag == NODE_LOAD) { ctx->has_plugin_load = 1; break; }
-            if (s->tag == NODE_USE && s->use_.is_plugin) {
+            if (VAL_TAG(s) == NODE_LOAD) { ctx->has_plugin_load = 1; break; }
+            if (VAL_TAG(s) == NODE_USE && s->use_.is_plugin) {
                 ctx->has_plugin_load = 1; break;
             }
-            if (s->tag == NODE_PLUGIN_DECL) { ctx->has_plugin_load = 1; break; }
+            if (VAL_TAG(s) == NODE_PLUGIN_DECL) { ctx->has_plugin_load = 1; break; }
         }
     }
     resolve_program(program, ctx->st, ctx);

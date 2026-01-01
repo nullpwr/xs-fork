@@ -72,11 +72,11 @@ static void collect_decls(Node *program,
                           DeclList *fns, DeclList *structs, DeclList *enums,
                           DeclList *traits, DeclList *impls, DeclList *consts,
                           DeclList *aliases, DeclList *effects) {
-    if (!program || program->tag != NODE_PROGRAM) return;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
     for (int i = 0; i < program->program.stmts.len; i++) {
         Node *n = program->program.stmts.items[i];
         if (!n) continue;
-        switch (n->tag) {
+        switch (VAL_TAG(n)) {
         case NODE_FN_DECL:     dl_push(fns, n); break;
         case NODE_STRUCT_DECL: dl_push(structs, n); break;
         case NODE_ENUM_DECL:   dl_push(enums, n); break;
@@ -191,7 +191,7 @@ static void gen_markdown(SB *s, Node *program, const char *filename,
                 sb_add(s, "**Members:**\n");
                 for (int j = 0; j < n->impl_decl.members.len; j++) {
                     Node *m = n->impl_decl.members.items[j];
-                    if (m && m->tag == NODE_FN_DECL) {
+                    if (m && VAL_TAG(m) == NODE_FN_DECL) {
                         sb_printf(s, "- `fn %s()`\n", m->fn_decl.name);
                     }
                 }
@@ -229,7 +229,7 @@ static void gen_markdown(SB *s, Node *program, const char *filename,
                 sb_add(s, "**Operations:**\n");
                 for (int j = 0; j < n->effect_decl.ops.len; j++) {
                     Node *op = n->effect_decl.ops.items[j];
-                    if (op && op->tag == NODE_FN_DECL) {
+                    if (op && VAL_TAG(op) == NODE_FN_DECL) {
                         sb_printf(s, "- `fn %s()`\n", op->fn_decl.name);
                     }
                 }
@@ -388,7 +388,7 @@ static void gen_json(SB *s, Node *program, const char *filename,
         int first = 1;
         for (int j = 0; j < n->impl_decl.members.len; j++) {
             Node *m = n->impl_decl.members.items[j];
-            if (m && m->tag == NODE_FN_DECL) {
+            if (m && VAL_TAG(m) == NODE_FN_DECL) {
                 if (!first) sb_addc(s, ',');
                 sb_add(s, "\n        ");
                 json_escape(s, m->fn_decl.name);
@@ -409,7 +409,7 @@ static void gen_json(SB *s, Node *program, const char *filename,
         int first = 1;
         for (int j = 0; j < n->effect_decl.ops.len; j++) {
             Node *op = n->effect_decl.ops.items[j];
-            if (op && op->tag == NODE_FN_DECL) {
+            if (op && VAL_TAG(op) == NODE_FN_DECL) {
                 if (!first) sb_addc(s, ',');
                 sb_add(s, "\n        ");
                 json_escape(s, op->fn_decl.name);
@@ -523,7 +523,7 @@ static void gen_html(SB *s, Node *program, const char *filename,
                 sb_add(s, "<p><strong>Methods:</strong></p>\n<ul>\n");
                 for (int j = 0; j < n->impl_decl.members.len; j++) {
                     Node *m = n->impl_decl.members.items[j];
-                    if (m && m->tag == NODE_FN_DECL) {
+                    if (m && VAL_TAG(m) == NODE_FN_DECL) {
                         sb_printf(s, "<li><code>fn %s(", m->fn_decl.name);
                         for (int k = 0; k < m->fn_decl.params.len; k++) {
                             if (k > 0) sb_add(s, ", ");
@@ -570,7 +570,7 @@ static void gen_html(SB *s, Node *program, const char *filename,
 }
 
 char *docgen_generate(Node *program, const char *filename, const char *format) {
-    if (!program || program->tag != NODE_PROGRAM) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) {
         return xs_strdup("<!-- empty module -->\n");
     }
 

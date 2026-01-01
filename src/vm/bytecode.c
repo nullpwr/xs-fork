@@ -120,11 +120,11 @@ static void proto_write(FILE *f, XSProto *p) {
     write_u16(f, (uint16_t)p->chunk.nconsts);
     for (int i = 0; i < p->chunk.nconsts; i++) {
         Value *v = p->chunk.consts[i];
-        if (!v || v->tag == XS_NULL) { write_u8(f, 0); }
-        else if (v->tag == XS_INT)   { write_u8(f, 1); write_i64(f, v->i); }
-        else if (v->tag == XS_FLOAT) { write_u8(f, 2); write_f64(f, v->f); }
-        else if (v->tag == XS_STR)   { write_u8(f, 3); write_str(f, v->s); }
-        else if (v->tag == XS_BOOL)  { write_u8(f, 4); write_u8(f, v->i ? 1 : 0); }
+        if (!v || VAL_TAG(v) == XS_NULL) { write_u8(f, 0); }
+        else if (VAL_TAG(v) == XS_INT)   { write_u8(f, 1); write_i64(f, VAL_INT(v)); }
+        else if (VAL_TAG(v) == XS_FLOAT) { write_u8(f, 2); write_f64(f, v->f); }
+        else if (VAL_TAG(v) == XS_STR)   { write_u8(f, 3); write_str(f, v->s); }
+        else if (VAL_TAG(v) == XS_BOOL)  { write_u8(f, 4); write_u8(f, VAL_INT(v) ? 1 : 0); }
         else { write_u8(f, 0); } /* unsupported const type → null */
     }
     /* upvalue descriptors */

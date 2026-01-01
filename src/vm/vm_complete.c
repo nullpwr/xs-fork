@@ -111,7 +111,7 @@ static int compile_pattern(PatProgram *prog, Node *pat) {
         PatInstr wild = {.kind = PAT_WILD};
         return pat_prog_add(prog, wild);
     }
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_WILD: {
         PatInstr wild = {.kind = PAT_WILD};
         return pat_prog_add(prog, wild);
@@ -182,9 +182,9 @@ static int compile_pattern(PatProgram *prog, Node *pat) {
     }
     case NODE_PAT_RANGE: {
         PatInstr pi = {.kind = PAT_RANGE};
-        pi.range.lo = pat->pat_range.start && pat->pat_range.start->tag == NODE_LIT_INT
+        pi.range.lo = pat->pat_range.start && VAL_TAG(pat->pat_range.start) == NODE_LIT_INT
             ? pat->pat_range.start->lit_int.ival : 0;
-        pi.range.hi = pat->pat_range.end && pat->pat_range.end->tag == NODE_LIT_INT
+        pi.range.hi = pat->pat_range.end && VAL_TAG(pat->pat_range.end) == NODE_LIT_INT
             ? pat->pat_range.end->lit_int.ival : 0;
         pi.range.inclusive = pat->pat_range.inclusive;
         return pat_prog_add(prog, pi);
@@ -245,15 +245,15 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
     case PAT_WILD:
         return 1;
     case PAT_LIT_INT:
-        return subject->tag == XS_INT && subject->i == pi->lit_int.val;
+        return VAL_TAG(subject) == XS_INT && VAL_INT(subject) == pi->lit_int.val;
     case PAT_LIT_FLOAT:
-        return subject->tag == XS_FLOAT && subject->f == pi->lit_float.val;
+        return VAL_TAG(subject) == XS_FLOAT && subject->f == pi->lit_float.val;
     case PAT_LIT_STR:
-        return subject->tag == XS_STR && strcmp(subject->s, pi->lit_str.val) == 0;
+        return VAL_TAG(subject) == XS_STR && strcmp(subject->s, pi->lit_str.val) == 0;
     case PAT_LIT_BOOL:
-        return subject->tag == XS_BOOL && value_truthy(subject) == pi->lit_bool.val;
+        return VAL_TAG(subject) == XS_BOOL && value_truthy(subject) == pi->lit_bool.val;
     case PAT_LIT_NULL:
-        return subject->tag == XS_NULL;
+        return VAL_TAG(subject) == XS_NULL;
     case PAT_BIND:
         if (*nbindings < max_binds) {
             bindings[*nbindings] = value_incref(subject);
@@ -261,7 +261,7 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
         }
         return 1;
     case PAT_TUPLE:
-        if ((subject->tag != XS_ARRAY && subject->tag != XS_TUPLE) ||
+        if ((VAL_TAG(subject) != XS_ARRAY && VAL_TAG(subject) != XS_TUPLE) ||
             subject->arr->len != pi->tuple.count)
             return 0;
         for (int i = 0; i < pi->tuple.count; i++) {
@@ -271,7 +271,7 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
         }
         return 1;
     case PAT_ENUM: {
-        if (subject->tag == XS_ENUM_VAL) {
+        if (VAL_TAG(subject) == XS_ENUM_VAL) {
             if (!subject->en->variant ||
                 strcmp(subject->en->variant, pi->ctor.variant) != 0)
                 return 0;
@@ -290,9 +290,9 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
             }
             return 1;
         }
-        if (subject->tag == XS_MAP) {
+        if (VAL_TAG(subject) == XS_MAP) {
             Value *tag = map_get(subject->map, "_tag");
-            if (!tag || tag->tag != XS_STR ||
+            if (!tag || VAL_TAG(tag) != XS_STR ||
                 strcmp(tag->s, pi->ctor.variant) != 0)
                 return 0;
             if (pi->ctor.argc > 0) {
@@ -302,7 +302,7 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
                     return pat_match(prog, pi->ctor.sub_indices[0],
                                      val, bindings, nbindings, max_binds);
                 }
-                if (val->tag == XS_ARRAY || val->tag == XS_TUPLE) {
+                if (VAL_TAG(val) == XS_ARRAY || VAL_TAG(val) == XS_TUPLE) {
                     for (int i = 0; i < pi->ctor.argc && i < val->arr->len; i++) {
                         if (!pat_match(prog, pi->ctor.sub_indices[i],
                                        val->arr->items[i], bindings, nbindings, max_binds))
@@ -315,8 +315,8 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
         return 0;
     }
     case PAT_RANGE: {
-        if (subject->tag != XS_INT) return 0;
-        int64_t v = subject->i;
+        if (VAL_TAG(subject) != XS_INT) return 0;
+        int64_t v = VAL_INT(subject);
         if (v < pi->range.lo) return 0;
         if (pi->range.inclusive ? v > pi->range.hi : v >= pi->range.hi) return 0;
         return 1;
@@ -340,7 +340,7 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
         return 1;
     }
     case PAT_SLICE: {
-        if (subject->tag != XS_ARRAY && subject->tag != XS_TUPLE) return 0;
+        if (VAL_TAG(subject) != XS_ARRAY && VAL_TAG(subject) != XS_TUPLE) return 0;
         if (subject->arr->len < pi->slice.count) return 0;
         for (int i = 0; i < pi->slice.count; i++) {
             if (!pat_match(prog, pi->slice.sub_indices[i],
@@ -357,8 +357,8 @@ static int pat_match(PatProgram *prog, int idx, Value *subject,
         return 1;
     }
     case PAT_STRUCT: {
-        if (subject->tag != XS_MAP && subject->tag != XS_STRUCT_VAL) return 0;
-        XSMap *m = subject->tag == XS_MAP ? subject->map : subject->st->fields;
+        if (VAL_TAG(subject) != XS_MAP && VAL_TAG(subject) != XS_STRUCT_VAL) return 0;
+        XSMap *m = VAL_TAG(subject) == XS_MAP ? subject->map : subject->st->fields;
         for (int i = 0; i < pi->struct_pat.nfields; i++) {
             Value *fv = map_get(m, pi->struct_pat.field_names[i]);
             if (!fv) fv = (Value *)XS_NULL_VAL;
@@ -382,7 +382,7 @@ static int destructure_value(Value *val, Node *pattern, Value **out_binds,
                               char **out_names, int *nbinds, int max) {
     if (!pattern || *nbinds >= max) return 1;
 
-    switch (pattern->tag) {
+    switch (VAL_TAG(pattern)) {
     case NODE_PAT_WILD:
         return 1;
     case NODE_PAT_IDENT:
@@ -394,9 +394,9 @@ static int destructure_value(Value *val, Node *pattern, Value **out_binds,
         return 1;
     case NODE_PAT_TUPLE:
     case NODE_PAT_SLICE: {
-        NodeList *elems = pattern->tag == NODE_PAT_TUPLE
+        NodeList *elems = VAL_TAG(pattern) == NODE_PAT_TUPLE
             ? &pattern->pat_tuple.elems : &pattern->pat_slice.elems;
-        if ((val->tag != XS_ARRAY && val->tag != XS_TUPLE) ||
+        if ((VAL_TAG(val) != XS_ARRAY && VAL_TAG(val) != XS_TUPLE) ||
             val->arr->len < elems->len)
             return 0;
         for (int i = 0; i < elems->len; i++) {
@@ -404,7 +404,7 @@ static int destructure_value(Value *val, Node *pattern, Value **out_binds,
                                    out_binds, out_names, nbinds, max))
                 return 0;
         }
-        if (pattern->tag == NODE_PAT_SLICE && pattern->pat_slice.rest) {
+        if (VAL_TAG(pattern) == NODE_PAT_SLICE && pattern->pat_slice.rest) {
             if (*nbinds < max) {
                 Value *rest = xs_array_new();
                 for (int i = elems->len; i < val->arr->len; i++)
@@ -418,15 +418,15 @@ static int destructure_value(Value *val, Node *pattern, Value **out_binds,
     }
     case NODE_PAT_STRUCT: {
         XSMap *m = NULL;
-        if (val->tag == XS_MAP) m = val->map;
-        else if (val->tag == XS_STRUCT_VAL) m = val->st->fields;
+        if (VAL_TAG(val) == XS_MAP) m = val->map;
+        else if (VAL_TAG(val) == XS_STRUCT_VAL) m = val->st->fields;
         if (!m) return 0;
         for (int i = 0; i < pattern->pat_struct.fields.len; i++) {
             const char *key = pattern->pat_struct.fields.items[i].key;
             Node *sub = pattern->pat_struct.fields.items[i].val;
             Value *fv = map_get(m, key);
             if (!fv) fv = (Value *)XS_NULL_VAL;
-            if (sub && sub->tag == NODE_PAT_IDENT && sub->pat_ident.name) {
+            if (sub && VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name) {
                 if (*nbinds < max) {
                     out_binds[*nbinds] = value_incref(fv);
                     out_names[*nbinds] = sub->pat_ident.name;
@@ -472,7 +472,7 @@ typedef struct {
 static Value *vm_class_new_inst(VMClass *cls, Value **args, int argc) {
     Value *inst = xs_map_new();
     map_set(inst->map, "__class", xs_str(cls->name));
-    if (cls->fields && cls->fields->tag == XS_MAP) {
+    if (cls->fields && VAL_TAG(cls->fields) == XS_MAP) {
         int nkeys = 0;
         char **keys = map_keys(cls->fields->map, &nkeys);
         for (int i = 0; i < nkeys; i++) {
@@ -487,7 +487,7 @@ static Value *vm_class_new_inst(VMClass *cls, Value **args, int argc) {
         }
         free(keys);
     }
-    if (cls->methods && cls->methods->tag == XS_MAP) {
+    if (cls->methods && VAL_TAG(cls->methods) == XS_MAP) {
         int nkeys = 0;
         char **keys = map_keys(cls->methods->map, &nkeys);
         for (int i = 0; i < nkeys; i++) {
@@ -633,7 +633,7 @@ void vm_stats_get(uint64_t *total, uint64_t *matches, uint64_t *closures,
 }
 
 static Value *vm_match_exec(Value *subject, Node *match_node) {
-    if (!match_node || match_node->tag != NODE_MATCH) return value_incref(XS_NULL_VAL);
+    if (!match_node || VAL_TAG(match_node) != NODE_MATCH) return value_incref(XS_NULL_VAL);
     vm_stats.match_attempts++;
 
     PatProgram prog = pat_prog_new();
@@ -765,10 +765,10 @@ void vm_debug_clear(void) {
 
 static int match_struct_pattern(Value *subject, Node *pat, Value **binds,
                                  char **names, int *nbinds) {
-    if (!pat || pat->tag != NODE_PAT_STRUCT) return 0;
+    if (!pat || VAL_TAG(pat) != NODE_PAT_STRUCT) return 0;
     XSMap *m = NULL;
-    if (subject->tag == XS_MAP) m = subject->map;
-    else if (subject->tag == XS_STRUCT_VAL && subject->st) m = subject->st->fields;
+    if (VAL_TAG(subject) == XS_MAP) m = subject->map;
+    else if (VAL_TAG(subject) == XS_STRUCT_VAL && subject->st) m = subject->st->fields;
     if (!m) return 0;
 
     for (int i = 0; i < pat->pat_struct.fields.len; i++) {
@@ -777,17 +777,17 @@ static int match_struct_pattern(Value *subject, Node *pat, Value **binds,
         Value *fv = map_get(m, key);
         if (!fv) return 0;
 
-        if (sub && sub->tag == NODE_PAT_LIT) {
+        if (sub && VAL_TAG(sub) == NODE_PAT_LIT) {
             int match = 0;
             switch (sub->pat_lit.tag) {
-            case 0: match = fv->tag == XS_INT && fv->i == sub->pat_lit.ival; break;
-            case 1: match = fv->tag == XS_FLOAT && fv->f == sub->pat_lit.fval; break;
-            case 2: match = fv->tag == XS_STR && strcmp(fv->s, sub->pat_lit.sval) == 0; break;
+            case 0: match = VAL_TAG(fv) == XS_INT && VAL_INT(fv) == sub->pat_lit.ival; break;
+            case 1: match = VAL_TAG(fv) == XS_FLOAT && fv->f == sub->pat_lit.fval; break;
+            case 2: match = VAL_TAG(fv) == XS_STR && strcmp(fv->s, sub->pat_lit.sval) == 0; break;
             case 3: match = value_truthy(fv) == sub->pat_lit.bval; break;
-            default: match = fv->tag == XS_NULL; break;
+            default: match = VAL_TAG(fv) == XS_NULL; break;
             }
             if (!match) return 0;
-        } else if (sub && sub->tag == NODE_PAT_IDENT && sub->pat_ident.name) {
+        } else if (sub && VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name) {
             if (*nbinds < 64) {
                 binds[*nbinds] = value_incref(fv);
                 names[*nbinds] = sub->pat_ident.name;
@@ -800,32 +800,32 @@ static int match_struct_pattern(Value *subject, Node *pat, Value **binds,
 
 static int match_tuple_pattern(Value *subject, Node *pat, Value **binds,
                                 char **names, int *nbinds) {
-    if (!pat || pat->tag != NODE_PAT_TUPLE) return 0;
-    if (subject->tag != XS_ARRAY && subject->tag != XS_TUPLE) return 0;
+    if (!pat || VAL_TAG(pat) != NODE_PAT_TUPLE) return 0;
+    if (VAL_TAG(subject) != XS_ARRAY && VAL_TAG(subject) != XS_TUPLE) return 0;
     if (subject->arr->len != pat->pat_tuple.elems.len) return 0;
 
     for (int i = 0; i < pat->pat_tuple.elems.len; i++) {
         Node *sub = pat->pat_tuple.elems.items[i];
         Value *elem = subject->arr->items[i];
-        if (sub->tag == NODE_PAT_IDENT && sub->pat_ident.name) {
+        if (VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name) {
             if (*nbinds < 64) {
                 binds[*nbinds] = value_incref(elem);
                 names[*nbinds] = sub->pat_ident.name;
                 (*nbinds)++;
             }
-        } else if (sub->tag == NODE_PAT_LIT) {
+        } else if (VAL_TAG(sub) == NODE_PAT_LIT) {
             int match = 0;
             switch (sub->pat_lit.tag) {
-            case 0: match = elem->tag == XS_INT && elem->i == sub->pat_lit.ival; break;
-            case 1: match = elem->tag == XS_FLOAT && elem->f == sub->pat_lit.fval; break;
-            case 2: match = elem->tag == XS_STR && strcmp(elem->s, sub->pat_lit.sval) == 0; break;
+            case 0: match = VAL_TAG(elem) == XS_INT && VAL_INT(elem) == sub->pat_lit.ival; break;
+            case 1: match = VAL_TAG(elem) == XS_FLOAT && elem->f == sub->pat_lit.fval; break;
+            case 2: match = VAL_TAG(elem) == XS_STR && strcmp(elem->s, sub->pat_lit.sval) == 0; break;
             case 3: match = value_truthy(elem) == sub->pat_lit.bval; break;
-            default: match = elem->tag == XS_NULL; break;
+            default: match = VAL_TAG(elem) == XS_NULL; break;
             }
             if (!match) return 0;
-        } else if (sub->tag == NODE_PAT_WILD) {
+        } else if (VAL_TAG(sub) == NODE_PAT_WILD) {
             /* ok */
-        } else if (sub->tag == NODE_PAT_TUPLE) {
+        } else if (VAL_TAG(sub) == NODE_PAT_TUPLE) {
             if (!match_tuple_pattern(elem, sub, binds, names, nbinds))
                 return 0;
         }
@@ -837,15 +837,15 @@ static int match_enum_pattern(Value *subject, const char *variant, int argc,
                                Node **args, Value **binds, char **names, int *nbinds) {
     const char *tag_str = NULL;
     Value *val_field = NULL;
-    if (subject->tag == XS_ENUM_VAL) {
+    if (VAL_TAG(subject) == XS_ENUM_VAL) {
         tag_str = subject->en->variant;
         if (subject->en->arr_data && subject->en->arr_data->len > 0) {
             if (subject->en->arr_data->len == 1)
                 val_field = subject->en->arr_data->items[0];
         }
-    } else if (subject->tag == XS_MAP) {
+    } else if (VAL_TAG(subject) == XS_MAP) {
         Value *tv = map_get(subject->map, "_tag");
-        if (tv && tv->tag == XS_STR) tag_str = tv->s;
+        if (tv && VAL_TAG(tv) == XS_STR) tag_str = tv->s;
         val_field = map_get(subject->map, "_val");
     }
     if (!tag_str) return 0;
@@ -856,17 +856,17 @@ static int match_enum_pattern(Value *subject, const char *variant, int argc,
 
     if (argc > 0 && val_field) {
         if (argc == 1 && args[0]) {
-            if (args[0]->tag == NODE_PAT_IDENT && args[0]->pat_ident.name) {
+            if (VAL_TAG(args[0]) == NODE_PAT_IDENT && args[0]->pat_ident.name) {
                 if (*nbinds < 64) {
                     binds[*nbinds] = value_incref(val_field);
                     names[*nbinds] = args[0]->pat_ident.name;
                     (*nbinds)++;
                 }
             }
-        } else if (val_field->tag == XS_ARRAY || val_field->tag == XS_TUPLE) {
+        } else if (VAL_TAG(val_field) == XS_ARRAY || VAL_TAG(val_field) == XS_TUPLE) {
             for (int i = 0; i < argc && i < val_field->arr->len; i++) {
                 Node *ap = args[i];
-                if (ap && ap->tag == NODE_PAT_IDENT && ap->pat_ident.name) {
+                if (ap && VAL_TAG(ap) == NODE_PAT_IDENT && ap->pat_ident.name) {
                     if (*nbinds < 64) {
                         binds[*nbinds] = value_incref(val_field->arr->items[i]);
                         names[*nbinds] = ap->pat_ident.name;
@@ -889,12 +889,12 @@ static Value *do_class_instantiate(VM *vm, const char *cls_name,
                                     Value *cls_val, Value **args, int argc) {
     (void)vm;
     vm_stats.class_creates++;
-    if (cls_val->tag == XS_MAP) {
+    if (VAL_TAG(cls_val) == XS_MAP) {
         Value *fields = map_get(cls_val->map, "__fields");
         Value *methods = map_get(cls_val->map, "__methods");
         Value *inst = xs_map_new();
         map_set(inst->map, "__class", xs_str(cls_name));
-        if (fields && fields->tag == XS_MAP) {
+        if (fields && VAL_TAG(fields) == XS_MAP) {
             int nkeys = 0;
             char **keys = map_keys(fields->map, &nkeys);
             for (int i = 0; i < nkeys; i++) {
@@ -907,7 +907,7 @@ static Value *do_class_instantiate(VM *vm, const char *cls_name,
             }
             free(keys);
         }
-        if (methods && methods->tag == XS_MAP) {
+        if (methods && VAL_TAG(methods) == XS_MAP) {
             int nkeys = 0;
             char **keys = map_keys(methods->map, &nkeys);
             for (int i = 0; i < nkeys; i++) {

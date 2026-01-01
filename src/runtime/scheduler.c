@@ -132,11 +132,11 @@ Value *scheduler_make_future(int task_id) {
 }
 
 int scheduler_is_future(Value *v, int *task_id_out) {
-    if (!v || v->tag != XS_MAP) return 0;
+    if (!v || VAL_TAG(v) != XS_MAP) return 0;
     Value *marker = map_get(v->map, "__is_future");
     if (!marker || !value_truthy(marker)) return 0;
     Value *tid = map_get(v->map, "_task_id");
-    if (!tid || tid->tag != XS_INT) return 0;
-    if (task_id_out) *task_id_out = (int)tid->i;
+    if (!tid || VAL_TAG(tid) != XS_INT) return 0;
+    if (task_id_out) *task_id_out = (int)VAL_INT(tid);
     return 1;
 }

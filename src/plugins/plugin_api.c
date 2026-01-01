@@ -223,7 +223,7 @@ static void *plugin_type_lookup(const char *type_name) {
 
 static Value *native_plugin_has_type(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || !args[0] || args[0]->tag != XS_STR)
+    if (argc < 1 || !args[0] || VAL_TAG(args[0]) != XS_STR)
         return value_incref(XS_FALSE_VAL);
     void *info = plugin_type_lookup(args[0]->s);
     return value_incref(info ? XS_TRUE_VAL : XS_FALSE_VAL);

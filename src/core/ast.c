@@ -161,7 +161,7 @@ int node_next_id(void) { return g_node_id_counter++; }
 
 Node *node_new(NodeTag tag, Span span) {
     Node *n = xs_calloc(1, sizeof(Node));
-    n->tag     = tag;
+    n->tag = tag;
     n->span    = span;
     n->node_id = node_next_id();
     if (tag == NODE_BLOCK) n->block.has_decls = -1; /* -1 = unknown */
@@ -176,7 +176,7 @@ static void free_string_array(char **arr, int n) {
 
 void node_free(Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT: case NODE_LIT_FLOAT: case NODE_LIT_BOOL:
     case NODE_LIT_NULL: case NODE_LIT_CHAR:
         break;

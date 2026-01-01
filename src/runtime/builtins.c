@@ -69,7 +69,7 @@ void xs_set_argv(int argc, char **argv) {
 #endif
 
 static char *inst_to_str(Interp *interp, Value *v, int repr_mode) {
-    if (v->tag == XS_INST && v->inst) {
+    if (VAL_TAG(v) == XS_INST && v->inst) {
         const char *mname = repr_mode ? "__repr__" : "__str__";
         Value *fn = map_get(v->inst->methods, mname);
         if (!fn && v->inst->class_ && v->inst->class_->methods)
@@ -79,14 +79,14 @@ static char *inst_to_str(Interp *interp, Value *v, int repr_mode) {
             if (!fn && v->inst->class_ && v->inst->class_->methods)
                 fn = map_get(v->inst->class_->methods, "to_string");
         }
-        if (fn && (fn->tag == XS_FUNC || fn->tag == XS_NATIVE)) {
+        if (fn && (VAL_TAG(fn) == XS_FUNC || VAL_TAG(fn) == XS_NATIVE)) {
             int has_self = 0;
-            if (fn->tag == XS_FUNC && fn->fn->nparams > 0) {
+            if (VAL_TAG(fn) == XS_FUNC && fn->fn->nparams > 0) {
                 Node *p0 = fn->fn->params[0];
-                if (p0->tag == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
+                if (VAL_TAG(p0) == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
                     has_self = 1;
             }
-            if (fn->tag == XS_NATIVE) has_self = 1;
+            if (VAL_TAG(fn) == XS_NATIVE) has_self = 1;
             Value *result;
             if (has_self) {
                 Value *call_args[1] = { v };
@@ -94,7 +94,7 @@ static char *inst_to_str(Interp *interp, Value *v, int repr_mode) {
             } else {
                 result = call_value(interp, fn, NULL, 0, mname);
             }
-            if (result && result->tag == XS_STR) {
+            if (result && VAL_TAG(result) == XS_STR) {
                 char *s = xs_strdup(result->s);
                 value_decref(result);
                 return s;
@@ -110,7 +110,7 @@ static char *inst_to_str(Interp *interp, Value *v, int repr_mode) {
 }
 
 static Value *builtin_print(Interp *i, Value **args, int argc) {
-    if (argc >= 1 && args[0]->tag == XS_STR && args[0]->s) {
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_STR && args[0]->s) {
         const char *fmt = args[0]->s;
         int has_placeholder = 0;
         for (const char *p = fmt; *p; p++) {
@@ -161,7 +161,7 @@ static Value *builtin_print_no_nl(Interp *i, Value **args, int argc) {
 
 static Value *builtin_eprint(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc >= 1 && args[0]->tag == XS_STR && args[0]->s) {
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_STR && args[0]->s) {
         const char *fmt = args[0]->s;
         int has_placeholder = 0;
         for (const char *p = fmt; *p; p++) {
@@ -199,7 +199,7 @@ static Value *builtin_eprint(Interp *i, Value **args, int argc) {
 static Value *builtin_type(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc < 1) return xs_str("null");
-    switch (args[0]->tag) {
+    switch (VAL_TAG(args[0])) {
     case XS_NULL:   return xs_str("null");
     case XS_BOOL:   return xs_str("bool");
     case XS_INT:    return xs_str("int");
@@ -234,7 +234,7 @@ static Value *builtin_typeof(Interp *i, Value **args, int argc) {
 static Value *builtin_type_of(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc < 1) return xs_str("Null");
-    switch (args[0]->tag) {
+    switch (VAL_TAG(args[0])) {
     case XS_NULL:   return xs_str("Null");
     case XS_BOOL:   return xs_str("Bool");
     case XS_INT:    return xs_str("Int");
@@ -261,15 +261,15 @@ static Value *builtin_type_of(Interp *i, Value **args, int argc) {
 }
 
 static inline Value *tag_check(Value **args, int argc, ValueTag tag) {
-    return xs_bool(argc > 0 && args[0]->tag == tag);
+    return xs_bool(argc > 0 && VAL_TAG(args[0]) == tag);
 }
 
 static inline Value *tag_check2(Value **args, int argc, ValueTag t1, ValueTag t2) {
-    return xs_bool(argc > 0 && (args[0]->tag == t1 || args[0]->tag == t2));
+    return xs_bool(argc > 0 && (VAL_TAG(args[0]) == t1 || VAL_TAG(args[0]) == t2));
 }
 
 static Value *builtin_is_null(Interp *i, Value **a, int n)  { (void)i; return n < 1 ? xs_bool(1) : tag_check(a,n,XS_NULL); }
-static Value *builtin_is_int(Interp *i, Value **a, int n)   { (void)i; return xs_bool(n >= 1 && (a[0]->tag == XS_INT || a[0]->tag == XS_BIGINT)); }
+static Value *builtin_is_int(Interp *i, Value **a, int n)   { (void)i; return xs_bool(n >= 1 && (VAL_TAG(a[0]) == XS_INT || VAL_TAG(a[0]) == XS_BIGINT)); }
 static Value *builtin_is_float(Interp *i, Value **a, int n) { (void)i; return tag_check(a, n, XS_FLOAT); }
 static Value *builtin_is_str(Interp *i, Value **a, int n)   { (void)i; return tag_check(a, n, XS_STR); }
 static Value *builtin_is_bool(Interp *i, Value **a, int n)  { (void)i; return tag_check(a, n, XS_BOOL); }
@@ -281,14 +281,14 @@ static Value *builtin_int(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_int(0);
     Value *v=args[0];
-    if (v->tag==XS_INT) return value_incref(v);
-    if (v->tag==XS_BIGINT) {
+    if (VAL_TAG(v)==XS_INT) return value_incref(v);
+    if (VAL_TAG(v)==XS_BIGINT) {
         if (bigint_fits_i64(v->bigint)) return xs_int(bigint_to_i64(v->bigint));
         return value_incref(v);
     }
-    if (v->tag==XS_FLOAT) return xs_int((int64_t)v->f);
-    if (v->tag==XS_STR) return xs_int(atoll(v->s));
-    if (v->tag==XS_BOOL) return xs_int(v->i);
+    if (VAL_TAG(v)==XS_FLOAT) return xs_int((int64_t)v->f);
+    if (VAL_TAG(v)==XS_STR) return xs_int(atoll(v->s));
+    if (VAL_TAG(v)==XS_BOOL) return xs_int(VAL_INT(v));
     return xs_int(0);
 }
 
@@ -296,10 +296,10 @@ static Value *builtin_float(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_float(0.0);
     Value *v=args[0];
-    if (v->tag==XS_FLOAT) return value_incref(v);
-    if (v->tag==XS_INT) return xs_float((double)v->i);
-    if (v->tag==XS_BIGINT) return xs_float(bigint_to_double(v->bigint));
-    if (v->tag==XS_STR) return xs_float(atof(v->s));
+    if (VAL_TAG(v)==XS_FLOAT) return value_incref(v);
+    if (VAL_TAG(v)==XS_INT) return xs_float((double)VAL_INT(v));
+    if (VAL_TAG(v)==XS_BIGINT) return xs_float(bigint_to_double(v->bigint));
+    if (VAL_TAG(v)==XS_STR) return xs_float(atof(v->s));
     return xs_float(0.0);
 }
 
@@ -318,8 +318,8 @@ static Value *builtin_bool(Interp *i, Value **args, int argc) {
 static Value *builtin_char(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_char(0);
-    if (args[0]->tag==XS_INT) return xs_char((char)args[0]->i);
-    if (args[0]->tag==XS_STR&&args[0]->s[0]) return xs_char(args[0]->s[0]);
+    if (VAL_TAG(args[0])==XS_INT) return xs_char((char)VAL_INT(args[0]));
+    if (VAL_TAG(args[0])==XS_STR&&args[0]->s[0]) return xs_char(args[0]->s[0]);
     return xs_char(0);
 }
 
@@ -332,15 +332,15 @@ static Value *builtin_repr(Interp *i, Value **args, int argc) {
 static Value *builtin_abs(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_int(0);
-    if (args[0]->tag==XS_INT) return xs_int(args[0]->i<0?-args[0]->i:args[0]->i);
-    if (args[0]->tag==XS_FLOAT) return xs_float(fabs(args[0]->f));
+    if (VAL_TAG(args[0])==XS_INT) return xs_int(VAL_INT(args[0])<0?-VAL_INT(args[0]):VAL_INT(args[0]));
+    if (VAL_TAG(args[0])==XS_FLOAT) return xs_float(fabs(args[0]->f));
     return value_incref(args[0]);
 }
 
 static Value *builtin_min(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc==0) return value_incref(XS_NULL_VAL);
-    if (argc==1 && args[0]->tag==XS_ARRAY) {
+    if (argc==1 && VAL_TAG(args[0])==XS_ARRAY) {
         XSArray *arr=args[0]->arr;
         if (arr->len==0) return value_incref(XS_NULL_VAL);
         Value *m=arr->items[0];
@@ -355,7 +355,7 @@ static Value *builtin_min(Interp *i, Value **args, int argc) {
 static Value *builtin_max(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc==0) return value_incref(XS_NULL_VAL);
-    if (argc==1 && args[0]->tag==XS_ARRAY) {
+    if (argc==1 && VAL_TAG(args[0])==XS_ARRAY) {
         XSArray *arr=args[0]->arr;
         if (arr->len==0) return value_incref(XS_NULL_VAL);
         Value *m=arr->items[0];
@@ -370,8 +370,8 @@ static Value *builtin_max(Interp *i, Value **args, int argc) {
 static Value *builtin_pow(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<2) return xs_float(0.0);
-    double base=args[0]->tag==XS_FLOAT?args[0]->f:(double)args[0]->i;
-    double exp2=args[1]->tag==XS_FLOAT?args[1]->f:(double)args[1]->i;
+    double base=VAL_TAG(args[0])==XS_FLOAT?args[0]->f:(double)VAL_INT(args[0]);
+    double exp2=VAL_TAG(args[1])==XS_FLOAT?args[1]->f:(double)VAL_INT(args[1]);
     return xs_float(pow(base,exp2));
 }
 
@@ -380,7 +380,7 @@ static Value *builtin_pow(Interp *i, Value **args, int argc) {
     static Value *builtin_##name(Interp *i, Value **args, int argc) { \
         (void)i; \
         if (argc < 1) return xs_float(0.0); \
-        double v = args[0]->tag == XS_FLOAT ? args[0]->f : (double)args[0]->i; \
+        double v = VAL_TAG(args[0]) == XS_FLOAT ? args[0]->f : (double)VAL_INT(args[0]); \
         return xs_float(fn(v)); \
     }
 MATH1(sqrt,  sqrt)
@@ -391,9 +391,9 @@ MATH1(round, round)
 static Value *builtin_log(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_float(0.0);
-    double v=args[0]->tag==XS_FLOAT?args[0]->f:(double)args[0]->i;
+    double v=VAL_TAG(args[0])==XS_FLOAT?args[0]->f:(double)VAL_INT(args[0]);
     if (argc>1) {
-        double base=args[1]->tag==XS_FLOAT?args[1]->f:(double)args[1]->i;
+        double base=VAL_TAG(args[1])==XS_FLOAT?args[1]->f:(double)VAL_INT(args[1]);
         return xs_float(log(v)/log(base));
     }
     return xs_float(log(v));
@@ -409,10 +409,10 @@ MATH1(tan, tan)
 static Value *builtin_len(Interp *i, Value **args, int argc) {
     if (argc<1) return xs_int(0);
     Value *v=args[0];
-    if (v->tag==XS_ARRAY||v->tag==XS_TUPLE) return xs_int(v->arr->len);
-    if (v->tag==XS_STR) return xs_int((int64_t)strlen(v->s));
-    if (v->tag==XS_MAP||v->tag==XS_MODULE) return xs_int(v->map->len);
-    if (v->tag==XS_RANGE) {
+    if (VAL_TAG(v)==XS_ARRAY||VAL_TAG(v)==XS_TUPLE) return xs_int(v->arr->len);
+    if (VAL_TAG(v)==XS_STR) return xs_int((int64_t)strlen(v->s));
+    if (VAL_TAG(v)==XS_MAP||VAL_TAG(v)==XS_MODULE) return xs_int(v->map->len);
+    if (VAL_TAG(v)==XS_RANGE) {
         int64_t span = v->range->end - v->range->start;
         if (v->range->inclusive) span += (span >= 0) ? 1 : -1;
         int64_t step = v->range->step ? v->range->step : 1;
@@ -422,15 +422,15 @@ static Value *builtin_len(Interp *i, Value **args, int argc) {
         return xs_int(n2);
     }
     /* __len__ dunder method on instances */
-    if (v->tag==XS_INST && v->inst) {
+    if (VAL_TAG(v)==XS_INST && v->inst) {
         Value *fn = map_get(v->inst->methods, "__len__");
         if (!fn && v->inst->class_ && v->inst->class_->methods)
             fn = map_get(v->inst->class_->methods, "__len__");
-        if (fn && (fn->tag == XS_FUNC || fn->tag == XS_NATIVE)) {
+        if (fn && (VAL_TAG(fn) == XS_FUNC || VAL_TAG(fn) == XS_NATIVE)) {
             int has_self = 0;
-            if (fn->tag == XS_FUNC && fn->fn->nparams > 0) {
+            if (VAL_TAG(fn) == XS_FUNC && fn->fn->nparams > 0) {
                 Node *p0 = fn->fn->params[0];
-                if (p0->tag == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
+                if (VAL_TAG(p0) == NODE_PAT_IDENT && strcmp(p0->pat_ident.name, "self") == 0)
                     has_self = 1;
             }
             Value *result;
@@ -449,16 +449,16 @@ static Value *builtin_len(Interp *i, Value **args, int argc) {
 static Value *builtin_range(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc==1) {
-        int64_t end2 = (args[0]->tag==XS_INT)?args[0]->i:(int64_t)args[0]->f;
+        int64_t end2 = (VAL_TAG(args[0])==XS_INT)?VAL_INT(args[0]):(int64_t)args[0]->f;
         return xs_range(0, end2, 0);
     }
     if (argc>=2) {
-        int64_t start2=(args[0]->tag==XS_INT)?args[0]->i:(int64_t)args[0]->f;
-        int64_t end2=(args[1]->tag==XS_INT)?args[1]->i:(int64_t)args[1]->f;
+        int64_t start2=(VAL_TAG(args[0])==XS_INT)?VAL_INT(args[0]):(int64_t)args[0]->f;
+        int64_t end2=(VAL_TAG(args[1])==XS_INT)?VAL_INT(args[1]):(int64_t)args[1]->f;
         int64_t step = 1;
         if (argc >= 3) {
-            if (args[2]->tag==XS_INT) step = args[2]->i;
-            else if (args[2]->tag==XS_FLOAT) step = (int64_t)args[2]->f;
+            if (VAL_TAG(args[2])==XS_INT) step = VAL_INT(args[2]);
+            else if (VAL_TAG(args[2])==XS_FLOAT) step = (int64_t)args[2]->f;
         }
         if (step == 0) {
             fprintf(stderr, "range: step cannot be zero\n");
@@ -479,8 +479,8 @@ static Value *builtin_array(Interp *i, Value **args, int argc) {
 static Value *builtin_map(Interp *i, Value **args, int argc) {
     /* map() -> empty map, map(arr, fn) -> mapped array */
     if (argc == 0) return xs_map_new();
-    if (argc >= 2 && (args[0]->tag == XS_ARRAY || args[0]->tag == XS_TUPLE) &&
-        (args[1]->tag == XS_FUNC || args[1]->tag == XS_NATIVE || args[1]->tag == XS_CLOSURE)) {
+    if (argc >= 2 && (VAL_TAG(args[0]) == XS_ARRAY || VAL_TAG(args[0]) == XS_TUPLE) &&
+        (VAL_TAG(args[1]) == XS_FUNC || VAL_TAG(args[1]) == XS_NATIVE || VAL_TAG(args[1]) == XS_CLOSURE)) {
         Value *arr = args[0], *fn = args[1];
         Value *result = xs_array_new();
         for (int j = 0; j < arr->arr->len; j++) {
@@ -497,7 +497,7 @@ static Value *builtin_map(Interp *i, Value **args, int argc) {
 static Value *builtin_filter(Interp *i, Value **args, int argc) {
     if (argc < 2) return xs_array_new();
     Value *arr = args[0], *fn = args[1];
-    if (arr->tag != XS_ARRAY && arr->tag != XS_TUPLE) return xs_array_new();
+    if (VAL_TAG(arr) != XS_ARRAY && VAL_TAG(arr) != XS_TUPLE) return xs_array_new();
     Value *result = xs_array_new();
     for (int j = 0; j < arr->arr->len; j++) {
         Value *elem = arr->arr->items[j];
@@ -512,7 +512,7 @@ static Value *builtin_filter(Interp *i, Value **args, int argc) {
 static Value *builtin_reduce(Interp *i, Value **args, int argc) {
     if (argc < 2) return value_incref(XS_NULL_VAL);
     Value *arr = args[0], *fn = args[1];
-    if (arr->tag != XS_ARRAY && arr->tag != XS_TUPLE) return value_incref(XS_NULL_VAL);
+    if (VAL_TAG(arr) != XS_ARRAY && VAL_TAG(arr) != XS_TUPLE) return value_incref(XS_NULL_VAL);
     Value *acc = (argc >= 3) ? value_incref(args[2]) : (arr->arr->len > 0 ? value_incref(arr->arr->items[0]) : value_incref(XS_NULL_VAL));
     int start = (argc >= 3) ? 0 : 1;
     for (int j = start; j < arr->arr->len; j++) {
@@ -528,7 +528,7 @@ static Value *builtin_keys(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_array_new();
     Value *obj=args[0];
-    if (obj->tag==XS_MAP||obj->tag==XS_MODULE) {
+    if (VAL_TAG(obj)==XS_MAP||VAL_TAG(obj)==XS_MODULE) {
         int nk=0; char **ks=map_keys(obj->map,&nk);
         Value *arr=xs_array_new();
         for (int j=0;j<nk;j++){array_push(arr->arr,xs_str(ks[j]));free(ks[j]);}
@@ -541,7 +541,7 @@ static Value *builtin_values(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_array_new();
     Value *obj=args[0];
-    if (obj->tag==XS_MAP||obj->tag==XS_MODULE) {
+    if (VAL_TAG(obj)==XS_MAP||VAL_TAG(obj)==XS_MODULE) {
         int nk=0; char **ks=map_keys(obj->map,&nk);
         Value *arr=xs_array_new();
         for (int j=0;j<nk;j++){
@@ -558,7 +558,7 @@ static Value *builtin_entries(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_array_new();
     Value *obj=args[0];
-    if (obj->tag==XS_MAP||obj->tag==XS_MODULE) {
+    if (VAL_TAG(obj)==XS_MAP||VAL_TAG(obj)==XS_MODULE) {
         int nk=0; char **ks=map_keys(obj->map,&nk);
         Value *arr=xs_array_new();
         for (int j=0;j<nk;j++){
@@ -576,11 +576,11 @@ static Value *builtin_entries(Interp *i, Value **args, int argc) {
 
 static Value *builtin_flatten(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_ARRAY) return xs_array_new();
+    if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return xs_array_new();
     Value *res=xs_array_new();
     XSArray *arr=args[0]->arr;
     for (int j=0;j<arr->len;j++) {
-        if (arr->items[j]->tag==XS_ARRAY) {
+        if (VAL_TAG(arr->items[j])==XS_ARRAY) {
             XSArray *inner=arr->items[j]->arr;
             for (int k=0;k<inner->len;k++) array_push(res->arr,value_incref(inner->items[k]));
         } else {
@@ -592,7 +592,7 @@ static Value *builtin_flatten(Interp *i, Value **args, int argc) {
 
 static Value *builtin_chars(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_STR) return xs_array_new();
+    if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_array_new();
     Value *arr=xs_array_new();
     const char *s=args[0]->s;
     for (int j=0;s[j];j++) array_push(arr->arr,xs_str_n(s+j,1));
@@ -601,7 +601,7 @@ static Value *builtin_chars(Interp *i, Value **args, int argc) {
 
 static Value *builtin_bytes(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_STR) return xs_array_new();
+    if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_array_new();
     Value *arr=xs_array_new();
     const char *s=args[0]->s;
     for (int j=0;s[j];j++) array_push(arr->arr,xs_int((unsigned char)s[j]));
@@ -610,7 +610,7 @@ static Value *builtin_bytes(Interp *i, Value **args, int argc) {
 
 static Value *builtin_zip(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<2||args[0]->tag!=XS_ARRAY||args[1]->tag!=XS_ARRAY) return xs_array_new();
+    if (argc<2||VAL_TAG(args[0])!=XS_ARRAY||VAL_TAG(args[1])!=XS_ARRAY) return xs_array_new();
     XSArray *a=args[0]->arr, *b=args[1]->arr;
     int n2=a->len<b->len?a->len:b->len;
     Value *res=xs_array_new();
@@ -625,10 +625,10 @@ static Value *builtin_zip(Interp *i, Value **args, int argc) {
 
 static Value *builtin_enumerate(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_ARRAY) return xs_array_new();
+    if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return xs_array_new();
     int64_t start = 0;
-    if (argc >= 2 && args[1]->tag == XS_INT) start = args[1]->i;
-    else if (argc >= 2 && args[1]->tag == XS_FLOAT) start = (int64_t)args[1]->f;
+    if (argc >= 2 && VAL_TAG(args[1]) == XS_INT) start = VAL_INT(args[1]);
+    else if (argc >= 2 && VAL_TAG(args[1]) == XS_FLOAT) start = (int64_t)args[1]->f;
     Value *res=xs_array_new();
     XSArray *arr=args[0]->arr;
     for (int j=0;j<arr->len;j++) {
@@ -642,12 +642,12 @@ static Value *builtin_enumerate(Interp *i, Value **args, int argc) {
 
 static Value *builtin_sum(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_ARRAY) return xs_int(0);
+    if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return xs_int(0);
     XSArray *arr=args[0]->arr;
     int64_t si=0; double sf=0; int is_f=0;
     for (int j=0;j<arr->len;j++) {
-        if (arr->items[j]->tag==XS_FLOAT){is_f=1;sf+=arr->items[j]->f;}
-        else if(arr->items[j]->tag==XS_INT) si+=arr->items[j]->i;
+        if (VAL_TAG(arr->items[j])==XS_FLOAT){is_f=1;sf+=arr->items[j]->f;}
+        else if(VAL_TAG(arr->items[j])==XS_INT) si+=VAL_INT(arr->items[j]);
     }
     return is_f?xs_float(sf+(double)si):xs_int(si);
 }
@@ -655,7 +655,7 @@ static Value *builtin_sum(Interp *i, Value **args, int argc) {
 /* string helpers */
 static Value *builtin_format(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_STR) return xs_str("");
+    if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_str("");
     /* Simple format: {} placeholders replaced by args in order */
     const char *fmt = args[0]->s;
     int argidx = 1;
@@ -694,7 +694,7 @@ static Value *builtin_input(Interp *i, Value **args, int argc) {
 
 static Value *builtin_exit(Interp *i, Value **args, int argc) {
     (void)i;
-    int code = (argc>0&&args[0]->tag==XS_INT)?(int)args[0]->i:0;
+    int code = (argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):0;
     exit(code);
 }
 
@@ -709,12 +709,12 @@ static Value *builtin_clear(Interp *i, Value **args, int argc) {
 static int cmp_values(const void *a, const void *b) {
     Value *va = *(Value **)a;
     Value *vb = *(Value **)b;
-    if (va->tag == XS_INT && vb->tag == XS_INT)
-        return (va->i > vb->i) - (va->i < vb->i);
-    if ((va->tag == XS_FLOAT || va->tag == XS_INT) &&
-        (vb->tag == XS_FLOAT || vb->tag == XS_INT)) {
-        double fa = va->tag==XS_FLOAT ? va->f : (double)va->i;
-        double fb = vb->tag==XS_FLOAT ? vb->f : (double)vb->i;
+    if (VAL_TAG(va) == XS_INT && VAL_TAG(vb) == XS_INT)
+        return (VAL_INT(va) > VAL_INT(vb)) - (VAL_INT(va) < VAL_INT(vb));
+    if ((VAL_TAG(va) == XS_FLOAT || VAL_TAG(va) == XS_INT) &&
+        (VAL_TAG(vb) == XS_FLOAT || VAL_TAG(vb) == XS_INT)) {
+        double fa = VAL_TAG(va)==XS_FLOAT ? va->f : (double)VAL_INT(va);
+        double fb = VAL_TAG(vb)==XS_FLOAT ? vb->f : (double)VAL_INT(vb);
         return (fa > fb) - (fa < fb);
     }
     char *sa = value_str(va); char *sb = value_str(vb);
@@ -723,7 +723,7 @@ static int cmp_values(const void *a, const void *b) {
 }
 static Value *builtin_sorted(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return value_incref(XS_NULL_VAL);
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return value_incref(XS_NULL_VAL);
     XSArray *src = args[0]->arr;
     Value *copy = xs_array_new();
     for (int j = 0; j < src->len; j++)
@@ -741,7 +741,7 @@ static Value *builtin_assert_eq(Interp *i, Value **args, int argc) {
     if (!value_equal(args[0], args[1])) {
         char *a = value_repr(args[0]);
         char *b = value_repr(args[1]);
-        const char *msg = (argc >= 3 && args[2]->tag == XS_STR) ? args[2]->s : "";
+        const char *msg = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
         fprintf(stderr, "xs: assertion failed: assert_eq(%s, %s)%s%s\n",
                 a, b, msg[0] ? ": " : "", msg);
         free(a); free(b);
@@ -752,7 +752,7 @@ static Value *builtin_assert_eq(Interp *i, Value **args, int argc) {
 
 static Value *builtin_assert(Interp *i, Value **args, int argc) {
     if (argc<1||!value_truthy(args[0])) {
-        const char *msg = (argc>1&&args[1]->tag==XS_STR)?args[1]->s:"assertion failed";
+        const char *msg = (argc>1&&VAL_TAG(args[1])==XS_STR)?args[1]->s:"assertion failed";
         fprintf(stderr,"xs: assertion error: %s\n",msg);
         if (i) {
             i->cf.signal = CF_PANIC;
@@ -788,7 +788,7 @@ static Value *builtin_clone(Interp *i, Value **args, int argc) {
 /* Runtime for the todo() builtin -- panics with a message, like Rust's todo!() */
 /* todo() / unreachable(): à la Rust */
 static Value *builtin_todo(Interp *i, Value **args, int argc) {
-    const char *msg = (argc >= 1 && args[0]->tag == XS_STR) ? args[0]->s : "not yet implemented";
+    const char *msg = (argc >= 1 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : "not yet implemented";
     fprintf(stderr, "todo: %s\n", msg);
     if (i) { i->cf.signal = CF_PANIC; i->cf.value = xs_str(msg); }
     exit(1);
@@ -825,7 +825,7 @@ static void pprint_value(Value *v, int indent) {
     char *pad = xs_malloc(indent + 1);
     memset(pad, ' ', indent); pad[indent] = '\0';
 
-    if (v->tag == XS_MAP) {
+    if (VAL_TAG(v) == XS_MAP) {
         fprintf(stdout, "{\n");
         int printed = 0;
         for (int j = 0; j < v->map->cap; j++) {
@@ -837,7 +837,7 @@ static void pprint_value(Value *v, int indent) {
         }
         if (printed > 0) fprintf(stdout, "\n");
         fprintf(stdout, "%s}", pad);
-    } else if (v->tag == XS_ARRAY) {
+    } else if (VAL_TAG(v) == XS_ARRAY) {
         fprintf(stdout, "[\n");
         for (int j = 0; j < v->arr->len; j++) {
             fprintf(stdout, "%s  ", pad);
@@ -866,22 +866,22 @@ static Value *builtin_pprint(Interp *i, Value **args, int argc) {
 static Value *builtin_ord(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_int(0);
-    if (args[0]->tag==XS_STR) return xs_int((unsigned char)args[0]->s[0]);
-    if (args[0]->tag==XS_CHAR) return xs_int((unsigned char)args[0]->s[0]);
+    if (VAL_TAG(args[0])==XS_STR) return xs_int((unsigned char)args[0]->s[0]);
+    if (VAL_TAG(args[0])==XS_CHAR) return xs_int((unsigned char)args[0]->s[0]);
     return xs_int(0);
 }
 
 static Value *builtin_chr(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_INT) return xs_char(0);
-    return xs_char((char)args[0]->i);
+    if (argc<1||VAL_TAG(args[0])!=XS_INT) return xs_char(0);
+    return xs_char((char)VAL_INT(args[0]));
 }
 
 /* Math.* namespace */
 #define MATH1(fname, cfunc) \
 static Value *native_math_##fname(Interp *ig, Value **a, int n) { \
     (void)ig; \
-    double v=(n>0&&a[0]->tag==XS_FLOAT)?a[0]->f:(n>0&&a[0]->tag==XS_INT)?(double)a[0]->i:0.0; \
+    double v=(n>0&&VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(n>0&&VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):0.0; \
     return xs_float(cfunc(v)); \
 }
 MATH1(cbrt, cbrt)
@@ -899,8 +899,8 @@ MATH1(exp_fn, exp)
 static Value *native_math_gcd(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_int(0);
-    int64_t x=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
-    int64_t y=(a[1]->tag==XS_INT)?a[1]->i:(int64_t)a[1]->f;
+    int64_t x=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    int64_t y=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):(int64_t)a[1]->f;
     if (x<0) x=-x;
     if (y<0) y=-y;
     while (y) { int64_t t=y; y=x%y; x=t; }
@@ -909,8 +909,8 @@ static Value *native_math_gcd(Interp *ig, Value **a, int n) {
 static Value *native_math_lcm(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_int(0);
-    int64_t x=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
-    int64_t y=(a[1]->tag==XS_INT)?a[1]->i:(int64_t)a[1]->f;
+    int64_t x=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    int64_t y=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):(int64_t)a[1]->f;
     if (x<0) x=-x;
     if (y<0) y=-y;
     if (x==0||y==0) return xs_int(0);
@@ -921,7 +921,7 @@ static Value *native_math_lcm(Interp *ig, Value **a, int n) {
 static Value *native_math_factorial(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_int(1);
-    int64_t k=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
+    int64_t k=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     if (k<0) return xs_int(0);
     int64_t r=1; for (int64_t j=2;j<=k;j++) r*=j;
     return xs_int(r);
@@ -929,38 +929,38 @@ static Value *native_math_factorial(Interp *ig, Value **a, int n) {
 static Value *native_math_sign(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_int(0);
-    if (a[0]->tag==XS_INT) return xs_int(a[0]->i>0?1:a[0]->i<0?-1:0);
+    if (VAL_TAG(a[0])==XS_INT) return xs_int(VAL_INT(a[0])>0?1:VAL_INT(a[0])<0?-1:0);
     double v=a[0]->f; return xs_int(v>0.0?1:v<0.0?-1:0);
 }
 static Value *native_math_degrees(Interp *ig, Value **a, int n) {
     (void)ig;
-    double v=(n>0&&a[0]->tag==XS_FLOAT)?a[0]->f:(n>0&&a[0]->tag==XS_INT)?(double)a[0]->i:0.0;
+    double v=(n>0&&VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(n>0&&VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):0.0;
     return xs_float(v*180.0/M_PI);
 }
 static Value *native_math_radians(Interp *ig, Value **a, int n) {
     (void)ig;
-    double v=(n>0&&a[0]->tag==XS_FLOAT)?a[0]->f:(n>0&&a[0]->tag==XS_INT)?(double)a[0]->i:0.0;
+    double v=(n>0&&VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(n>0&&VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):0.0;
     return xs_float(v*M_PI/180.0);
 }
 static Value *native_math_trunc(Interp *ig, Value **a, int n) {
     (void)ig;
-    double v=(n>0&&a[0]->tag==XS_FLOAT)?a[0]->f:(n>0&&a[0]->tag==XS_INT)?(double)a[0]->i:0.0;
+    double v=(n>0&&VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(n>0&&VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):0.0;
     return xs_float(trunc(v));
 }
 static Value *native_math_lerp(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<3) return xs_float(0.0);
-    double av=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double bv=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
-    double tv=(a[2]->tag==XS_FLOAT)?a[2]->f:(double)a[2]->i;
+    double av=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double bv=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
+    double tv=(VAL_TAG(a[2])==XS_FLOAT)?a[2]->f:(double)VAL_INT(a[2]);
     return xs_float(av+(bv-av)*tv);
 }
 static Value *native_math_clamp(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<3) return xs_float(0.0);
-    double val=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double lo =(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
-    double hi =(a[2]->tag==XS_FLOAT)?a[2]->f:(double)a[2]->i;
+    double val=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double lo =(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
+    double hi =(VAL_TAG(a[2])==XS_FLOAT)?a[2]->f:(double)VAL_INT(a[2]);
     if (val<lo) return xs_float(lo);
     if (val>hi) return xs_float(hi);
     return xs_float(val);
@@ -968,27 +968,27 @@ static Value *native_math_clamp(Interp *ig, Value **a, int n) {
 static Value *native_math_atan2(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_float(0.0);
-    double y=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double x=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
+    double y=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double x=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
     return xs_float(atan2(y,x));
 }
 static Value *native_math_hypot(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_float(0.0);
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double y=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double y=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
     return xs_float(hypot(x,y));
 }
 static Value *native_math_isnan(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return value_incref(XS_FALSE_VAL);
-    double v=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
+    double v=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
     return isnan(v)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_math_isinf(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return value_incref(XS_FALSE_VAL);
-    double v=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
+    double v=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
     return isinf(v)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 
@@ -996,7 +996,7 @@ static Value *native_math_isinf(Interp *ig, Value **a, int n) {
 #define MATH1_EXTRA(fname, cfunc) \
 static Value *native_math_##fname(Interp *ig, Value **a, int n) { \
     (void)ig; \
-    double v=(n>0&&a[0]->tag==XS_FLOAT)?a[0]->f:(n>0&&a[0]->tag==XS_INT)?(double)a[0]->i:0.0; \
+    double v=(n>0&&VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(n>0&&VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):0.0; \
     return xs_float(cfunc(v)); \
 }
 MATH1_EXTRA(asinh_fn, asinh)
@@ -1014,8 +1014,8 @@ MATH1_EXTRA(lgamma_fn,lgamma)
 static Value *native_math_fmod(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_float(0.0);
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double y=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double y=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
     return xs_float(fmod(x,y));
 }
 
@@ -1023,7 +1023,7 @@ static Value *native_math_fmod(Interp *ig, Value **a, int n) {
 static Value *native_math_modf(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_array_new();
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
     double ipart;
     double fpart=modf(x,&ipart);
     Value *arr=xs_array_new();
@@ -1036,8 +1036,8 @@ static Value *native_math_modf(Interp *ig, Value **a, int n) {
 static Value *native_math_copysign(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_float(0.0);
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double y=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double y=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
     return xs_float(copysign(x,y));
 }
 
@@ -1045,10 +1045,10 @@ static Value *native_math_copysign(Interp *ig, Value **a, int n) {
 static Value *native_math_isclose(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return value_incref(XS_FALSE_VAL);
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double y=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
-    double rel_tol=(n>=3)?((a[2]->tag==XS_FLOAT)?a[2]->f:(double)a[2]->i):1e-9;
-    double abs_tol=(n>=4)?((a[3]->tag==XS_FLOAT)?a[3]->f:(double)a[3]->i):0.0;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double y=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
+    double rel_tol=(n>=3)?((VAL_TAG(a[2])==XS_FLOAT)?a[2]->f:(double)VAL_INT(a[2])):1e-9;
+    double abs_tol=(n>=4)?((VAL_TAG(a[3])==XS_FLOAT)?a[3]->f:(double)VAL_INT(a[3])):0.0;
     double diff=fabs(x-y);
     if (diff<=abs_tol) return value_incref(XS_TRUE_VAL);
     double mx=fabs(x)>fabs(y)?fabs(x):fabs(y);
@@ -1059,7 +1059,7 @@ static Value *native_math_isclose(Interp *ig, Value **a, int n) {
 static Value *native_math_frexp(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_array_new();
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
     int exp_val;
     double mant=frexp(x,&exp_val);
     Value *arr=xs_array_new();
@@ -1072,8 +1072,8 @@ static Value *native_math_frexp(Interp *ig, Value **a, int n) {
 static Value *native_math_ldexp(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_float(0.0);
-    double x=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    int exp_val=(a[1]->tag==XS_INT)?(int)a[1]->i:(int)a[1]->f;
+    double x=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    int exp_val=(VAL_TAG(a[1])==XS_INT)?(int)VAL_INT(a[1]):(int)a[1]->f;
     return xs_float(ldexp(x,exp_val));
 }
 
@@ -1081,8 +1081,8 @@ static Value *native_math_ldexp(Interp *ig, Value **a, int n) {
 static Value *native_math_comb(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_int(0);
-    int64_t nn=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
-    int64_t kk=(a[1]->tag==XS_INT)?a[1]->i:(int64_t)a[1]->f;
+    int64_t nn=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    int64_t kk=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):(int64_t)a[1]->f;
     if (kk<0||kk>nn||nn<0) return xs_int(0);
     if (kk>nn-kk) kk=nn-kk;
     int64_t r=1;
@@ -1094,8 +1094,8 @@ static Value *native_math_comb(Interp *ig, Value **a, int n) {
 static Value *native_math_perm(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_int(0);
-    int64_t nn=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
-    int64_t kk=(n>=2)?((a[1]->tag==XS_INT)?a[1]->i:(int64_t)a[1]->f):nn;
+    int64_t nn=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    int64_t kk=(n>=2)?((VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):(int64_t)a[1]->f):nn;
     if (kk<0||kk>nn||nn<0) return xs_int(0);
     int64_t r=1;
     for (int64_t j=0;j<kk;j++) r*=(nn-j);
@@ -1104,15 +1104,15 @@ static Value *native_math_perm(Interp *ig, Value **a, int n) {
 
 /* helper: extract double from value */
 static double math_to_double(Value *v) {
-    if (v->tag==XS_FLOAT) return v->f;
-    if (v->tag==XS_INT)   return (double)v->i;
+    if (VAL_TAG(v)==XS_FLOAT) return v->f;
+    if (VAL_TAG(v)==XS_INT)   return (double)VAL_INT(v);
     return 0.0;
 }
 
 /* prod(arr) */
 static Value *native_math_prod(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY) return xs_float(1.0);
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return xs_float(1.0);
     XSArray *arr=a[0]->arr;
     double r=1.0;
     for (int j=0;j<arr->len;j++) r*=math_to_double(arr->items[j]);
@@ -1122,7 +1122,7 @@ static Value *native_math_prod(Interp *ig, Value **a, int n) {
 /* sum(arr) */
 static Value *native_math_sum(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY) return xs_float(0.0);
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return xs_float(0.0);
     XSArray *arr=a[0]->arr;
     double r=0.0;
     for (int j=0;j<arr->len;j++) r+=math_to_double(arr->items[j]);
@@ -1132,7 +1132,7 @@ static Value *native_math_sum(Interp *ig, Value **a, int n) {
 /* min(arr) */
 static Value *native_math_min_arr(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
     XSArray *arr=a[0]->arr;
     double r=math_to_double(arr->items[0]);
     for (int j=1;j<arr->len;j++) { double v=math_to_double(arr->items[j]); if (v<r) r=v; }
@@ -1142,7 +1142,7 @@ static Value *native_math_min_arr(Interp *ig, Value **a, int n) {
 /* max(arr) */
 static Value *native_math_max_arr(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
     XSArray *arr=a[0]->arr;
     double r=math_to_double(arr->items[0]);
     for (int j=1;j<arr->len;j++) { double v=math_to_double(arr->items[j]); if (v>r) r=v; }
@@ -1152,7 +1152,7 @@ static Value *native_math_max_arr(Interp *ig, Value **a, int n) {
 /* mean(arr) */
 static Value *native_math_mean(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY||a[0]->arr->len==0) return xs_float(0.0);
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return xs_float(0.0);
     XSArray *arr=a[0]->arr;
     double r=0.0;
     for (int j=0;j<arr->len;j++) r+=math_to_double(arr->items[j]);
@@ -1266,7 +1266,7 @@ static Value *native_time_now(Interp *i, Value **args, int argc) {
 static Value *native_time_sleep(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return value_incref(XS_NULL_VAL);
-    double secs = args[0]->tag==XS_FLOAT?args[0]->f:(double)args[0]->i;
+    double secs = VAL_TAG(args[0])==XS_FLOAT?args[0]->f:(double)VAL_INT(args[0]);
     /* Drop the GIL while sleeping so other spawned threads make
        progress. xs_sleep_seconds re-acquires before returning. */
     xs_sleep_seconds(secs);
@@ -1306,7 +1306,7 @@ TIME_COMPONENT(second, tm_sec)
 static Value *native_time_sleep_ms(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return value_incref(XS_NULL_VAL);
-    int64_t ms=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
+    int64_t ms=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     struct timespec ts;
     ts.tv_sec=ms/1000; ts.tv_nsec=(ms%1000)*1000000L;
     nanosleep(&ts,NULL);
@@ -1315,8 +1315,8 @@ static Value *native_time_sleep_ms(Interp *ig, Value **a, int n) {
 static Value *native_time_format(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("");
-    time_t t=(time_t)((a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i);
-    const char *fmt=(n>=2&&a[1]->tag==XS_STR)?a[1]->s:"%Y-%m-%d %H:%M:%S";
+    time_t t=(time_t)((VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]));
+    const char *fmt=(n>=2&&VAL_TAG(a[1])==XS_STR)?a[1]->s:"%Y-%m-%d %H:%M:%S";
     struct tm *tm2=localtime(&t);
     char buf[256]; buf[0]='\0';
     strftime(buf,sizeof(buf),fmt,tm2);
@@ -1330,9 +1330,9 @@ static Value *native_time_monotonic(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *input=a[0]->s;
-    const char *fmt=(n>=2&&a[1]->tag==XS_STR)?a[1]->s:NULL;
+    const char *fmt=(n>=2&&VAL_TAG(a[1])==XS_STR)?a[1]->s:NULL;
     struct tm tm2; memset(&tm2,0,sizeof(tm2));
     int parsed=0;
     if (fmt) {
@@ -1367,8 +1367,8 @@ static Value *native_time_date(Interp *ig, Value **a, int n) {
     (void)ig;
     time_t t;
     if (n >= 1) {
-        if (a[0]->tag == XS_INT) t = (time_t)a[0]->i;
-        else if (a[0]->tag == XS_FLOAT) t = (time_t)a[0]->f;
+        if (VAL_TAG(a[0]) == XS_INT) t = (time_t)VAL_INT(a[0]);
+        else if (VAL_TAG(a[0]) == XS_FLOAT) t = (time_t)a[0]->f;
         else t = time(NULL);
     } else t = time(NULL);
     struct tm *tm2 = localtime(&t);
@@ -1387,8 +1387,8 @@ static Value *native_time_to_iso(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return xs_str("");
     time_t t;
-    if (a[0]->tag == XS_INT) t = (time_t)a[0]->i;
-    else if (a[0]->tag == XS_FLOAT) t = (time_t)a[0]->f;
+    if (VAL_TAG(a[0]) == XS_INT) t = (time_t)VAL_INT(a[0]);
+    else if (VAL_TAG(a[0]) == XS_FLOAT) t = (time_t)a[0]->f;
     else return xs_str("");
     struct tm *tm2 = gmtime(&t);
     char buf[64];
@@ -1397,7 +1397,7 @@ static Value *native_time_to_iso(Interp *ig, Value **a, int n) {
 }
 static Value *native_time_from_iso(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     struct tm tm2; memset(&tm2, 0, sizeof(tm2));
     if (strptime(a[0]->s, "%Y-%m-%dT%H:%M:%S", &tm2)
         || strptime(a[0]->s, "%Y-%m-%d", &tm2)) {
@@ -1435,7 +1435,7 @@ Value *make_time_module(void) {
 /* io module */
 static Value *native_io_read_file(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<1||args[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f = fopen(args[0]->s, "r");
     if (!f) return value_incref(XS_NULL_VAL);
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
@@ -1446,7 +1446,7 @@ static Value *native_io_read_file(Interp *i, Value **args, int argc) {
 
 static Value *native_io_write_file(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc<2||args[0]->tag!=XS_STR||args[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (argc<2||VAL_TAG(args[0])!=XS_STR||VAL_TAG(args[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *f=fopen(args[0]->s,"w");
     if (!f) return value_incref(XS_FALSE_VAL);
     fputs(args[1]->s,f); fclose(f);
@@ -1456,9 +1456,9 @@ static Value *native_io_write_file(Interp *i, Value **args, int argc) {
 /* string module */
 static Value *native_str_pad_left(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)a[1]->i; char fill=' ';
-    if (n>=3&&a[2]->tag==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
+    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
+    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     char *r=xs_malloc(width+1);
@@ -1469,9 +1469,9 @@ static Value *native_str_pad_left(Interp *i, Value **a, int n) {
 }
 static Value *native_str_pad_right(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)a[1]->i; char fill=' ';
-    if (n>=3&&a[2]->tag==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
+    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
+    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     char *r=xs_malloc(width+1);
@@ -1481,9 +1481,9 @@ static Value *native_str_pad_right(Interp *i, Value **a, int n) {
 }
 static Value *native_str_center(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)a[1]->i; char fill=' ';
-    if (n>=3&&a[2]->tag==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
+    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
+    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     int pad=width-slen; int lpad=pad/2; int rpad=pad-lpad;
@@ -1495,9 +1495,9 @@ static Value *native_str_center(Interp *i, Value **a, int n) {
 }
 static Value *native_str_truncate(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)a[1]->i;
-    const char *suf=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:"...";
+    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
+    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]);
+    const char *suf=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"...";
     int slen=(int)strlen(s); int suflen=(int)strlen(suf);
     if (slen<=width) return value_incref(a[0]);
     int keep=width-suflen; if(keep<0)keep=0;
@@ -1507,7 +1507,7 @@ static Value *native_str_truncate(Interp *i, Value **a, int n) {
 }
 static Value *native_str_camel_to_snake(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int slen=(int)strlen(s);
     char *r=xs_malloc(slen*2+1); int ri=0;
     for (int j=0;j<slen;j++) {
@@ -1518,7 +1518,7 @@ static Value *native_str_camel_to_snake(Interp *i, Value **a, int n) {
 }
 static Value *native_str_snake_to_camel(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int slen=(int)strlen(s);
     char *r=xs_malloc(slen+1); int ri=0; int cap=0;
     for (int j=0;j<slen;j++) {
@@ -1529,7 +1529,7 @@ static Value *native_str_snake_to_camel(Interp *i, Value **a, int n) {
 }
 static Value *native_str_escape_html(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s;
     int cap=256; char *r=xs_malloc(cap); int ri=0;
     for (const char *p=s;*p;p++) {
@@ -1547,7 +1547,7 @@ static Value *native_str_escape_html(Interp *i, Value **a, int n) {
 }
 static Value *native_str_is_numeric(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     const char *s=a[0]->s; if (!*s) return value_incref(XS_FALSE_VAL);
     int j=0; if(s[j]=='+'||s[j]=='-') j++;
     int digits=0, dots=0;
@@ -1560,7 +1560,7 @@ static Value *native_str_is_numeric(Interp *i, Value **a, int n) {
 }
 static Value *native_str_words(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     const char *s=a[0]->s; Value *arr=xs_array_new();
     const char *p=s;
     while (*p) {
@@ -1588,12 +1588,12 @@ static int levenshtein_dist(const char *s1, const char *s2) {
 }
 static Value *native_str_levenshtein(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return xs_int(0);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_int(0);
     return xs_int(levenshtein_dist(a[0]->s,a[1]->s));
 }
 static Value *native_str_similarity(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return xs_float(0.0);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_float(0.0);
     int l1=(int)strlen(a[0]->s), l2=(int)strlen(a[1]->s);
     int maxlen=l1>l2?l1:l2;
     if (maxlen==0) return xs_float(1.0);
@@ -1602,8 +1602,8 @@ static Value *native_str_similarity(Interp *i, Value **a, int n) {
 }
 static Value *native_str_repeat(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_INT) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int count=(int)a[1]->i;
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_INT) return value_incref(XS_NULL_VAL);
+    const char *s=a[0]->s; int count=(int)VAL_INT(a[1]);
     if (count<=0) return xs_str("");
     int slen=(int)strlen(s);
     int rlen=slen*count;
@@ -1614,7 +1614,7 @@ static Value *native_str_repeat(Interp *i, Value **a, int n) {
 }
 static Value *native_str_chars(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int slen=(int)strlen(s);
     Value *arr=xs_array_new();
     char buf[2]; buf[1]='\0';
@@ -1627,7 +1627,7 @@ static Value *native_str_chars(Interp *i, Value **a, int n) {
 }
 static Value *native_str_bytes(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const unsigned char *s=(const unsigned char*)a[0]->s; int slen=(int)strlen(a[0]->s);
     Value *arr=xs_array_new();
     for(int j=0;j<slen;j++){
@@ -1658,7 +1658,7 @@ Value *make_string_module(void) {
 /* path module */
 static Value *native_path_basename(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s;
     const char *sl=strrchr(s,'/');
     const char *bs=strrchr(s,'\\');
@@ -1667,7 +1667,7 @@ static Value *native_path_basename(Interp *i, Value **a, int n) {
 }
 static Value *native_path_dirname(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str(".");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str(".");
     const char *s=a[0]->s;
     const char *sl=strrchr(s,'/');
     const char *bs=strrchr(s,'\\');
@@ -1679,7 +1679,7 @@ static Value *native_path_dirname(Interp *i, Value **a, int n) {
 }
 static Value *native_path_ext(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     const char *s=a[0]->s;
     const char *sl=strrchr(s,'/');
     const char *bs=strrchr(s,'\\');
@@ -1690,7 +1690,7 @@ static Value *native_path_ext(Interp *i, Value **a, int n) {
 }
 static Value *native_path_stem(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     const char *s=a[0]->s;
     const char *sl=strrchr(s,'/'); const char *bs=strrchr(s,'\\');
     const char *last=sl>bs?sl:bs; const char *base=last?last+1:s;
@@ -1702,10 +1702,10 @@ static Value *native_path_join(Interp *i, Value **a, int argc) {
     (void)i;
     if (argc==0) return xs_str("");
     int total=0;
-    for(int j=0;j<argc;j++) if(a[j]->tag==XS_STR) total+=(int)strlen(a[j]->s)+1;
+    for(int j=0;j<argc;j++) if(VAL_TAG(a[j])==XS_STR) total+=(int)strlen(a[j]->s)+1;
     char *r=xs_malloc(total+2); int ri=0;
     for(int j=0;j<argc;j++){
-        if(a[j]->tag!=XS_STR) continue;
+        if(VAL_TAG(a[j])!=XS_STR) continue;
         const char *s=a[j]->s;
         if(ri>0&&s[0]!='/'&&s[0]!='\\') r[ri++]='/';
         int slen=(int)strlen(s);
@@ -1730,7 +1730,7 @@ Value *make_path_module(void) {
 static const char b64_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static Value *native_b64_encode(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const unsigned char *s=(const unsigned char*)a[0]->s;
     int slen=(int)strlen(a[0]->s);
     int rlen=((slen+2)/3)*4; char *r=xs_malloc(rlen+1); int ri=0;
@@ -1744,7 +1744,7 @@ static Value *native_b64_encode(Interp *i, Value **a, int n) {
 }
 static Value *native_b64_decode(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int slen=(int)strlen(s);
     char *r=xs_malloc(slen); int ri=0;
     static const signed char b64_inv[256]={
@@ -1781,7 +1781,7 @@ static void sha256_hash(const uint8_t *data, size_t len, uint8_t out[32]);
 
 static Value *native_hash_md5(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     uint8_t hash[16];
     md5_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char buf[33];
@@ -1791,7 +1791,7 @@ static Value *native_hash_md5(Interp *i, Value **a, int n) {
 }
 static Value *native_hash_sha256(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     uint8_t hash[32];
     sha256_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char buf[65];
@@ -1819,7 +1819,7 @@ static Value *native_uuid_v4(Interp *i, Value **a, int n) {
 }
 static Value *native_uuid_is_valid(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     const char *s=a[0]->s; int l=(int)strlen(s);
     if (l!=36) return value_incref(XS_FALSE_VAL);
     for(int j=0;j<36;j++){
@@ -1839,8 +1839,8 @@ Value *make_uuid_module(void) {
 static Value *native_random_int(Interp *ig, Value **args, int argc) {
     (void)ig;
     int64_t lo = 0, hi = 100;
-    if (argc >= 1 && args[0]->tag == XS_INT) lo = args[0]->i;
-    if (argc >= 2 && args[1]->tag == XS_INT) hi = args[1]->i;
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) lo = VAL_INT(args[0]);
+    if (argc >= 2 && VAL_TAG(args[1]) == XS_INT) hi = VAL_INT(args[1]);
     if (hi < lo) { int64_t tmp=lo; lo=hi; hi=tmp; }
     int64_t range2 = hi - lo + 1;
     return xs_int(lo + (range2 > 0 ? (int64_t)(rand() % (int)range2) : 0));
@@ -1851,14 +1851,14 @@ static Value *native_random_float(Interp *ig, Value **args, int argc) {
 }
 static Value *native_random_choice(Interp *ig, Value **args, int argc) {
     (void)ig;
-    if (argc < 1 || args[0]->tag != XS_ARRAY || args[0]->arr->len == 0)
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY || args[0]->arr->len == 0)
         return value_incref(XS_NULL_VAL);
     int idx = rand() % args[0]->arr->len;
     return value_incref(array_get(args[0]->arr, idx));
 }
 static Value *native_random_shuffle(Interp *ig, Value **args, int argc) {
     (void)ig;
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return value_incref(XS_NULL_VAL);
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return value_incref(XS_NULL_VAL);
     Value *result = xs_array_new();
     for (int j2 = 0; j2 < args[0]->arr->len; j2++)
         array_push(result->arr, value_incref(array_get(args[0]->arr, j2)));
@@ -1872,7 +1872,7 @@ static Value *native_random_shuffle(Interp *ig, Value **args, int argc) {
 }
 static Value *native_random_seed(Interp *ig, Value **args, int argc) {
     (void)ig;
-    if (argc >= 1 && args[0]->tag == XS_INT) srand((unsigned)args[0]->i);
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) srand((unsigned)VAL_INT(args[0]));
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_random_bool(Interp *ig, Value **a, int n) {
@@ -1881,8 +1881,8 @@ static Value *native_random_bool(Interp *ig, Value **a, int n) {
 }
 static Value *native_random_choices(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_ARRAY||a[0]->arr->len==0) return xs_array_new();
-    int64_t k=(a[1]->tag==XS_INT)?a[1]->i:1;
+    if (n<2||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return xs_array_new();
+    int64_t k=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):1;
     Value *arr=xs_array_new();
     XSArray *src=a[0]->arr;
     for (int64_t j=0;j<k;j++) {
@@ -1896,9 +1896,9 @@ static Value *native_random_shuffled(Interp *ig, Value **a, int n) {
 }
 static Value *native_random_sample(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_ARRAY) return xs_array_new();
+    if (n<2||VAL_TAG(a[0])!=XS_ARRAY) return xs_array_new();
     XSArray *src=a[0]->arr;
-    int64_t k=(a[1]->tag==XS_INT)?a[1]->i:0;
+    int64_t k=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):0;
     if (k>src->len) k=src->len;
     /* Fisher-Yates on a copy */
     Value *copy=xs_array_new();
@@ -1917,8 +1917,8 @@ static Value *native_random_sample(Interp *ig, Value **a, int n) {
 }
 static Value *native_random_gauss(Interp *ig, Value **a, int n) {
     (void)ig;
-    double mu=(n>0)?(a[0]->tag==XS_FLOAT?a[0]->f:(double)a[0]->i):0.0;
-    double sigma=(n>1)?(a[1]->tag==XS_FLOAT?a[1]->f:(double)a[1]->i):1.0;
+    double mu=(n>0)?(VAL_TAG(a[0])==XS_FLOAT?a[0]->f:(double)VAL_INT(a[0])):0.0;
+    double sigma=(n>1)?(VAL_TAG(a[1])==XS_FLOAT?a[1]->f:(double)VAL_INT(a[1])):1.0;
     /* Box-Muller transform */
     double u1=((double)rand()+1.0)/((double)RAND_MAX+2.0);
     double u2=((double)rand()+1.0)/((double)RAND_MAX+2.0);
@@ -1927,21 +1927,21 @@ static Value *native_random_gauss(Interp *ig, Value **a, int n) {
 }
 static Value *native_random_uniform(Interp *ig, Value **a, int n) {
     (void)ig;
-    double lo=(n>0)?(a[0]->tag==XS_FLOAT?a[0]->f:(double)a[0]->i):0.0;
-    double hi=(n>1)?(a[1]->tag==XS_FLOAT?a[1]->f:(double)a[1]->i):1.0;
+    double lo=(n>0)?(VAL_TAG(a[0])==XS_FLOAT?a[0]->f:(double)VAL_INT(a[0])):0.0;
+    double hi=(n>1)?(VAL_TAG(a[1])==XS_FLOAT?a[1]->f:(double)VAL_INT(a[1])):1.0;
     double r=(double)rand()/((double)RAND_MAX+1.0);
     return xs_float(lo+r*(hi-lo));
 }
 static Value *native_random_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    int64_t cnt=(n>0&&a[0]->tag==XS_INT)?a[0]->i:0;
+    int64_t cnt=(n>0&&VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):0;
     Value *arr=xs_array_new();
     for (int64_t j=0;j<cnt;j++) array_push(arr->arr,xs_int((int64_t)(rand()&0xff)));
     return arr;
 }
 static Value *native_random_hex_str(Interp *ig, Value **a, int n) {
     (void)ig;
-    int64_t cnt=(n>0&&a[0]->tag==XS_INT)?a[0]->i:0;
+    int64_t cnt=(n>0&&VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):0;
     char *buf=xs_malloc(cnt*2+1); buf[0]='\0';
     for (int64_t j=0;j<cnt;j++) snprintf(buf+j*2,3,"%02x",(unsigned)(rand()&0xff));
     Value *v=xs_str(buf); free(buf); return v;
@@ -1987,12 +1987,12 @@ static Value *collections_counter(Interp *i, Value **a, int n) {
     (void)i;
     Value *result=xs_map_new();
     Value *type=xs_str("Counter"); map_set(result->map,"_type",type); value_decref(type);
-    if (n<1||a[0]->tag!=XS_ARRAY) return result;
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return result;
     XSArray *arr=a[0]->arr;
     for(int j=0;j<arr->len;j++){
         char *key=value_str(arr->items[j]);
         Value *cur=map_get(result->map,key);
-        Value *next=xs_int(cur?(cur->tag==XS_INT?cur->i:0)+1:1);
+        Value *next=xs_int(cur?(VAL_TAG(cur)==XS_INT?VAL_INT(cur):0)+1:1);
         map_set(result->map,key,next); value_decref(next);
         free(key);
     }
@@ -2011,7 +2011,7 @@ static Value *collections_set_new(Interp *ig, Value **a, int n) {
     Value *t=xs_str("Set"); map_set(s->map,"_type",t); value_decref(t);
     Value *data=xs_map_new(); map_set(s->map,"_data",data); value_decref(data);
     /* If array passed, pre-populate */
-    if (n>0&&a[0]->tag==XS_ARRAY) {
+    if (n>0&&VAL_TAG(a[0])==XS_ARRAY) {
         Value *d2=map_get(s->map,"_data");
         XSArray *arr=a[0]->arr;
         for (int j=0;j<arr->len;j++){
@@ -2035,7 +2035,7 @@ static Value *collections_ordered_map_new(Interp *ig, Value **a, int n) {
 static Value *collections_set_simple(Interp *ig, Value **a, int n) {
     (void)ig;
     Value *result=xs_array_new();
-    if (n<1||a[0]->tag!=XS_ARRAY) return result;
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return result;
     XSArray *arr=a[0]->arr;
     /* track seen keys in a temporary map for dedup */
     XSMap *seen=map_new();
@@ -2058,12 +2058,12 @@ static Value *collections_deque_simple(Interp *ig, Value **a, int n) {
 static Value *collections_counter_simple(Interp *ig, Value **a, int n) {
     (void)ig;
     Value *result=xs_map_new();
-    if (n<1||a[0]->tag!=XS_ARRAY) return result;
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return result;
     XSArray *arr=a[0]->arr;
     for(int j=0;j<arr->len;j++){
         char *key=value_str(arr->items[j]);
         Value *cur=map_get(result->map,key);
-        Value *next=xs_int(cur?(cur->tag==XS_INT?cur->i:0)+1:1);
+        Value *next=xs_int(cur?(VAL_TAG(cur)==XS_INT?VAL_INT(cur):0)+1:1);
         map_set(result->map,key,next); value_decref(next);
         free(key);
     }
@@ -2090,7 +2090,7 @@ static Value *native_process_pid(Interp *i, Value **a, int n) {
 }
 static Value *native_process_run(Interp *i, Value **a, int n) {
     (void)i;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f = popen(a[0]->s, "r");
     Value *result = xs_map_new();
     if (!f) {
@@ -2118,7 +2118,7 @@ static Value *native_process_run(Interp *i, Value **a, int n) {
 /* process.exec(cmd_string) - run shell command, return exit code */
 static Value *native_process_exec(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_int(-1);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_int(-1);
     int rc = system(a[0]->s);
     return xs_int(rc);
 }
@@ -2126,12 +2126,12 @@ static Value *native_process_exec(Interp *ig, Value **a, int n) {
 /* process.spawn(cmd, args, opts) - spawn with pipe access */
 static Value *native_process_spawn_stdin_write(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "_stdin_fd");
-    if (!fdv || fdv->tag != XS_INT || fdv->i <= 0) return value_incref(XS_FALSE_VAL);
-    if (a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (!fdv || VAL_TAG(fdv) != XS_INT || VAL_INT(fdv) <= 0) return value_incref(XS_FALSE_VAL);
+    if (VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    ssize_t w = write((int)fdv->i, a[1]->s, strlen(a[1]->s));
+    ssize_t w = write((int)VAL_INT(fdv), a[1]->s, strlen(a[1]->s));
     return (w >= 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 #else
     return value_incref(XS_FALSE_VAL);
@@ -2140,14 +2140,14 @@ static Value *native_process_spawn_stdin_write(Interp *ig, Value **a, int n) {
 
 static Value *native_process_spawn_stdout_read(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_stdout_fd");
-    if (!fdv || fdv->tag != XS_INT || fdv->i <= 0) return value_incref(XS_NULL_VAL);
+    if (!fdv || VAL_TAG(fdv) != XS_INT || VAL_INT(fdv) <= 0) return value_incref(XS_NULL_VAL);
 #if !defined(__MINGW32__) && !defined(__wasi__)
     int maxn = 4096;
-    if (n >= 2 && a[1]->tag == XS_INT) maxn = (int)a[1]->i;
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) maxn = (int)VAL_INT(a[1]);
     char *buf = xs_malloc(maxn + 1);
-    ssize_t nr = read((int)fdv->i, buf, maxn);
+    ssize_t nr = read((int)VAL_INT(fdv), buf, maxn);
     if (nr <= 0) { free(buf); return value_incref(XS_NULL_VAL); }
     buf[nr] = '\0';
     Value *v = xs_str_n(buf, nr); free(buf); return v;
@@ -2158,14 +2158,14 @@ static Value *native_process_spawn_stdout_read(Interp *ig, Value **a, int n) {
 
 static Value *native_process_spawn_stderr_read(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_stderr_fd");
-    if (!fdv || fdv->tag != XS_INT || fdv->i <= 0) return value_incref(XS_NULL_VAL);
+    if (!fdv || VAL_TAG(fdv) != XS_INT || VAL_INT(fdv) <= 0) return value_incref(XS_NULL_VAL);
 #if !defined(__MINGW32__) && !defined(__wasi__)
     int maxn = 4096;
-    if (n >= 2 && a[1]->tag == XS_INT) maxn = (int)a[1]->i;
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) maxn = (int)VAL_INT(a[1]);
     char *buf = xs_malloc(maxn + 1);
-    ssize_t nr = read((int)fdv->i, buf, maxn);
+    ssize_t nr = read((int)VAL_INT(fdv), buf, maxn);
     if (nr <= 0) { free(buf); return value_incref(XS_NULL_VAL); }
     buf[nr] = '\0';
     Value *v = xs_str_n(buf, nr); free(buf); return v;
@@ -2176,19 +2176,19 @@ static Value *native_process_spawn_stderr_read(Interp *ig, Value **a, int n) {
 
 static Value *native_process_spawn_wait(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return xs_int(-1);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return xs_int(-1);
     Value *pidv = map_get(a[0]->map, "pid");
-    if (!pidv || pidv->tag != XS_INT) return xs_int(-1);
+    if (!pidv || VAL_TAG(pidv) != XS_INT) return xs_int(-1);
 #if !defined(__MINGW32__) && !defined(__wasi__)
     int status = 0;
-    waitpid((pid_t)pidv->i, &status, 0);
+    waitpid((pid_t)VAL_INT(pidv), &status, 0);
     /* close remaining fds */
     Value *si = map_get(a[0]->map, "_stdin_fd");
-    if (si && si->tag == XS_INT && si->i > 0) { close((int)si->i); map_set(a[0]->map, "_stdin_fd", xs_int(0)); }
+    if (si && VAL_TAG(si) == XS_INT && VAL_INT(si) > 0) { close((int)VAL_INT(si)); map_set(a[0]->map, "_stdin_fd", xs_int(0)); }
     Value *so = map_get(a[0]->map, "_stdout_fd");
-    if (so && so->tag == XS_INT && so->i > 0) { close((int)so->i); map_set(a[0]->map, "_stdout_fd", xs_int(0)); }
+    if (so && VAL_TAG(so) == XS_INT && VAL_INT(so) > 0) { close((int)VAL_INT(so)); map_set(a[0]->map, "_stdout_fd", xs_int(0)); }
     Value *se = map_get(a[0]->map, "_stderr_fd");
-    if (se && se->tag == XS_INT && se->i > 0) { close((int)se->i); map_set(a[0]->map, "_stderr_fd", xs_int(0)); }
+    if (se && VAL_TAG(se) == XS_INT && VAL_INT(se) > 0) { close((int)VAL_INT(se)); map_set(a[0]->map, "_stderr_fd", xs_int(0)); }
     if (WIFEXITED(status)) return xs_int(WEXITSTATUS(status));
     return xs_int(-1);
 #else
@@ -2198,13 +2198,13 @@ static Value *native_process_spawn_wait(Interp *ig, Value **a, int n) {
 
 static Value *native_process_spawn_kill(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_FALSE_VAL);
     Value *pidv = map_get(a[0]->map, "pid");
-    if (!pidv || pidv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
+    if (!pidv || VAL_TAG(pidv) != XS_INT) return value_incref(XS_FALSE_VAL);
 #if !defined(__MINGW32__) && !defined(__wasi__)
     int sig = SIGTERM;
-    if (n >= 2 && a[1]->tag == XS_INT) sig = (int)a[1]->i;
-    return (kill((pid_t)pidv->i, sig) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) sig = (int)VAL_INT(a[1]);
+    return (kill((pid_t)VAL_INT(pidv), sig) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 #else
     return value_incref(XS_FALSE_VAL);
 #endif
@@ -2214,10 +2214,10 @@ static Value *native_process_spawn_kill(Interp *ig, Value **a, int n) {
 /* Windows spawn via _popen - captures stdout, uses pclose for wait */
 static Value *native_process_spawn_stdout_read_win(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fpv = map_get(a[0]->map, "_fp");
-    if (!fpv || fpv->tag != XS_INT || fpv->i == 0) return value_incref(XS_NULL_VAL);
-    FILE *fp = (FILE*)(uintptr_t)fpv->i;
+    if (!fpv || VAL_TAG(fpv) != XS_INT || VAL_INT(fpv) == 0) return value_incref(XS_NULL_VAL);
+    FILE *fp = (FILE*)(uintptr_t)VAL_INT(fpv);
     char buf[8192]; int total = 0;
     while (total < (int)sizeof(buf)-1) {
         int c = fgetc(fp);
@@ -2229,10 +2229,10 @@ static Value *native_process_spawn_stdout_read_win(Interp *ig, Value **a, int n)
 }
 static Value *native_process_spawn_wait_win(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return xs_int(-1);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return xs_int(-1);
     Value *fpv = map_get(a[0]->map, "_fp");
-    if (!fpv || fpv->tag != XS_INT || fpv->i == 0) return xs_int(-1);
-    FILE *fp = (FILE*)(uintptr_t)fpv->i;
+    if (!fpv || VAL_TAG(fpv) != XS_INT || VAL_INT(fpv) == 0) return xs_int(-1);
+    FILE *fp = (FILE*)(uintptr_t)VAL_INT(fpv);
     int rc = _pclose(fp);
     map_set(a[0]->map, "_fp", xs_int(0));
     return xs_int(rc);
@@ -2242,15 +2242,15 @@ static Value *native_process_spawn_wait_win(Interp *ig, Value **a, int n) {
 static Value *native_process_spawn(Interp *ig, Value **a, int n) {
     (void)ig;
 #if defined(__MINGW32__)
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     const char *cmd = a[0]->s;
     char cmdline[4096];
-    if (n >= 2 && a[1]->tag == XS_ARRAY) {
+    if (n >= 2 && VAL_TAG(a[1]) == XS_ARRAY) {
         int pos = snprintf(cmdline, sizeof(cmdline), "%s", cmd);
         for (int j = 0; j < a[1]->arr->len && pos < (int)sizeof(cmdline)-2; j++) {
             Value *av = a[1]->arr->items[j];
             pos += snprintf(cmdline+pos, sizeof(cmdline)-pos, " %s",
-                           (av->tag == XS_STR) ? av->s : "");
+                           (VAL_TAG(av) == XS_STR) ? av->s : "");
         }
     } else {
         snprintf(cmdline, sizeof(cmdline), "%s", cmd);
@@ -2267,19 +2267,19 @@ static Value *native_process_spawn(Interp *ig, Value **a, int n) {
     map_set(proc, "kill", xs_native(native_process_spawn_kill));
     return xs_module(proc);
 #elif !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     const char *cmd = a[0]->s;
 
     /* collect args */
     int nargs = 0;
     char **argv_list = NULL;
-    if (n >= 2 && a[1]->tag == XS_ARRAY) {
+    if (n >= 2 && VAL_TAG(a[1]) == XS_ARRAY) {
         nargs = a[1]->arr->len;
         argv_list = xs_malloc(sizeof(char*) * (nargs + 2));
         argv_list[0] = (char*)cmd;
         for (int j = 0; j < nargs; j++) {
             Value *av = a[1]->arr->items[j];
-            argv_list[j+1] = (av->tag == XS_STR) ? av->s : "";
+            argv_list[j+1] = (VAL_TAG(av) == XS_STR) ? av->s : "";
         }
         argv_list[nargs+1] = NULL;
     } else {
@@ -2306,7 +2306,7 @@ static Value *native_process_spawn(Interp *ig, Value **a, int n) {
         close(stdin_pipe[1]);  dup2(stdin_pipe[0], 0);  close(stdin_pipe[0]);
         close(stdout_pipe[0]); dup2(stdout_pipe[1], 1); close(stdout_pipe[1]);
         close(stderr_pipe[0]); dup2(stderr_pipe[1], 2); close(stderr_pipe[1]);
-        if (n >= 2 && a[1]->tag == XS_ARRAY)
+        if (n >= 2 && VAL_TAG(a[1]) == XS_ARRAY)
             execvp(cmd, argv_list);
         else
             execvp("/bin/sh", argv_list);
@@ -2351,11 +2351,11 @@ static void xs_signal_handler(int sig) {
 
 static Value *native_process_on_signal(Interp *ig, Value **a, int n) {
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || (a[1]->tag != XS_FUNC && a[1]->tag != XS_NATIVE))
+    if (n < 2 || (VAL_TAG(a[1]) != XS_FUNC && VAL_TAG(a[1]) != XS_NATIVE))
         return value_incref(XS_FALSE_VAL);
     int sig = -1;
-    if (a[0]->tag == XS_INT) sig = (int)a[0]->i;
-    else if (a[0]->tag == XS_STR) {
+    if (VAL_TAG(a[0]) == XS_INT) sig = (int)VAL_INT(a[0]);
+    else if (VAL_TAG(a[0]) == XS_STR) {
         if (strcasecmp(a[0]->s, "SIGINT") == 0 || strcasecmp(a[0]->s, "INT") == 0) sig = SIGINT;
         else if (strcasecmp(a[0]->s, "SIGTERM") == 0 || strcasecmp(a[0]->s, "TERM") == 0) sig = SIGTERM;
         else if (strcasecmp(a[0]->s, "SIGHUP") == 0 || strcasecmp(a[0]->s, "HUP") == 0) sig = SIGHUP;
@@ -2377,8 +2377,8 @@ static Value *native_process_on_signal(Interp *ig, Value **a, int n) {
 /* process.env(name) / process.env(name, value) */
 static Value *native_process_env(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
-    if (n >= 2 && a[1]->tag == XS_STR) {
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n >= 2 && VAL_TAG(a[1]) == XS_STR) {
         setenv(a[0]->s, a[1]->s, 1);
         return value_incref(XS_TRUE_VAL);
     }
@@ -2398,7 +2398,7 @@ static Value *native_process_cwd(Interp *ig, Value **a, int n) {
 static Value *native_process_exit(Interp *ig, Value **a, int n) {
     (void)ig;
     int code = 0;
-    if (n >= 1 && a[0]->tag == XS_INT) code = (int)a[0]->i;
+    if (n >= 1 && VAL_TAG(a[0]) == XS_INT) code = (int)VAL_INT(a[0]);
     exit(code);
     return value_incref(XS_NULL_VAL);
 }
@@ -2418,7 +2418,7 @@ Value *make_process_module(void) {
 
 static Value *native_io_wait_for_key(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc >= 1 && args[0]->tag == XS_STR) printf("%s", args[0]->s);
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_STR) printf("%s", args[0]->s);
     fflush(stdout);
     char buf[256]; buf[0] = '\0';
     if (fgets(buf, sizeof(buf), stdin)) {
@@ -2429,7 +2429,7 @@ static Value *native_io_wait_for_key(Interp *i, Value **args, int argc) {
 }
 static Value *native_io_read_line(Interp *i, Value **args, int argc) {
     (void)i;
-    if (argc >= 1 && args[0]->tag == XS_STR) printf("%s", args[0]->s);
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_STR) printf("%s", args[0]->s);
     fflush(stdout);
     char buf[1024]; buf[0] = '\0';
     if (fgets(buf, sizeof(buf), stdin)) {
@@ -2441,7 +2441,7 @@ static Value *native_io_read_line(Interp *i, Value **args, int argc) {
 static Value *native_io_get_key_nowait(Interp *ig, Value **args, int argc) {
     (void)ig;
     int timeout_ms = 0;
-    if (argc >= 1 && args[0]->tag == XS_INT) timeout_ms = (int)args[0]->i;
+    if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) timeout_ms = (int)VAL_INT(args[0]);
 #if defined(__wasi__)
     (void)timeout_ms;
     return value_incref(XS_NULL_VAL);
@@ -2494,7 +2494,7 @@ static Value *native_io_get_key_nowait(Interp *ig, Value **args, int argc) {
 }
 static Value *native_io_append_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *f=fopen(a[0]->s,"a");
     if (!f) return value_incref(XS_FALSE_VAL);
     fputs(a[1]->s,f); fclose(f);
@@ -2502,7 +2502,7 @@ static Value *native_io_append_file(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_read_lines(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f=fopen(a[0]->s,"r");
     if (!f) return value_incref(XS_NULL_VAL);
     Value *arr=xs_array_new();
@@ -2516,7 +2516,7 @@ static Value *native_io_read_lines(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_write_lines(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_ARRAY) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_ARRAY) return value_incref(XS_FALSE_VAL);
     FILE *f=fopen(a[0]->s,"w");
     if (!f) return value_incref(XS_FALSE_VAL);
     XSArray *arr=a[1]->arr;
@@ -2527,7 +2527,7 @@ static Value *native_io_write_lines(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_read_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f=fopen(a[0]->s,"rb");
     if (!f) return value_incref(XS_NULL_VAL);
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
@@ -2539,13 +2539,13 @@ static Value *native_io_read_bytes(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_write_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_ARRAY) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_ARRAY) return value_incref(XS_FALSE_VAL);
     FILE *f=fopen(a[0]->s,"wb");
     if (!f) return value_incref(XS_FALSE_VAL);
     XSArray *arr=a[1]->arr;
     for (int j=0;j<arr->len;j++) {
-        if (arr->items[j]->tag==XS_INT) {
-            unsigned char b=(unsigned char)(arr->items[j]->i&0xff);
+        if (VAL_TAG(arr->items[j])==XS_INT) {
+            unsigned char b=(unsigned char)(VAL_INT(arr->items[j])&0xff);
             fwrite(&b,1,1,f);
         }
     }
@@ -2553,23 +2553,23 @@ static Value *native_io_write_bytes(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_file_exists(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (access(a[0]->s,F_OK)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_io_file_size(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_int(-1);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_int(-1);
     struct stat st; if (stat(a[0]->s,&st)!=0) return xs_int(-1);
     return xs_int((int64_t)st.st_size);
 }
 static Value *native_io_delete_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (remove(a[0]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_io_copy_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *src=fopen(a[0]->s,"rb"); if (!src) return value_incref(XS_FALSE_VAL);
     FILE *dst=fopen(a[1]->s,"wb"); if (!dst){fclose(src);return value_incref(XS_FALSE_VAL);}
     char buf[8192]; size_t r;
@@ -2578,7 +2578,7 @@ static Value *native_io_copy_file(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_rename_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (rename(a[0]->s,a[1]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static int io_mkdirs(const char *path) {
@@ -2594,13 +2594,13 @@ static int io_mkdirs(const char *path) {
 }
 static Value *native_io_make_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     int r=io_mkdirs(a[0]->s);
     return (r==0||errno==EEXIST)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_io_list_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     DIR *d=opendir(a[0]->s); if (!d) return xs_array_new();
     Value *arr=xs_array_new();
     struct dirent *ent;
@@ -2631,8 +2631,8 @@ static Value *native_io_stdin_readline(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_stdin_read_n(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    int64_t count = a[0]->i;
+    if (n < 1 || VAL_TAG(a[0]) != XS_INT) return value_incref(XS_NULL_VAL);
+    int64_t count = VAL_INT(a[0]);
     if (count <= 0) return xs_str("");
     char *buf = xs_malloc((size_t)count + 1);
     size_t total = 0;
@@ -2648,13 +2648,13 @@ static Value *native_io_stdin_read_n(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_is_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s,&st)!=0) return value_incref(XS_FALSE_VAL);
     return S_ISREG(st.st_mode)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_io_is_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s,&st)!=0) return value_incref(XS_FALSE_VAL);
     return S_ISDIR(st.st_mode)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
@@ -2662,7 +2662,7 @@ static Value *native_io_is_dir(Interp *ig, Value **a, int n) {
 /* move_file: rename, falling back to copy+delete for cross-device moves */
 static Value *native_io_move_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     if (rename(a[0]->s,a[1]->s)==0) return value_incref(XS_TRUE_VAL);
     /* cross-device fallback: copy then delete */
     FILE *src=fopen(a[0]->s,"rb"); if (!src) return value_incref(XS_FALSE_VAL);
@@ -2677,8 +2677,8 @@ static Value *native_io_move_file(Interp *ig, Value **a, int n) {
 /* temp_file: create a temp file, return its path */
 static Value *native_io_temp_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    const char *suffix = (n>=1 && a[0]->tag==XS_STR) ? a[0]->s : "";
-    const char *prefix = (n>=2 && a[1]->tag==XS_STR) ? a[1]->s : "xs_tmp_";
+    const char *suffix = (n>=1 && VAL_TAG(a[0])==XS_STR) ? a[0]->s : "";
+    const char *prefix = (n>=2 && VAL_TAG(a[1])==XS_STR) ? a[1]->s : "xs_tmp_";
     const char *tmpdir = getenv("TMPDIR");
     if (!tmpdir) tmpdir = getenv("TEMP");
     if (!tmpdir) tmpdir = getenv("TMP");
@@ -2708,7 +2708,7 @@ static Value *native_io_temp_file(Interp *ig, Value **a, int n) {
 /* temp_dir: create a temp directory, return its path */
 static Value *native_io_temp_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    const char *prefix = (n>=1 && a[0]->tag==XS_STR) ? a[0]->s : "xs_tmpd_";
+    const char *prefix = (n>=1 && VAL_TAG(a[0])==XS_STR) ? a[0]->s : "xs_tmpd_";
     const char *tmpdir = getenv("TMPDIR");
     if (!tmpdir) tmpdir = getenv("TEMP");
     if (!tmpdir) tmpdir = getenv("TMP");
@@ -2732,7 +2732,7 @@ static Value *native_io_temp_dir(Interp *ig, Value **a, int n) {
 /* file_info: return map with size, is_file, is_dir, modified, path */
 static Value *native_io_file_info(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     struct stat st;
     if (stat(a[0]->s,&st)!=0) return value_incref(XS_NULL_VAL);
     Value *m = xs_map_new();
@@ -2763,7 +2763,7 @@ static Value *native_io_stdin_lines(Interp *ig, Value **a, int n) {
 /* glob: pattern matching for file paths */
 static Value *native_io_glob(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
 #if !defined(__wasi__)
     glob_t g; memset(&g,0,sizeof(g));
     Value *arr=xs_array_new();
@@ -2779,7 +2779,7 @@ static Value *native_io_glob(Interp *ig, Value **a, int n) {
 /* symlink: create a symbolic link */
 static Value *native_io_symlink(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
 #if !defined(__MINGW32__) && !defined(__wasi__)
     return (symlink(a[0]->s,a[1]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 #else
@@ -2790,12 +2790,12 @@ static Value *native_io_symlink(Interp *ig, Value **a, int n) {
 /* stdout/stderr sub-module helpers */
 static Value *native_io_stdout_write(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n>=1 && a[0]->tag==XS_STR) fputs(a[0]->s,stdout);
+    if (n>=1 && VAL_TAG(a[0])==XS_STR) fputs(a[0]->s,stdout);
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_io_stdout_writeln(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n>=1 && a[0]->tag==XS_STR) { fputs(a[0]->s,stdout); fputc('\n',stdout); }
+    if (n>=1 && VAL_TAG(a[0])==XS_STR) { fputs(a[0]->s,stdout); fputc('\n',stdout); }
     else fputc('\n',stdout);
     return value_incref(XS_NULL_VAL);
 }
@@ -2806,12 +2806,12 @@ static Value *native_io_stdout_flush(Interp *ig, Value **a, int n) {
 }
 static Value *native_io_stderr_write(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n>=1 && a[0]->tag==XS_STR) fputs(a[0]->s,stderr);
+    if (n>=1 && VAL_TAG(a[0])==XS_STR) fputs(a[0]->s,stderr);
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_io_stderr_writeln(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n>=1 && a[0]->tag==XS_STR) { fputs(a[0]->s,stderr); fputc('\n',stderr); }
+    if (n>=1 && VAL_TAG(a[0])==XS_STR) { fputs(a[0]->s,stderr); fputc('\n',stderr); }
     else fputc('\n',stderr);
     return value_incref(XS_NULL_VAL);
 }
@@ -2884,7 +2884,7 @@ static Value *native_os_cwd(Interp *ig, Value **a, int n) {
 }
 static Value *native_os_chdir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (chdir(a[0]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_home(Interp *ig, Value **a, int n) {
@@ -2897,39 +2897,39 @@ static Value *native_os_tempdir(Interp *ig, Value **a, int n) {
 }
 static Value *native_os_mkdir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     int r=io_mkdirs(a[0]->s);
     return (r==0||errno==EEXIST)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_rmdir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (rmdir(a[0]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_remove(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (unlink(a[0]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_rename(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (rename(a[0]->s,a[1]->s)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_exists(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (access(a[0]->s,F_OK)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_is_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s,&st)!=0) return value_incref(XS_FALSE_VAL);
     return S_ISREG(st.st_mode)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_is_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s,&st)!=0) return value_incref(XS_FALSE_VAL);
     return S_ISDIR(st.st_mode)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
@@ -2954,12 +2954,12 @@ static Value *native_os_ppid(Interp *ig, Value **a, int n) {
 }
 static Value *native_os_exit(Interp *ig, Value **a, int n) {
     (void)ig;
-    int code=(n>0&&a[0]->tag==XS_INT)?(int)a[0]->i:0;
+    int code=(n>0&&VAL_TAG(a[0])==XS_INT)?(int)VAL_INT(a[0]):0;
     exit(code);
 }
 static Value *native_os_list_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     DIR *d=opendir(a[0]->s); if (!d) return xs_array_new();
     Value *arr=xs_array_new();
     struct dirent *ent;
@@ -2971,7 +2971,7 @@ static Value *native_os_list_dir(Interp *ig, Value **a, int n) {
 }
 static Value *native_os_glob(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     glob_t g; memset(&g,0,sizeof(g));
     Value *arr=xs_array_new();
     if (glob(a[0]->s,0,NULL,&g)==0) {
@@ -2981,19 +2981,19 @@ static Value *native_os_glob(Interp *ig, Value **a, int n) {
 }
 static Value *native_os_env_get(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *v=getenv(a[0]->s);
     if (!v) return (n>1)?value_incref(a[1]):value_incref(XS_NULL_VAL);
     return xs_str(v);
 }
 static Value *native_os_env_set(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return (setenv(a[0]->s,a[1]->s,1)==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 static Value *native_os_env_has(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     return getenv(a[0]->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
 }
 #ifndef _WIN32
@@ -3215,26 +3215,26 @@ static void json_indent_line(int indent, int depth, char **out, int *len, int *c
     for (int j=0;j<depth*indent;j++) json_append(out,len,cap," ",1);
 }
 static void json_stringify_val(Value *v, int indent, int depth, char **out, int *len, int *cap) {
-    if (!v||v->tag==XS_NULL){json_append(out,len,cap,"null",4);return;}
-    if (v->tag==XS_BOOL){
-        if (v->i) json_append(out,len,cap,"true",4);
+    if (!v||VAL_TAG(v)==XS_NULL){json_append(out,len,cap,"null",4);return;}
+    if (VAL_TAG(v)==XS_BOOL){
+        if (VAL_INT(v)) json_append(out,len,cap,"true",4);
         else json_append(out,len,cap,"false",5);
         return;
     }
-    if (v->tag==XS_INT){
-        char buf[32]; int bl=snprintf(buf,sizeof(buf),"%lld",(long long)v->i);
+    if (VAL_TAG(v)==XS_INT){
+        char buf[32]; int bl=snprintf(buf,sizeof(buf),"%lld",(long long)VAL_INT(v));
         json_append(out,len,cap,buf,bl); return;
     }
-    if (v->tag==XS_FLOAT){
+    if (VAL_TAG(v)==XS_FLOAT){
         char buf[64]; int bl=snprintf(buf,sizeof(buf),"%g",v->f);
         json_append(out,len,cap,buf,bl); return;
     }
-    if (v->tag==XS_STR){json_append_str_escaped(v->s,out,len,cap);return;}
-    if (v->tag==XS_CHAR){
+    if (VAL_TAG(v)==XS_STR){json_append_str_escaped(v->s,out,len,cap);return;}
+    if (VAL_TAG(v)==XS_CHAR){
         char cb[2]={v->s?v->s[0]:0,0};
         json_append_str_escaped(cb,out,len,cap); return;
     }
-    if (v->tag==XS_ARRAY||v->tag==XS_TUPLE){
+    if (VAL_TAG(v)==XS_ARRAY||VAL_TAG(v)==XS_TUPLE){
         json_append(out,len,cap,"[",1);
         XSArray *arr=v->arr;
         for (int j=0;j<arr->len;j++){
@@ -3245,7 +3245,7 @@ static void json_stringify_val(Value *v, int indent, int depth, char **out, int 
         if (indent>0&&arr->len>0) json_indent_line(indent,depth,out,len,cap);
         json_append(out,len,cap,"]",1); return;
     }
-    if (v->tag==XS_MAP||v->tag==XS_MODULE){
+    if (VAL_TAG(v)==XS_MAP||VAL_TAG(v)==XS_MODULE){
         json_append(out,len,cap,"{",1);
         int nk=0; char **ks=map_keys(v->map,&nk);
         for (int j=0;j<nk;j++){
@@ -3267,7 +3267,7 @@ static void json_stringify_val(Value *v, int indent, int depth, char **out, int 
 
 static Value *native_json_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     JsonParser p={a[0]->s,0};
     Value *v=json_parse_value(&p);
     return v?v:value_incref(XS_NULL_VAL);
@@ -3275,7 +3275,7 @@ static Value *native_json_parse(Interp *ig, Value **a, int n) {
 static Value *native_json_stringify(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("null");
-    int indent=(n>=2&&a[1]->tag==XS_INT)?(int)a[1]->i:0;
+    int indent=(n>=2&&VAL_TAG(a[1])==XS_INT)?(int)VAL_INT(a[1]):0;
     int cap=256,len2=0; char *out=xs_malloc(cap); out[0]='\0';
     json_stringify_val(a[0],indent,0,&out,&len2,&cap);
     Value *v=xs_str(out); free(out); return v;
@@ -3289,7 +3289,7 @@ static Value *native_json_pretty(Interp *ig, Value **a, int n) {
 }
 static Value *native_json_valid(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
     JsonParser p={a[0]->s,0};
     Value *v=json_parse_value(&p);
     if (v){value_decref(v);return value_incref(XS_TRUE_VAL);}
@@ -3297,7 +3297,7 @@ static Value *native_json_valid(Interp *ig, Value **a, int n) {
 }
 static Value *native_json_parse_safe(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     JsonParser p={a[0]->s,0};
     Value *v=json_parse_value(&p);
     return v?v:value_incref(XS_NULL_VAL);
@@ -3315,7 +3315,7 @@ Value *make_json_module(void) {
 /* io.read_json / io.write_json: defined here because they depend on json helpers */
 Value *native_io_read_json(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f=fopen(a[0]->s,"r");
     if (!f) return value_incref(XS_NULL_VAL);
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
@@ -3329,8 +3329,8 @@ Value *native_io_read_json(Interp *ig, Value **a, int n) {
 }
 Value *native_io_write_json(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
-    int indent=(n>=3&&a[2]->tag==XS_INT)?(int)a[2]->i:2;
+    if (n<2||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
+    int indent=(n>=3&&VAL_TAG(a[2])==XS_INT)?(int)VAL_INT(a[2]):2;
     char *out=xs_malloc(256); int len2=0,cap=256;
     json_stringify_val(a[1],indent,0,&out,&len2,&cap);
     out[len2]='\0';
@@ -3363,7 +3363,7 @@ static Value *native_log_fatal(Interp *ig, Value **a, int n) {
 }
 static Value *native_log_set_level(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n>0&&a[0]->tag==XS_INT) xs_log_level=(int)a[0]->i;
+    if (n>0&&VAL_TAG(a[0])==XS_INT) xs_log_level=(int)VAL_INT(a[0]);
     return value_incref(XS_NULL_VAL);
 }
 Value *make_log_module(void) {
@@ -3381,8 +3381,8 @@ Value *make_log_module(void) {
 static Value *native_fmt_number(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0");
-    double v=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    int dec=(n>=2&&a[1]->tag==XS_INT)?(int)a[1]->i:2;
+    double v=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    int dec=(n>=2&&VAL_TAG(a[1])==XS_INT)?(int)VAL_INT(a[1]):2;
     char fmt2[32]; snprintf(fmt2,sizeof(fmt2),"%%.%df",dec);
     char buf[128]; snprintf(buf,sizeof(buf),fmt2,v);
     return xs_str(buf);
@@ -3390,14 +3390,14 @@ static Value *native_fmt_number(Interp *ig, Value **a, int n) {
 static Value *native_fmt_hex(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0x0");
-    int64_t v=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
+    int64_t v=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     char buf[64]; snprintf(buf,sizeof(buf),"0x%llx",(long long)v);
     return xs_str(buf);
 }
 static Value *native_fmt_bin(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0b0");
-    int64_t v=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
+    int64_t v=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     if (v==0) return xs_str("0b0");
     /* buf: sign(1) + "0b"(2) + 64 bits + null = 68 */
     char buf[68]; int pos=66; buf[66]='\0';
@@ -3410,9 +3410,9 @@ static Value *native_fmt_bin(Interp *ig, Value **a, int n) {
 static Value *native_fmt_pad(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return n>0?(value_incref(a[0])):xs_str("");
-    const char *s=(a[0]->tag==XS_STR)?a[0]->s:"";
-    int width=(a[1]->tag==XS_INT)?(int)a[1]->i:0;
-    char fill=(n>=3&&a[2]->tag==XS_STR&&a[2]->s[0])?a[2]->s[0]:' ';
+    const char *s=(VAL_TAG(a[0])==XS_STR)?a[0]->s:"";
+    int width=(VAL_TAG(a[1])==XS_INT)?(int)VAL_INT(a[1]):0;
+    char fill=(n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0])?a[2]->s[0]:' ';
     int slen=(int)strlen(s);
     if (slen>=width) return xs_str(s);
     char *r=xs_malloc(width+1);
@@ -3425,8 +3425,8 @@ static Value *native_fmt_comma(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0");
     char buf[64];
-    if (a[0]->tag==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)a[0]->i);
-    else snprintf(buf,sizeof(buf),"%.0f",(a[0]->tag==XS_FLOAT)?a[0]->f:0.0);
+    if (VAL_TAG(a[0])==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)VAL_INT(a[0]));
+    else snprintf(buf,sizeof(buf),"%.0f",(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:0.0);
     /* Insert commas */
     int len2=(int)strlen(buf);
     int neg=(buf[0]=='-'); int start=neg?1:0;
@@ -3444,7 +3444,7 @@ static Value *native_fmt_comma(Interp *ig, Value **a, int n) {
 static Value *native_fmt_filesize(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0 B");
-    double v=(a[0]->tag==XS_INT)?(double)a[0]->i:a[0]->f;
+    double v=(VAL_TAG(a[0])==XS_INT)?(double)VAL_INT(a[0]):a[0]->f;
     const char *units[]={"B","KB","MB","GB","TB","PB"};
     int ui=0;
     while (v>=1024.0&&ui<5){v/=1024.0;ui++;}
@@ -3456,7 +3456,7 @@ static Value *native_fmt_filesize(Interp *ig, Value **a, int n) {
 static Value *native_fmt_ordinal(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return xs_str("0th");
-    int64_t v=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
+    int64_t v=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     const char *suf;
     int64_t abs_v=v<0?-v:v;
     if (abs_v%100>=11&&abs_v%100<=13) suf="th";
@@ -3472,9 +3472,9 @@ static Value *native_fmt_ordinal(Interp *ig, Value **a, int n) {
 static Value *native_fmt_pluralize(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2) return xs_str("");
-    int64_t cnt=(a[0]->tag==XS_INT)?a[0]->i:(int64_t)a[0]->f;
-    const char *word=(a[1]->tag==XS_STR)?a[1]->s:"";
-    const char *plural=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:NULL;
+    int64_t cnt=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    const char *word=(VAL_TAG(a[1])==XS_STR)?a[1]->s:"";
+    const char *plural=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:NULL;
     char buf[512];
     if (cnt==1) snprintf(buf,sizeof(buf),"%lld %s",(long long)cnt,word);
     else if (plural) snprintf(buf,sizeof(buf),"%lld %s",(long long)cnt,plural);
@@ -3483,7 +3483,7 @@ static Value *native_fmt_pluralize(Interp *ig, Value **a, int n) {
 }
 static Value *native_fmt_sprintf(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *fmt = a[0]->s;
     int flen = (int)strlen(fmt);
     /* estimate output size */
@@ -3521,9 +3521,9 @@ static Value *native_fmt_sprintf(Interp *ig, Value **a, int n) {
 static Value *native_fmt_pad_left(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return n > 0 ? value_incref(a[0]) : xs_str("");
-    const char *s = (a[0]->tag == XS_STR) ? a[0]->s : "";
-    int width = (a[1]->tag == XS_INT) ? (int)a[1]->i : 0;
-    char fill = (n >= 3 && a[2]->tag == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
+    const char *s = (VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "";
+    int width = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
+    char fill = (n >= 3 && VAL_TAG(a[2]) == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
     int slen = (int)strlen(s);
     if (slen >= width) return xs_str(s);
     char *r = xs_malloc(width + 1);
@@ -3536,9 +3536,9 @@ static Value *native_fmt_pad_left(Interp *ig, Value **a, int n) {
 static Value *native_fmt_pad_right(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return n > 0 ? value_incref(a[0]) : xs_str("");
-    const char *s = (a[0]->tag == XS_STR) ? a[0]->s : "";
-    int width = (a[1]->tag == XS_INT) ? (int)a[1]->i : 0;
-    char fill = (n >= 3 && a[2]->tag == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
+    const char *s = (VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "";
+    int width = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
+    char fill = (n >= 3 && VAL_TAG(a[2]) == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
     int slen = (int)strlen(s);
     if (slen >= width) return xs_str(s);
     char *r = xs_malloc(width + 1);
@@ -3551,9 +3551,9 @@ static Value *native_fmt_pad_right(Interp *ig, Value **a, int n) {
 static Value *native_fmt_center(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return n > 0 ? value_incref(a[0]) : xs_str("");
-    const char *s = (a[0]->tag == XS_STR) ? a[0]->s : "";
-    int width = (a[1]->tag == XS_INT) ? (int)a[1]->i : 0;
-    char fill = (n >= 3 && a[2]->tag == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
+    const char *s = (VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "";
+    int width = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
+    char fill = (n >= 3 && VAL_TAG(a[2]) == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
     int slen = (int)strlen(s);
     if (slen >= width) return xs_str(s);
     char *r = xs_malloc(width + 1);
@@ -3570,7 +3570,7 @@ static Value *native_fmt_center(Interp *ig, Value **a, int n) {
 static Value *native_fmt_oct(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return xs_str("0o0");
-    int64_t v = (a[0]->tag == XS_INT) ? a[0]->i : (int64_t)a[0]->f;
+    int64_t v = (VAL_TAG(a[0]) == XS_INT) ? VAL_INT(a[0]) : (int64_t)a[0]->f;
     char buf[64]; snprintf(buf, sizeof(buf), "0o%llo", (long long)v);
     return xs_str(buf);
 }
@@ -3600,7 +3600,7 @@ static int test_failed_count = 0;
 static Value *native_test_assert(Interp *ig, Value **a, int n) {
     (void)ig;
     int cond=(n>0&&value_truthy(a[0]));
-    const char *msg=(n>1&&a[1]->tag==XS_STR)?a[1]->s:"assertion failed";
+    const char *msg=(n>1&&VAL_TAG(a[1])==XS_STR)?a[1]->s:"assertion failed";
     if (cond) { test_passed_count++; }
     else { test_failed_count++; fprintf(stderr,"[FAIL] %s\n",msg); }
     return value_incref(XS_NULL_VAL);
@@ -3608,7 +3608,7 @@ static Value *native_test_assert(Interp *ig, Value **a, int n) {
 static Value *native_test_assert_eq(Interp *ig, Value **a, int n) {
     (void)ig;
     int eq=(n>=2&&value_equal(a[0],a[1]));
-    const char *msg=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:"assert_eq failed";
+    const char *msg=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"assert_eq failed";
     if (eq) { test_passed_count++; }
     else {
         test_failed_count++;
@@ -3621,7 +3621,7 @@ static Value *native_test_assert_eq(Interp *ig, Value **a, int n) {
 static Value *native_test_assert_ne(Interp *ig, Value **a, int n) {
     (void)ig;
     int ne=(n>=2&&!value_equal(a[0],a[1]));
-    const char *msg=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:"assert_ne failed";
+    const char *msg=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"assert_ne failed";
     if (ne) test_passed_count++;
     else {
         test_failed_count++;
@@ -3634,7 +3634,7 @@ static Value *native_test_assert_ne(Interp *ig, Value **a, int n) {
 static Value *native_test_assert_gt(Interp *ig, Value **a, int n) {
     (void)ig;
     int ok=(n>=2&&value_cmp(a[0],a[1])>0);
-    const char *msg=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:"assert_gt failed";
+    const char *msg=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"assert_gt failed";
     if (ok) test_passed_count++;
     else { test_failed_count++; fprintf(stderr,"[FAIL] %s\n",msg); }
     return value_incref(XS_NULL_VAL);
@@ -3642,7 +3642,7 @@ static Value *native_test_assert_gt(Interp *ig, Value **a, int n) {
 static Value *native_test_assert_lt(Interp *ig, Value **a, int n) {
     (void)ig;
     int ok=(n>=2&&value_cmp(a[0],a[1])<0);
-    const char *msg=(n>=3&&a[2]->tag==XS_STR)?a[2]->s:"assert_lt failed";
+    const char *msg=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"assert_lt failed";
     if (ok) test_passed_count++;
     else { test_failed_count++; fprintf(stderr,"[FAIL] %s\n",msg); }
     return value_incref(XS_NULL_VAL);
@@ -3650,10 +3650,10 @@ static Value *native_test_assert_lt(Interp *ig, Value **a, int n) {
 static Value *native_test_assert_close(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<3) return value_incref(XS_NULL_VAL);
-    double av=(a[0]->tag==XS_FLOAT)?a[0]->f:(double)a[0]->i;
-    double bv=(a[1]->tag==XS_FLOAT)?a[1]->f:(double)a[1]->i;
-    double eps=(a[2]->tag==XS_FLOAT)?a[2]->f:(double)a[2]->i;
-    const char *msg=(n>=4&&a[3]->tag==XS_STR)?a[3]->s:"assert_close failed";
+    double av=(VAL_TAG(a[0])==XS_FLOAT)?a[0]->f:(double)VAL_INT(a[0]);
+    double bv=(VAL_TAG(a[1])==XS_FLOAT)?a[1]->f:(double)VAL_INT(a[1]);
+    double eps=(VAL_TAG(a[2])==XS_FLOAT)?a[2]->f:(double)VAL_INT(a[2]);
+    const char *msg=(n>=4&&VAL_TAG(a[3])==XS_STR)?a[3]->s:"assert_close failed";
     double diff=av-bv; if(diff<0)diff=-diff;
     if (diff<=eps) test_passed_count++;
     else { test_failed_count++; fprintf(stderr,"[FAIL] %s: |%g - %g| = %g > %g\n",msg,av,bv,diff,eps); }
@@ -3661,9 +3661,9 @@ static Value *native_test_assert_close(Interp *ig, Value **a, int n) {
 }
 static Value *native_test_assert_throws(Interp *ig, Value **a, int n) {
     if (n<1) return value_incref(XS_NULL_VAL);
-    const char *msg=(n>=2&&a[1]->tag==XS_STR)?a[1]->s:"assert_throws failed";
+    const char *msg=(n>=2&&VAL_TAG(a[1])==XS_STR)?a[1]->s:"assert_throws failed";
     Value *fn=a[0];
-    if (fn->tag!=XS_FUNC&&fn->tag!=XS_NATIVE) {
+    if (VAL_TAG(fn)!=XS_FUNC&&VAL_TAG(fn)!=XS_NATIVE) {
         test_failed_count++;
         fprintf(stderr,"[FAIL] %s: not a callable\n",msg);
         return value_incref(XS_NULL_VAL);
@@ -3676,12 +3676,12 @@ static Value *native_test_assert_throws(Interp *ig, Value **a, int n) {
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_test_run(Interp *ig, Value **a, int n) {
-    if (n>=1&&(a[0]->tag==XS_MAP||a[0]->tag==XS_MODULE)) {
+    if (n>=1&&(VAL_TAG(a[0])==XS_MAP||VAL_TAG(a[0])==XS_MODULE)) {
         int nk=0; char **ks=map_keys(a[0]->map,&nk);
         int run_pass=0,run_fail=0;
         for (int j=0;j<nk;j++){
             Value *fn=map_get(a[0]->map,ks[j]);
-            if (fn&&(fn->tag==XS_FUNC||fn->tag==XS_NATIVE)) {
+            if (fn&&(VAL_TAG(fn)==XS_FUNC||VAL_TAG(fn)==XS_NATIVE)) {
                 fprintf(stderr,"[RUN] %s\n",ks[j]);
                 int before_fail=test_failed_count;
                 Value *res=call_value(ig,fn,NULL,0,ks[j]);
@@ -3696,9 +3696,9 @@ static Value *native_test_run(Interp *ig, Value **a, int n) {
         fprintf(stderr,"[SUMMARY] %d passed, %d failed\n",run_pass,run_fail);
         return xs_int(run_fail);
     }
-    const char *name=(n>0&&a[0]->tag==XS_STR)?a[0]->s:"test";
+    const char *name=(n>0&&VAL_TAG(a[0])==XS_STR)?a[0]->s:"test";
     fprintf(stderr,"[RUN] %s\n",name);
-    if (n>=2&&(a[1]->tag==XS_NATIVE||a[1]->tag==XS_FUNC)) {
+    if (n>=2&&(VAL_TAG(a[1])==XS_NATIVE||VAL_TAG(a[1])==XS_FUNC)) {
         Value *res=call_value(ig,a[1],NULL,0,name);
         if (ig->cf.signal) CF_CLEAR(ig);
         if (res) value_decref(res);
@@ -3752,9 +3752,9 @@ static Value *csv_parse_row(const char *s, int *pos2, char delim) {
 }
 static Value *native_csv_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     char delim=',';
-    if (n>=2&&a[1]->tag==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
+    if (n>=2&&VAL_TAG(a[1])==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
     const char *s=a[0]->s; int pos2=0; int slen=(int)strlen(s);
     Value *rows=xs_array_new();
     while (pos2<slen) {
@@ -3766,9 +3766,9 @@ static Value *native_csv_parse(Interp *ig, Value **a, int n) {
 }
 static Value *native_csv_parse_with_headers(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_array_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
     char delim=',';
-    if (n>=2&&a[1]->tag==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
+    if (n>=2&&VAL_TAG(a[1])==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
     const char *s=a[0]->s; int pos2=0; int slen=(int)strlen(s);
     if (pos2>=slen) return xs_array_new();
     /* First row = headers */
@@ -3794,9 +3794,9 @@ static Value *native_csv_parse_with_headers(Interp *ig, Value **a, int n) {
 }
 static Value *native_csv_stringify(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_ARRAY) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_ARRAY) return xs_str("");
     char delim=',';
-    if (n>=2&&a[1]->tag==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
+    if (n>=2&&VAL_TAG(a[1])==XS_STR&&a[1]->s[0]) delim=a[1]->s[0];
     int cap=256,len2=0; char *out=xs_malloc(cap); out[0]='\0';
     XSArray *rows=a[0]->arr;
     for (int r=0;r<rows->len;r++){
@@ -3804,7 +3804,7 @@ static Value *native_csv_stringify(Interp *ig, Value **a, int n) {
             if (len2+2>cap){cap*=2;out=xs_realloc(out,cap);}
             out[len2++]='\n'; out[len2]='\0';
         }
-        if (rows->items[r]->tag!=XS_ARRAY) continue;
+        if (VAL_TAG(rows->items[r])!=XS_ARRAY) continue;
         XSArray *row=rows->items[r]->arr;
         for (int c=0;c<row->len;c++){
             if (c){
@@ -3831,7 +3831,7 @@ static Value *native_csv_stringify(Interp *ig, Value **a, int n) {
 }
 static Value *native_csv_stringify_with_headers(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_ARRAY||a[1]->tag!=XS_ARRAY) return xs_str("");
+    if (n<2||VAL_TAG(a[0])!=XS_ARRAY||VAL_TAG(a[1])!=XS_ARRAY) return xs_str("");
     /* Build a new array with headers prepended */
     Value *all=xs_array_new();
     array_push(all->arr,value_incref(a[0]));
@@ -3859,7 +3859,7 @@ static int url_hex_val(char c) {
 }
 static Value *native_url_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     const char *s=a[0]->s; int cap=256; char *r=xs_malloc(cap); int ri=0;
     for (const unsigned char *p=(const unsigned char*)s;*p;p++){
         if (isalnum(*p)||*p=='-'||*p=='_'||*p=='.'||*p=='~'){
@@ -3874,7 +3874,7 @@ static Value *native_url_encode(Interp *ig, Value **a, int n) {
 }
 static Value *native_url_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_str("");
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
     const char *s=a[0]->s; int slen=(int)strlen(s);
     char *r=xs_malloc(slen+1); int ri=0;
     for (int j=0;j<slen;) {
@@ -3888,14 +3888,14 @@ static Value *native_url_decode(Interp *ig, Value **a, int n) {
     r[ri]='\0'; Value *v=xs_str(r); free(r); return v;
 }
 static Value *native_url_encode_query(Interp *ig, Value **a, int n) {
-    if (n<1||(a[0]->tag!=XS_MAP&&a[0]->tag!=XS_MODULE)) return xs_str("");
+    if (n<1||(VAL_TAG(a[0])!=XS_MAP&&VAL_TAG(a[0])!=XS_MODULE)) return xs_str("");
     int nk=0; char **ks=map_keys(a[0]->map,&nk);
     int cap=256; char *out=xs_malloc(cap); int oi=0; out[0]='\0';
     for (int j=0;j<nk;j++){
         Value *kv=xs_str(ks[j]); Value *args2[1]={kv};
         Value *ek=native_url_encode(ig,args2,1); value_decref(kv);
         Value *vv=map_get(a[0]->map,ks[j]);
-        Value *vs=(vv&&vv->tag==XS_STR)?value_incref(vv):xs_str("");
+        Value *vs=(vv&&VAL_TAG(vv)==XS_STR)?value_incref(vv):xs_str("");
         Value *args3[1]={vs};
         Value *ev=native_url_encode(ig,args3,1); value_decref(vs);
         int ekl=(int)strlen(ek->s),evl=(int)strlen(ev->s);
@@ -3911,7 +3911,7 @@ static Value *native_url_encode_query(Interp *ig, Value **a, int n) {
 }
 static Value *native_url_parse_query(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_map_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_map_new();
     Value *m=xs_map_new();
     const char *s=a[0]->s;
     while (*s) {
@@ -3933,7 +3933,7 @@ static Value *native_url_parse_query(Interp *ig, Value **a, int n) {
 }
 static Value *native_url_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_map_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_map_new();
     Value *m=xs_map_new();
     const char *url=a[0]->s;
     /* scheme */
@@ -4010,7 +4010,7 @@ static char *re_to_posix(const char *pat) {
 
 static Value *native_re_test(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return value_incref(XS_FALSE_VAL);
@@ -4019,7 +4019,7 @@ static Value *native_re_test(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_match(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_NULL_VAL);
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return value_incref(XS_NULL_VAL);
@@ -4032,7 +4032,7 @@ static Value *native_re_match(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_find_all(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return xs_array_new();
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return xs_array_new();
@@ -4048,7 +4048,7 @@ static Value *native_re_find_all(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_replace(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<3||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR||a[2]->tag!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
+    if (n<3||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR||VAL_TAG(a[2])!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return value_incref(a[1]);
@@ -4065,7 +4065,7 @@ static Value *native_re_replace(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_replace_all(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<3||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR||a[2]->tag!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
+    if (n<3||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR||VAL_TAG(a[2])!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return value_incref(a[1]);
@@ -4089,7 +4089,7 @@ static Value *native_re_replace_all(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_split(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return xs_array_new();
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return xs_array_new();
@@ -4106,7 +4106,7 @@ static Value *native_re_split(Interp *ig, Value **a, int n) {
 }
 static Value *native_re_groups(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return xs_array_new();
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
     regex_t re; if (regcomp(&re,a[0]->s,REG_EXTENDED)!=0) return xs_array_new();
     int ng=(int)re.re_nsub+1; if(ng<1)ng=1;
     regmatch_t *m=xs_malloc(ng*sizeof(regmatch_t));
@@ -4156,7 +4156,7 @@ static Value *builtin_derived(Interp *i, Value **args, int argc) {
     sig->subscribers = NULL;
     sig->nsubs = 0;
     sig->subcap = 0;
-    sig->compute = (argc > 0 && (args[0]->tag == XS_FUNC || args[0]->tag == XS_NATIVE))
+    sig->compute = (argc > 0 && (VAL_TAG(args[0]) == XS_FUNC || VAL_TAG(args[0]) == XS_NATIVE))
                    ? value_incref(args[0]) : NULL;
     sig->notifying = 0;
     sig->refcount = 1;
@@ -4198,7 +4198,7 @@ static Value *builtin_channel(Interp *i, Value **args, int argc) {
 /* contains */
 static Value *builtin_contains(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 2 || args[0]->tag != XS_STR || args[1]->tag != XS_STR)
+    if (argc < 2 || VAL_TAG(args[0]) != XS_STR || VAL_TAG(args[1]) != XS_STR)
         return value_incref(XS_FALSE_VAL);
     if (strstr(args[0]->s, args[1]->s))
         return value_incref(XS_TRUE_VAL);
@@ -4521,7 +4521,7 @@ static Value *native_async_spawn(Interp *ig, Value **a, int n) {
     /* Cooperative/synchronous semantics: call the function eagerly and
        wrap the result in a task map with _result / _status fields. */
     XSMap *task = map_new();
-    if (n < 1 || (a[0]->tag != XS_NATIVE && a[0]->tag != XS_FUNC)) {
+    if (n < 1 || (VAL_TAG(a[0]) != XS_NATIVE && VAL_TAG(a[0]) != XS_FUNC)) {
         map_set(task, "_status", xs_str("rejected"));
         map_set(task, "_error",  xs_str("spawn requires a callable"));
         return xs_module(task);
@@ -4537,8 +4537,8 @@ static Value *native_async_sleep(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return value_incref(XS_NULL_VAL);
     double secs = 0.0;
-    if (a[0]->tag == XS_FLOAT) secs = a[0]->f;
-    else if (a[0]->tag == XS_INT) secs = (double)a[0]->i;
+    if (VAL_TAG(a[0]) == XS_FLOAT) secs = a[0]->f;
+    else if (VAL_TAG(a[0]) == XS_INT) secs = (double)VAL_INT(a[0]);
 #if defined(__wasi__)
     (void)secs; /* no sleep in WASI */
 #elif !defined(__MINGW32__)
@@ -4621,14 +4621,14 @@ static Value *native_async_select(Interp *ig, Value **a, int n) {
        A channel is ready when its "_buf" array is non-empty.
        A task/promise is ready when it has a "_result" key.
        If nothing is ready, return null. */
-    if (n < 1 || a[0]->tag != XS_ARRAY) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_ARRAY) return value_incref(XS_NULL_VAL);
     XSArray *arr = a[0]->arr;
     for (int i = 0; i < arr->len; i++) {
         Value *item = arr->items[i];
-        if ((item->tag == XS_MAP || item->tag == XS_MODULE) && item->map) {
+        if ((VAL_TAG(item) == XS_MAP || VAL_TAG(item) == XS_MODULE) && item->map) {
             /* Check for channel readiness: "_buf" array with len > 0 */
             Value *buf = map_get(item->map, "_buf");
-            if (buf && buf->tag == XS_ARRAY && buf->arr->len > 0) {
+            if (buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len > 0) {
                 /* Consume the first buffered value */
                 Value *val = value_incref(buf->arr->items[0]);
                 /* Shift the buffer: remove first element */
@@ -4660,12 +4660,12 @@ static Value *native_async_all(Interp *ig, Value **a, int n) {
     (void)ig;
     /* Collect _result from each task map into a results array.
        If the argument is not an array of task maps, return it as-is. */
-    if (n < 1 || a[0]->tag != XS_ARRAY) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_ARRAY) return xs_array_new();
     XSArray *tasks = a[0]->arr;
     Value *results = xs_array_new();
     for (int i = 0; i < tasks->len; i++) {
         Value *t = tasks->items[i];
-        if ((t->tag == XS_MAP || t->tag == XS_MODULE) && t->map) {
+        if ((VAL_TAG(t) == XS_MAP || VAL_TAG(t) == XS_MODULE) && t->map) {
             Value *r = map_get(t->map, "_result");
             if (r) {
                 array_push(results->arr, r);
@@ -4685,10 +4685,10 @@ static Value *native_async_race(Interp *ig, Value **a, int n) {
     /* Return the _result of the first task in the array.
        Since we use cooperative semantics, all tasks are already resolved,
        so "first" is simply the first element. */
-    if (n < 1 || a[0]->tag != XS_ARRAY || a[0]->arr->len == 0)
+    if (n < 1 || VAL_TAG(a[0]) != XS_ARRAY || a[0]->arr->len == 0)
         return value_incref(XS_NULL_VAL);
     Value *first = a[0]->arr->items[0];
-    if ((first->tag == XS_MAP || first->tag == XS_MODULE) && first->map) {
+    if ((VAL_TAG(first) == XS_MAP || VAL_TAG(first) == XS_MODULE) && first->map) {
         Value *r = map_get(first->map, "_result");
         if (r) return value_incref(r);
     }
@@ -4746,9 +4746,9 @@ Value *make_async_module(void) {
 static Value *native_net_tcp_connect(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     const char *host = a[0]->s;
-    int port = (a[1]->tag == XS_INT) ? (int)a[1]->i : 0;
+    int port = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
 
     struct addrinfo hints, *res;
     memset(&hints, 0, sizeof hints);
@@ -4779,7 +4779,7 @@ static Value *native_net_tcp_listen(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
     if (n < 1) return value_incref(XS_NULL_VAL);
-    int port = (a[0]->tag == XS_INT) ? (int)a[0]->i : 0;
+    int port = (VAL_TAG(a[0]) == XS_INT) ? (int)VAL_INT(a[0]) : 0;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return value_incref(XS_NULL_VAL);
@@ -4810,7 +4810,7 @@ static Value *native_net_tcp_listen(Interp *ig, Value **a, int n) {
 static Value *native_net_resolve(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     struct addrinfo hints, *res, *p;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -4840,7 +4840,7 @@ static Value *native_net_resolve(Interp *ig, Value **a, int n) {
 
 static Value *native_net_url_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_map_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_map_new();
     Value *m = xs_map_new();
     const char *url = a[0]->s;
 
@@ -5171,7 +5171,7 @@ static Value *http_do_request(const char *method, const char *url,
             if (extra_headers->keys[i] && extra_headers->vals[i]) {
                 const char *k = extra_headers->keys[i];
                 Value *v = extra_headers->vals[i];
-                if (v->tag == XS_STR) {
+                if (VAL_TAG(v) == XS_STR) {
                     httpbuf_append(&req, k, strlen(k));
                     httpbuf_append(&req, ": ", 2);
                     httpbuf_append(&req, v->s, strlen(v->s));
@@ -5240,7 +5240,7 @@ static Value *http_do_request(const char *method, const char *url,
 static Value *native_net_http_get(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     return http_do_request("GET", a[0]->s, NULL, NULL, 0);
 #else
     (void)a; (void)n;
@@ -5252,7 +5252,7 @@ static Value *native_net_http_get(Interp *ig, Value **a, int n) {
 static Value *native_net_http_post(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 3 || a[0]->tag != XS_STR || a[1]->tag != XS_STR || a[2]->tag != XS_STR)
+    if (n < 3 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR || VAL_TAG(a[2]) != XS_STR)
         return value_incref(XS_NULL_VAL);
 
     /* build a temporary headers map with Content-Type */
@@ -5274,14 +5274,14 @@ static Value *native_net_http_post(Interp *ig, Value **a, int n) {
 static Value *native_net_http(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR)
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
         return value_incref(XS_NULL_VAL);
 
     XSMap *hdrs = NULL;
-    if (n >= 3 && a[2]->tag == XS_MAP) hdrs = a[2]->map;
+    if (n >= 3 && VAL_TAG(a[2]) == XS_MAP) hdrs = a[2]->map;
     const char *body = NULL;
     size_t body_len = 0;
-    if (n >= 4 && a[3]->tag == XS_STR) {
+    if (n >= 4 && VAL_TAG(a[3]) == XS_STR) {
         body = a[3]->s;
         body_len = strlen(a[3]->s);
     }
@@ -5297,8 +5297,8 @@ static Value *native_net_http(Interp *ig, Value **a, int n) {
 static Value *native_net_udp_bind(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    int port = (int)a[0]->i;
+    if (n < 1 || VAL_TAG(a[0]) != XS_INT) return value_incref(XS_NULL_VAL);
+    int port = (int)VAL_INT(a[0]);
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return value_incref(XS_NULL_VAL);
     struct sockaddr_in addr;
@@ -5323,16 +5323,16 @@ static Value *native_net_udp_send(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
     if (n < 4) return value_incref(XS_FALSE_VAL);
-    if ((a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE) || a[1]->tag != XS_STR
-        || a[2]->tag != XS_INT || a[3]->tag != XS_STR)
+    if ((VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE) || VAL_TAG(a[1]) != XS_STR
+        || VAL_TAG(a[2]) != XS_INT || VAL_TAG(a[3]) != XS_STR)
         return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    int fd = (int)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
+    int fd = (int)VAL_INT(fdv);
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family = AF_INET;
-    dest.sin_port = htons((uint16_t)a[2]->i);
+    dest.sin_port = htons((uint16_t)VAL_INT(a[2]));
     inet_pton(AF_INET, a[1]->s, &dest.sin_addr);
     ssize_t sent = sendto(fd, a[3]->s, strlen(a[3]->s), 0,
                           (struct sockaddr*)&dest, sizeof(dest));
@@ -5347,13 +5347,13 @@ static Value *native_net_udp_send(Interp *ig, Value **a, int n) {
 static Value *native_net_udp_recv(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    int fd = (int)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    int fd = (int)VAL_INT(fdv);
     int maxsz = 65536;
-    if (n >= 2 && a[1]->tag == XS_INT) maxsz = (int)a[1]->i;
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) maxsz = (int)VAL_INT(a[1]);
     char *buf = xs_malloc(maxsz + 1);
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
@@ -5378,12 +5378,12 @@ static Value *native_net_udp_recv(Interp *ig, Value **a, int n) {
 static Value *native_net_set_timeout(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE) || a[1]->tag != XS_INT)
+    if (n < 2 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE) || VAL_TAG(a[1]) != XS_INT)
         return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    int fd = (int)fdv->i;
-    int ms = (int)a[1]->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
+    int fd = (int)VAL_INT(fdv);
+    int ms = (int)VAL_INT(a[1]);
     struct timeval tv;
     tv.tv_sec = ms / 1000;
     tv.tv_usec = (ms % 1000) * 1000;
@@ -5400,11 +5400,11 @@ static Value *native_net_set_timeout(Interp *ig, Value **a, int n) {
 static Value *native_net_set_nodelay(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 2 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    int fd = (int)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
+    int fd = (int)VAL_INT(fdv);
     int flag = value_truthy(a[1]) ? 1 : 0;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     return value_incref(XS_TRUE_VAL);
@@ -5418,11 +5418,11 @@ static Value *native_net_set_nodelay(Interp *ig, Value **a, int n) {
 static Value *native_net_close(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    close((int)fdv->i);
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
+    close((int)VAL_INT(fdv));
     map_set(a[0]->map, "fd", xs_int(-1));
     return value_incref(XS_TRUE_VAL);
 #else
@@ -5435,11 +5435,11 @@ static Value *native_net_close(Interp *ig, Value **a, int n) {
 static Value *native_net_send(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE) || a[1]->tag != XS_STR)
+    if (n < 2 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE) || VAL_TAG(a[1]) != XS_STR)
         return xs_int(-1);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return xs_int(-1);
-    ssize_t w = write((int)fdv->i, a[1]->s, strlen(a[1]->s));
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return xs_int(-1);
+    ssize_t w = write((int)VAL_INT(fdv), a[1]->s, strlen(a[1]->s));
     return xs_int((int64_t)w);
 #else
     (void)a; (void)n;
@@ -5450,14 +5450,14 @@ static Value *native_net_send(Interp *ig, Value **a, int n) {
 static Value *native_net_recv(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
     int maxsz = 4096;
-    if (n >= 2 && a[1]->tag == XS_INT) maxsz = (int)a[1]->i;
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) maxsz = (int)VAL_INT(a[1]);
     char *buf = xs_malloc(maxsz + 1);
-    ssize_t nr = read((int)fdv->i, buf, maxsz);
+    ssize_t nr = read((int)VAL_INT(fdv), buf, maxsz);
     if (nr <= 0) { free(buf); return value_incref(XS_NULL_VAL); }
     buf[nr] = '\0';
     Value *v = xs_str_n(buf, nr); free(buf); return v;
@@ -5618,7 +5618,7 @@ static void md5_hash(const uint8_t *data, size_t len, uint8_t out[16]) {
 
 static Value *native_crypto_sha256(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     uint8_t hash[32];
     sha256_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char hex[65];
@@ -5629,7 +5629,7 @@ static Value *native_crypto_sha256(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_md5(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     uint8_t hash[16];
     md5_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char hex[33];
@@ -5640,8 +5640,8 @@ static Value *native_crypto_md5(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_random_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_INT) return xs_str("");
-    int count = (int)a[0]->i;
+    if (n < 1 || VAL_TAG(a[0]) != XS_INT) return xs_str("");
+    int count = (int)VAL_INT(a[0]);
     if (count <= 0 || count > 65536) return xs_str("");
     uint8_t *buf = xs_malloc((size_t)count);
 #if defined(__wasi__)
@@ -5680,8 +5680,8 @@ static Value *native_crypto_random_bytes(Interp *ig, Value **a, int n) {
 static Value *native_crypto_random_int(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return xs_int(0);
-    int64_t lo = (a[0]->tag == XS_INT) ? a[0]->i : 0;
-    int64_t hi = (a[1]->tag == XS_INT) ? a[1]->i : 0;
+    int64_t lo = (VAL_TAG(a[0]) == XS_INT) ? VAL_INT(a[0]) : 0;
+    int64_t hi = (VAL_TAG(a[1]) == XS_INT) ? VAL_INT(a[1]) : 0;
     if (hi <= lo) return xs_int(lo);
     uint64_t r;
 #if defined(__wasi__)
@@ -5748,7 +5748,7 @@ static Value *native_crypto_uuid4(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_hash(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_int(0);
     /* djb2 hash */
     const char *s = a[0]->s;
     uint64_t h = 5381;
@@ -5758,7 +5758,7 @@ static Value *native_crypto_hash(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_hex_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *s = a[0]->s;
     int slen = (int)strlen(s);
     char *hex = xs_malloc(slen * 2 + 1);
@@ -5769,7 +5769,7 @@ static Value *native_crypto_hex_encode(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_hex_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *s = a[0]->s;
     int slen = (int)strlen(s);
     if (slen % 2 != 0) return xs_str("");
@@ -5786,7 +5786,7 @@ static Value *native_crypto_hex_decode(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_base64_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const unsigned char *s = (const unsigned char*)a[0]->s;
     int slen = (int)strlen(a[0]->s);
     int rlen = ((slen + 2) / 3) * 4;
@@ -5802,7 +5802,7 @@ static Value *native_crypto_base64_encode(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_base64_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *s = a[0]->s; int slen = (int)strlen(s);
     static const signed char inv[256] = {
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
@@ -5830,7 +5830,7 @@ static Value *native_crypto_base64_decode(Interp *ig, Value **a, int n) {
 /* crypto.sha1(data) -> hex string using BearSSL */
 static Value *native_crypto_sha1(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     br_sha1_context ctx;
     br_sha1_init(&ctx);
     br_sha1_update(&ctx, a[0]->s, strlen(a[0]->s));
@@ -5845,7 +5845,7 @@ static Value *native_crypto_sha1(Interp *ig, Value **a, int n) {
 /* crypto.hmac_sha256(key, data) -> hex string using BearSSL */
 static Value *native_crypto_hmac_sha256(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return xs_str("");
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return xs_str("");
     br_hmac_key_context kc;
     br_hmac_key_init(&kc, &br_sha256_vtable, a[0]->s, strlen(a[0]->s));
     br_hmac_context hctx;
@@ -5862,12 +5862,12 @@ static Value *native_crypto_hmac_sha256(Interp *ig, Value **a, int n) {
 /* crypto.hkdf(ikm, salt, info, length) -> hex string using BearSSL */
 static Value *native_crypto_hkdf(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 4 || a[0]->tag != XS_STR || a[3]->tag != XS_INT) return xs_str("");
-    int out_len = (int)a[3]->i;
+    if (n < 4 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[3]) != XS_INT) return xs_str("");
+    int out_len = (int)VAL_INT(a[3]);
     if (out_len <= 0 || out_len > 255 * 32) return xs_str("");
     const void *salt = BR_HKDF_NO_SALT;
     size_t salt_len = 0;
-    if (a[1]->tag == XS_STR && strlen(a[1]->s) > 0) {
+    if (VAL_TAG(a[1]) == XS_STR && strlen(a[1]->s) > 0) {
         salt = a[1]->s; salt_len = strlen(a[1]->s);
     }
     br_hkdf_context hc;
@@ -5876,7 +5876,7 @@ static Value *native_crypto_hkdf(Interp *ig, Value **a, int n) {
     br_hkdf_flip(&hc);
     const void *info = "";
     size_t info_len = 0;
-    if (n >= 3 && a[2]->tag == XS_STR) { info = a[2]->s; info_len = strlen(a[2]->s); }
+    if (n >= 3 && VAL_TAG(a[2]) == XS_STR) { info = a[2]->s; info_len = strlen(a[2]->s); }
     uint8_t *out = xs_malloc(out_len);
     br_hkdf_produce(&hc, info, info_len, out, out_len);
     char *hex = xs_malloc(out_len * 2 + 1);
@@ -5890,14 +5890,14 @@ static Value *native_crypto_hkdf(Interp *ig, Value **a, int n) {
    PBKDF2-HMAC-SHA256, hand-rolled using BearSSL HMAC primitives */
 static Value *native_crypto_pbkdf2(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 4 || a[0]->tag != XS_STR || a[1]->tag != XS_STR
-        || a[2]->tag != XS_INT || a[3]->tag != XS_INT) return xs_str("");
+    if (n < 4 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR
+        || VAL_TAG(a[2]) != XS_INT || VAL_TAG(a[3]) != XS_INT) return xs_str("");
     const char *pw = a[0]->s;
     size_t pw_len = strlen(pw);
     const char *salt = a[1]->s;
     size_t salt_len = strlen(salt);
-    int iters = (int)a[2]->i;
-    int dklen = (int)a[3]->i;
+    int iters = (int)VAL_INT(a[2]);
+    int dklen = (int)VAL_INT(a[3]);
     if (iters <= 0 || dklen <= 0 || dklen > 1024) return xs_str("");
 
     br_hmac_key_context kc;
@@ -5958,8 +5958,8 @@ static int hex_decode_bytes(const char *hex, uint8_t *out, int max) {
 
 static Value *native_crypto_aes_encrypt(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return xs_str("");
-    const char *mode_str = (n >= 3 && a[2]->tag == XS_STR) ? a[2]->s : "gcm";
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return xs_str("");
+    const char *mode_str = (n >= 3 && VAL_TAG(a[2]) == XS_STR) ? a[2]->s : "gcm";
 
     uint8_t key[32];
     int klen = hex_decode_bytes(a[0]->s, key, 32);
@@ -6049,8 +6049,8 @@ static Value *native_crypto_aes_encrypt(Interp *ig, Value **a, int n) {
 
 static Value *native_crypto_aes_decrypt(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return xs_str("");
-    const char *mode_str = (n >= 3 && a[2]->tag == XS_STR) ? a[2]->s : "gcm";
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return xs_str("");
+    const char *mode_str = (n >= 3 && VAL_TAG(a[2]) == XS_STR) ? a[2]->s : "gcm";
 
     uint8_t key[32];
     int klen = hex_decode_bytes(a[0]->s, key, 32);
@@ -6116,7 +6116,7 @@ static Value *native_crypto_aes_decrypt(Interp *ig, Value **a, int n) {
 /* crypto.constant_time_eq(a, b) -> bool */
 static Value *native_crypto_constant_time_eq(Interp *ig, Value **a2, int n) {
     (void)ig;
-    if (n < 2 || a2[0]->tag != XS_STR || a2[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a2[0]) != XS_STR || VAL_TAG(a2[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     size_t la = strlen(a2[0]->s), lb = strlen(a2[1]->s);
     if (la != lb) return value_incref(XS_FALSE_VAL);
     volatile uint8_t diff = 0;
@@ -6172,7 +6172,7 @@ static void *thread_entry(void *arg) {
 static Value *native_thread_join(Interp *ig, Value **a, int n);
 
 static Value *native_thread_spawn(Interp *ig, Value **a, int n) {
-    if (n < 1 || (a[0]->tag != XS_FUNC && a[0]->tag != XS_NATIVE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_FUNC && VAL_TAG(a[0]) != XS_NATIVE))
         return xs_str("error: thread.spawn requires a callable");
 
     ThreadArg *ta = xs_malloc(sizeof(ThreadArg));
@@ -6196,15 +6196,15 @@ static Value *native_thread_spawn(Interp *ig, Value **a, int n) {
 
 static Value *native_thread_join(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return xs_str("error: thread.join requires a thread handle");
     Value *tid_v  = map_get(a[0]->map, "_tid");
     Value *targ_v = map_get(a[0]->map, "_targ");
-    if (!tid_v || tid_v->tag != XS_INT || !targ_v || targ_v->tag != XS_INT)
+    if (!tid_v || VAL_TAG(tid_v) != XS_INT || !targ_v || VAL_TAG(targ_v) != XS_INT)
         return xs_str("error: invalid thread handle");
 
-    xs_thread_t tid = (xs_thread_t)(uintptr_t)tid_v->i;
-    ThreadArg *ta = (ThreadArg *)(uintptr_t)targ_v->i;
+    xs_thread_t tid = (xs_thread_t)(uintptr_t)VAL_INT(tid_v);
+    ThreadArg *ta = (ThreadArg *)(uintptr_t)VAL_INT(targ_v);
 
     int err = xs_thread_join(tid, NULL);
     if (err != 0)
@@ -6238,8 +6238,8 @@ static Value *native_thread_sleep(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return value_incref(XS_NULL_VAL);
     double secs = 0.0;
-    if (a[0]->tag == XS_FLOAT) secs = a[0]->f;
-    else if (a[0]->tag == XS_INT) secs = (double)a[0]->i;
+    if (VAL_TAG(a[0]) == XS_FLOAT) secs = a[0]->f;
+    else if (VAL_TAG(a[0]) == XS_INT) secs = (double)VAL_INT(a[0]);
     xs_thread_sleep_ns(secs);
     return value_incref(XS_NULL_VAL);
 }
@@ -6248,14 +6248,14 @@ static Value *native_thread_sleep(Interp *ig, Value **a, int n) {
 
 static xs_mutex_t *mutex_from_map(XSMap *m) {
     Value *pv = map_get(m, "_ptr");
-    if (!pv || pv->tag != XS_INT) return NULL;
-    return (xs_mutex_t *)(uintptr_t)pv->i;
+    if (!pv || VAL_TAG(pv) != XS_INT) return NULL;
+    return (xs_mutex_t *)(uintptr_t)VAL_INT(pv);
 }
 
 static Value *native_mutex_lock_fn(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
     /* 'self' is passed as the first argument by the method-call dispatch */
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_FALSE_VAL);
     xs_mutex_t *mtx = mutex_from_map(a[0]->map);
     if (!mtx) return value_incref(XS_FALSE_VAL);
@@ -6266,7 +6266,7 @@ static Value *native_mutex_lock_fn(Interp *ig, Value **a, int n) {
 
 static Value *native_mutex_unlock_fn(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_FALSE_VAL);
     xs_mutex_t *mtx = mutex_from_map(a[0]->map);
     if (!mtx) return value_incref(XS_FALSE_VAL);
@@ -6277,7 +6277,7 @@ static Value *native_mutex_unlock_fn(Interp *ig, Value **a, int n) {
 
 static Value *native_mutex_try_lock_fn(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_FALSE_VAL);
     xs_mutex_t *mtx = mutex_from_map(a[0]->map);
     if (!mtx) return value_incref(XS_FALSE_VAL);
@@ -6291,7 +6291,7 @@ static Value *native_mutex_try_lock_fn(Interp *ig, Value **a, int n) {
 
 static Value *native_mutex_destroy_fn(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return value_incref(XS_NULL_VAL);
     xs_mutex_t *mtx = mutex_from_map(a[0]->map);
     if (mtx) {
@@ -6360,13 +6360,13 @@ static void buf_ensure(XSBuf *b, int need) {
 /* We store the XSBuf pointer as an int (cast). A bit hacky but simple. */
 static XSBuf *buf_from_map(XSMap *m) {
     Value *pv = map_get(m, "_ptr");
-    if (!pv || pv->tag != XS_INT) return NULL;
-    return (XSBuf*)(uintptr_t)pv->i;
+    if (!pv || VAL_TAG(pv) != XS_INT) return NULL;
+    return (XSBuf*)(uintptr_t)VAL_INT(pv);
 }
 
 static Value *native_buf_new(Interp *ig, Value **a, int n) {
     (void)ig;
-    int cap = (n > 0 && a[0]->tag == XS_INT) ? (int)a[0]->i : 64;
+    int cap = (n > 0 && VAL_TAG(a[0]) == XS_INT) ? (int)VAL_INT(a[0]) : 64;
     XSBuf *b = buf_create(cap);
     XSMap *m = map_new();
     map_set(m, "_ptr", xs_int((int64_t)(uintptr_t)b));
@@ -6375,10 +6375,10 @@ static Value *native_buf_new(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_write_u8(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_MAP) return value_incref(XS_NULL_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP) return value_incref(XS_NULL_VAL);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return value_incref(XS_NULL_VAL);
-    uint8_t val = (a[1]->tag == XS_INT) ? (uint8_t)a[1]->i : 0;
+    uint8_t val = (VAL_TAG(a[1]) == XS_INT) ? (uint8_t)VAL_INT(a[1]) : 0;
     buf_ensure(b, 1);
     b->data[b->len++] = val;
     return value_incref(XS_NULL_VAL);
@@ -6386,10 +6386,10 @@ static Value *native_buf_write_u8(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_write_u16(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_MAP) return value_incref(XS_NULL_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP) return value_incref(XS_NULL_VAL);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return value_incref(XS_NULL_VAL);
-    uint16_t val = (a[1]->tag == XS_INT) ? (uint16_t)a[1]->i : 0;
+    uint16_t val = (VAL_TAG(a[1]) == XS_INT) ? (uint16_t)VAL_INT(a[1]) : 0;
     buf_ensure(b, 2);
     b->data[b->len++] = (uint8_t)(val & 0xff);
     b->data[b->len++] = (uint8_t)((val >> 8) & 0xff);
@@ -6398,10 +6398,10 @@ static Value *native_buf_write_u16(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_write_u32(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_MAP) return value_incref(XS_NULL_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP) return value_incref(XS_NULL_VAL);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return value_incref(XS_NULL_VAL);
-    uint32_t val = (a[1]->tag == XS_INT) ? (uint32_t)a[1]->i : 0;
+    uint32_t val = (VAL_TAG(a[1]) == XS_INT) ? (uint32_t)VAL_INT(a[1]) : 0;
     buf_ensure(b, 4);
     for (int i=0;i<4;i++) b->data[b->len++] = (uint8_t)((val >> (i*8)) & 0xff);
     return value_incref(XS_NULL_VAL);
@@ -6409,10 +6409,10 @@ static Value *native_buf_write_u32(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_write_u64(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_MAP) return value_incref(XS_NULL_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP) return value_incref(XS_NULL_VAL);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return value_incref(XS_NULL_VAL);
-    uint64_t val = (a[1]->tag == XS_INT) ? (uint64_t)a[1]->i : 0;
+    uint64_t val = (VAL_TAG(a[1]) == XS_INT) ? (uint64_t)VAL_INT(a[1]) : 0;
     buf_ensure(b, 8);
     for (int i=0;i<8;i++) b->data[b->len++] = (uint8_t)((val >> (i*8)) & 0xff);
     return value_incref(XS_NULL_VAL);
@@ -6420,7 +6420,7 @@ static Value *native_buf_write_u64(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_read_u8(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_int(0);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b || b->pos >= b->len) return xs_int(0);
     return xs_int(b->data[b->pos++]);
@@ -6428,7 +6428,7 @@ static Value *native_buf_read_u8(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_read_u16(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_int(0);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b || b->pos + 2 > b->len) return xs_int(0);
     uint16_t v = (uint16_t)b->data[b->pos] | ((uint16_t)b->data[b->pos+1] << 8);
@@ -6438,7 +6438,7 @@ static Value *native_buf_read_u16(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_read_u32(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_int(0);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b || b->pos + 4 > b->len) return xs_int(0);
     uint32_t v = 0;
@@ -6448,7 +6448,7 @@ static Value *native_buf_read_u32(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_read_u64(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_int(0);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b || b->pos + 8 > b->len) return xs_int(0);
     uint64_t v = 0;
@@ -6458,7 +6458,7 @@ static Value *native_buf_read_u64(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_write_str(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_MAP || a[1]->tag != XS_STR)
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP || VAL_TAG(a[1]) != XS_STR)
         return value_incref(XS_NULL_VAL);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return value_incref(XS_NULL_VAL);
@@ -6471,7 +6471,7 @@ static Value *native_buf_write_str(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_to_str(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_str("");
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return xs_str("");
     return xs_str_n((const char*)b->data, (size_t)b->len);
@@ -6479,7 +6479,7 @@ static Value *native_buf_to_str(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_to_hex(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_str("");
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b || b->len == 0) return xs_str("");
     char *hex = xs_malloc((size_t)b->len * 2 + 1);
@@ -6492,7 +6492,7 @@ static Value *native_buf_to_hex(Interp *ig, Value **a, int n) {
 
 static Value *native_buf_len(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_MAP) return xs_int(0);
+    if (n < 1 || VAL_TAG(a[0]) != XS_MAP) return xs_int(0);
     XSBuf *b = buf_from_map(a[0]->map);
     if (!b) return xs_int(0);
     return xs_int(b->len);
@@ -6522,7 +6522,7 @@ Value *make_buf_module(void) {
 
 static Value *native_encode_base64_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const uint8_t *in = (const uint8_t*)a[0]->s;
     size_t len = strlen(a[0]->s);
     size_t out_len = 4 * ((len + 2) / 3);
@@ -6554,7 +6554,7 @@ static int b64_decode_char(char c) {
 
 static Value *native_encode_base64_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *in = a[0]->s;
     size_t len = strlen(in);
     if (len % 4 != 0) return xs_str("");
@@ -6582,7 +6582,7 @@ static Value *native_encode_base64_decode(Interp *ig, Value **a, int n) {
 
 static Value *native_encode_hex_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const uint8_t *in = (const uint8_t*)a[0]->s;
     size_t len = strlen(a[0]->s);
     char *out = xs_malloc(len * 2 + 1);
@@ -6602,7 +6602,7 @@ static int hex_val(char c) {
 
 static Value *native_encode_hex_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *in = a[0]->s;
     size_t len = strlen(in);
     if (len % 2 != 0) return xs_str("");
@@ -6622,7 +6622,7 @@ static Value *native_encode_hex_decode(Interp *ig, Value **a, int n) {
 
 static Value *native_encode_url_encode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *in = a[0]->s;
     size_t len = strlen(in);
     /* worst case: every char becomes %XX (3x) */
@@ -6646,7 +6646,7 @@ static Value *native_encode_url_encode(Interp *ig, Value **a, int n) {
 
 static Value *native_encode_url_decode(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *in = a[0]->s;
     size_t len = strlen(in);
     char *out = xs_malloc(len + 1);
@@ -6744,12 +6744,12 @@ static void db_resolve_col(Value *db_val, const char *tname,
         if (all_digits) return;
     }
     Value *sch = map_get(db_val->map, "_schemas");
-    if (!sch || (sch->tag != XS_MAP && sch->tag != XS_MODULE)) return;
+    if (!sch || (VAL_TAG(sch) != XS_MAP && VAL_TAG(sch) != XS_MODULE)) return;
     Value *cols = map_get(sch->map, tname);
-    if (!cols || cols->tag != XS_ARRAY) return;
+    if (!cols || VAL_TAG(cols) != XS_ARRAY) return;
     for (int i = 0; i < cols->arr->len; i++) {
         Value *cn = cols->arr->items[i];
-        if (cn && cn->tag == XS_STR && strcasecmp(cn->s, user_name) == 0) {
+        if (cn && VAL_TAG(cn) == XS_STR && strcasecmp(cn->s, user_name) == 0) {
             snprintf(out, outsz, "c%d", i);
             return;
         }
@@ -6757,10 +6757,10 @@ static void db_resolve_col(Value *db_val, const char *tname,
 }
 
 static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
-    if (!db_val || (db_val->tag != XS_MAP && db_val->tag != XS_MODULE) || !db_val->map)
+    if (!db_val || (VAL_TAG(db_val) != XS_MAP && VAL_TAG(db_val) != XS_MODULE) || !db_val->map)
         return xs_str("error: invalid db handle");
     Value *tables_v = map_get(db_val->map, "_tables");
-    if (!tables_v || (tables_v->tag != XS_MAP && tables_v->tag != XS_MODULE) || !tables_v->map)
+    if (!tables_v || (VAL_TAG(tables_v) != XS_MAP && VAL_TAG(tables_v) != XS_MODULE) || !tables_v->map)
         return xs_str("error: corrupt db (no _tables)");
     XSMap *tables = tables_v->map;
 
@@ -6798,7 +6798,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
             }
         }
         Value *sch = map_get(db_val->map, "_schemas");
-        if (sch && (sch->tag == XS_MAP || sch->tag == XS_MODULE))
+        if (sch && (VAL_TAG(sch) == XS_MAP || VAL_TAG(sch) == XS_MODULE))
             map_set(sch->map, tname, cols);
         value_decref(cols);
         return xs_str("ok");
@@ -6823,7 +6823,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         rest = db_read_ident(rest, tname, sizeof tname);
         if (tname[0] == '\0') return xs_str("error: missing table name");
         Value *tbl = map_get(tables, tname);
-        if (!tbl || tbl->tag != XS_ARRAY) return xs_str("error: no such table");
+        if (!tbl || VAL_TAG(tbl) != XS_ARRAY) return xs_str("error: no such table");
 
         rest = db_match_kw(rest, "VALUES");
         if (!rest) return xs_str("error: expected VALUES");
@@ -6897,7 +6897,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         rest = db_read_ident(rest, tname, sizeof tname);
         if (tname[0] == '\0') return xs_str("error: missing table name");
         Value *tbl = map_get(tables, tname);
-        if (!tbl || tbl->tag != XS_ARRAY) return xs_str("error: no such table");
+        if (!tbl || VAL_TAG(tbl) != XS_ARRAY) return xs_str("error: no such table");
 
         /* Check for WHERE clause */
         const char *where = db_match_kw(rest, "WHERE");
@@ -6929,7 +6929,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         Value *results = xs_array_new();
         for (int i = 0; i < tbl->arr->len; i++) {
             Value *row = tbl->arr->items[i];
-            if (!row || (row->tag != XS_MAP && row->tag != XS_MODULE)) continue;
+            if (!row || (VAL_TAG(row) != XS_MAP && VAL_TAG(row) != XS_MODULE)) continue;
             if (resolved_key[0]) {
                 Value *fv = map_get(row->map, resolved_key);
                 if (!fv) continue;
@@ -6950,7 +6950,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         rest = db_read_ident(rest, tname, sizeof tname);
         if (tname[0] == '\0') return xs_str("error: missing table name");
         Value *tbl = map_get(tables, tname);
-        if (!tbl || tbl->tag != XS_ARRAY) return xs_str("error: no such table");
+        if (!tbl || VAL_TAG(tbl) != XS_ARRAY) return xs_str("error: no such table");
 
         /* Check for WHERE clause */
         const char *where = db_match_kw(rest, "WHERE");
@@ -6985,7 +6985,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
         for (int i = 0; i < tbl->arr->len; i++) {
             Value *row = tbl->arr->items[i];
             int keep = 1;
-            if (row && (row->tag == XS_MAP || row->tag == XS_MODULE) && row->map) {
+            if (row && (VAL_TAG(row) == XS_MAP || VAL_TAG(row) == XS_MODULE) && row->map) {
                 Value *fv = map_get(row->map, resolved_key);
                 if (fv) {
                     char *fs = value_str(fv);
@@ -7009,7 +7009,7 @@ static Value *db_execute(Value *db_val, const char *sql, int return_rows) {
 static Value *native_db_open(Interp *ig, Value **a, int n) {
     (void)ig;
     XSMap *db = map_new();
-    const char *name = (n > 0 && a[0]->tag == XS_STR) ? a[0]->s : "memdb";
+    const char *name = (n > 0 && VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "memdb";
     map_set(db, "_name", xs_str(name));
     XSMap *tables = map_new();
     Value *tv = xs_module(tables);
@@ -7028,7 +7028,7 @@ static Value *native_db_open(Interp *ig, Value **a, int n) {
 static Value *native_db_exec(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return xs_str("error: db.exec requires (db, sql)");
-    if ((a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE) || a[1]->tag != XS_STR)
+    if ((VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE) || VAL_TAG(a[1]) != XS_STR)
         return xs_str("error: invalid arguments to db.exec");
     return db_execute(a[0], a[1]->s, 0);
 }
@@ -7036,14 +7036,14 @@ static Value *native_db_exec(Interp *ig, Value **a, int n) {
 static Value *native_db_query(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return xs_str("error: db.query requires (db, sql)");
-    if ((a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE) || a[1]->tag != XS_STR)
+    if ((VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE) || VAL_TAG(a[1]) != XS_STR)
         return xs_str("error: invalid arguments to db.query");
     return db_execute(a[0], a[1]->s, 1);
 }
 
 static Value *native_db_close(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return xs_str("error: db.close requires a db handle");
     /* Mark db as closed by removing _tables */
     map_set(a[0]->map, "_tables", value_incref(XS_NULL_VAL));
@@ -7067,7 +7067,7 @@ static Value *native_cli_parse(Interp *ig, Value **a, int n) {
     /* parse(args_array) -> map of parsed flags/options */
     XSMap *result = map_new();
     Value *positionals = xs_array_new();
-    if (n < 1 || a[0]->tag != XS_ARRAY) {
+    if (n < 1 || VAL_TAG(a[0]) != XS_ARRAY) {
         map_set(result, "args", positionals);
         value_decref(positionals);
         return xs_module(result);
@@ -7075,7 +7075,7 @@ static Value *native_cli_parse(Interp *ig, Value **a, int n) {
     XSArray *args = a[0]->arr;
     for (int i = 0; i < args->len; i++) {
         Value *arg = args->items[i];
-        if (arg->tag != XS_STR) {
+        if (VAL_TAG(arg) != XS_STR) {
             array_push(positionals->arr, arg);
             continue;
         }
@@ -7095,7 +7095,7 @@ static Value *native_cli_parse(Interp *ig, Value **a, int n) {
         } else if (s[0] == '-' && s[1] != '\0') {
             /* -f (short flag) */
             char key[2] = { s[1], '\0' };
-            if (s[2] == '\0' && i + 1 < args->len && args->items[i+1]->tag == XS_STR
+            if (s[2] == '\0' && i + 1 < args->len && VAL_TAG(args->items[i+1]) == XS_STR
                 && args->items[i+1]->s[0] != '-') {
                 /* -k value */
                 i++;
@@ -7116,11 +7116,11 @@ static Value *native_cli_parse(Interp *ig, Value **a, int n) {
 
 static Value *native_cli_flag(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     XSMap *spec = map_new();
     map_set(spec, "name", value_incref(a[0]));
     map_set(spec, "type", xs_str("flag"));
-    if (n > 1 && a[1]->tag == XS_MAP) {
+    if (n > 1 && VAL_TAG(a[1]) == XS_MAP) {
         /* merge opts */
         int klen; char **keys = map_keys(a[1]->map, &klen);
         for (int i = 0; i < klen; i++) {
@@ -7135,7 +7135,7 @@ static Value *native_cli_flag(Interp *ig, Value **a, int n) {
 
 static Value *native_cli_option(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     XSMap *spec = map_new();
     map_set(spec, "name", value_incref(a[0]));
     map_set(spec, "type", xs_str("option"));
@@ -7144,7 +7144,7 @@ static Value *native_cli_option(Interp *ig, Value **a, int n) {
 
 static Value *native_cli_positional(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     XSMap *spec = map_new();
     map_set(spec, "name", value_incref(a[0]));
     map_set(spec, "type", xs_str("positional"));
@@ -7172,7 +7172,7 @@ Value *make_cli_module(void) {
 static Value *native_ffi_load(Interp *ig, Value **a, int n) {
     (void)ig;
 #ifdef XSC_ENABLE_PLUGINS
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
 #ifdef _WIN32
     void *handle = (void *)LoadLibraryA(a[0]->s);
 #else
@@ -7192,11 +7192,11 @@ static Value *native_ffi_load(Interp *ig, Value **a, int n) {
 static Value *native_ffi_sym(Interp *ig, Value **a, int n) {
     (void)ig;
 #ifdef XSC_ENABLE_PLUGINS
-    if (n < 2 || a[0]->tag != XS_MAP || a[1]->tag != XS_STR)
+    if (n < 2 || VAL_TAG(a[0]) != XS_MAP || VAL_TAG(a[1]) != XS_STR)
         return value_incref(XS_NULL_VAL);
     Value *hp = map_get(a[0]->map, "_handle");
-    if (!hp || hp->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    void *handle = (void*)(uintptr_t)hp->i;
+    if (!hp || VAL_TAG(hp) != XS_INT) return value_incref(XS_NULL_VAL);
+    void *handle = (void*)(uintptr_t)VAL_INT(hp);
 #ifdef _WIN32
     void *sym = (void *)GetProcAddress((HMODULE)handle, a[1]->s);
 #else
@@ -7218,20 +7218,20 @@ static Value *native_ffi_call(Interp *ig, Value **a, int n) {
     /* ffi.call(sym_handle, args_array): call a foreign function.
        If the sym has a _fn field pointing to a native function wrapper, call it.
        Otherwise return an error. */
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return xs_str("error: ffi.call requires a symbol handle");
 
     /* Check for a native function wrapper in _fn field */
     Value *fn_v = map_get(a[0]->map, "_fn");
-    if (fn_v && fn_v->tag == XS_NATIVE) {
+    if (fn_v && VAL_TAG(fn_v) == XS_NATIVE) {
         /* Pass args_array items as arguments */
-        if (n >= 2 && a[1]->tag == XS_ARRAY) {
+        if (n >= 2 && VAL_TAG(a[1]) == XS_ARRAY) {
             return fn_v->native(ig, a[1]->arr->items, a[1]->arr->len);
         }
         return fn_v->native(ig, NULL, 0);
     }
-    if (fn_v && fn_v->tag == XS_FUNC) {
-        if (n >= 2 && a[1]->tag == XS_ARRAY) {
+    if (fn_v && VAL_TAG(fn_v) == XS_FUNC) {
+        if (n >= 2 && VAL_TAG(a[1]) == XS_ARRAY) {
             return call_value(ig, fn_v, a[1]->arr->items, a[1]->arr->len, "ffi.call");
         }
         return call_value(ig, fn_v, NULL, 0, "ffi.call");
@@ -7243,12 +7243,12 @@ static Value *native_ffi_call(Interp *ig, Value **a, int n) {
 static Value *native_ffi_close(Interp *ig, Value **a, int n) {
     (void)ig;
 #ifdef XSC_ENABLE_PLUGINS
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE))
         return xs_str("error: ffi.close requires a library handle");
     Value *hp = map_get(a[0]->map, "_handle");
-    if (!hp || hp->tag != XS_INT)
+    if (!hp || VAL_TAG(hp) != XS_INT)
         return xs_str("error: invalid library handle");
-    void *handle = (void *)(uintptr_t)hp->i;
+    void *handle = (void *)(uintptr_t)VAL_INT(hp);
 #ifdef _WIN32
     FreeLibrary((HMODULE)handle);
 #else
@@ -7268,7 +7268,7 @@ static Value *native_ffi_typeof(Interp *ig, Value **a, int n) {
     (void)ig;
     /* ffi.typeof(sym_handle): return the type string of a symbol */
     if (n < 1) return xs_str("null");
-    if (a[0]->tag == XS_MAP || a[0]->tag == XS_MODULE) {
+    if (VAL_TAG(a[0]) == XS_MAP || VAL_TAG(a[0]) == XS_MODULE) {
         /* Check if it has a _sym field (it's a symbol handle) */
         Value *sym = map_get(a[0]->map, "_sym");
         if (sym) return xs_str("ffi_symbol");
@@ -7278,7 +7278,7 @@ static Value *native_ffi_typeof(Interp *ig, Value **a, int n) {
         return xs_str("map");
     }
     /* For non-map values, return the XS type */
-    switch (a[0]->tag) {
+    switch (VAL_TAG(a[0])) {
         case XS_NULL:   return xs_str("null");
         case XS_BOOL:   return xs_str("bool");
         case XS_INT:    return xs_str("int");
@@ -7305,7 +7305,7 @@ Value *make_ffi_module(void) {
 static Value *native_reflect_type_of(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return xs_str("null");
-    switch (a[0]->tag) {
+    switch (VAL_TAG(a[0])) {
         case XS_NULL:       return xs_str("null");
         case XS_BOOL:       return xs_str("bool");
         case XS_INT:        return xs_str("int");
@@ -7334,9 +7334,9 @@ static Value *native_reflect_fields(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return xs_array_new();
     XSMap *m = NULL;
-    if (a[0]->tag == XS_MAP || a[0]->tag == XS_MODULE) m = a[0]->map;
-    else if (a[0]->tag == XS_STRUCT_VAL) m = a[0]->st->fields;
-    else if (a[0]->tag == XS_INST) m = a[0]->inst->fields;
+    if (VAL_TAG(a[0]) == XS_MAP || VAL_TAG(a[0]) == XS_MODULE) m = a[0]->map;
+    else if (VAL_TAG(a[0]) == XS_STRUCT_VAL) m = a[0]->st->fields;
+    else if (VAL_TAG(a[0]) == XS_INST) m = a[0]->inst->fields;
     if (!m) return xs_array_new();
 
     int klen;
@@ -7361,9 +7361,9 @@ static Value *native_reflect_methods(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return xs_array_new();
     XSMap *m = NULL;
-    if (a[0]->tag == XS_INST && a[0]->inst->methods)
+    if (VAL_TAG(a[0]) == XS_INST && a[0]->inst->methods)
         m = a[0]->inst->methods;
-    else if (a[0]->tag == XS_CLASS_VAL && a[0]->cls->methods)
+    else if (VAL_TAG(a[0]) == XS_CLASS_VAL && a[0]->cls->methods)
         m = a[0]->cls->methods;
     if (!m) return xs_array_new();
 
@@ -7383,10 +7383,10 @@ static Value *native_reflect_methods(Interp *ig, Value **a, int n) {
 static Value *native_reflect_is_instance(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2) return value_incref(XS_FALSE_VAL);
-    if (a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     const char *type_name = a[1]->s;
     const char *actual = NULL;
-    switch (a[0]->tag) {
+    switch (VAL_TAG(a[0])) {
         case XS_NULL:   actual = "null"; break;
         case XS_BOOL:   actual = "bool"; break;
         case XS_INT:    actual = "int"; break;
@@ -7453,8 +7453,8 @@ static Value *native_gc_stats(Interp *ig, Value **a, int n) {
 static Value *native_gc_set_threshold(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 2 || !a[0] || !a[1]) return value_incref(XS_NULL_VAL);
-    if (a[0]->tag != XS_INT || a[1]->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    gc_set_threshold((int)a[0]->i, (int)a[1]->i);
+    if (VAL_TAG(a[0]) != XS_INT || VAL_TAG(a[1]) != XS_INT) return value_incref(XS_NULL_VAL);
+    gc_set_threshold((int)VAL_INT(a[0]), (int)VAL_INT(a[1]));
     return value_incref(XS_NULL_VAL);
 }
 
@@ -7496,7 +7496,7 @@ static Value *native_reactive_derived(Interp *ig, Value **a, int n) {
 static Value *native_reactive_effect(Interp *ig, Value **a, int n) {
     /* effect(fn, ...signals) -> calls fn immediately, then subscribes fn
        to each signal argument so it re-runs when signal values change */
-    if (n < 1 || (a[0]->tag != XS_FUNC && a[0]->tag != XS_NATIVE))
+    if (n < 1 || (VAL_TAG(a[0]) != XS_FUNC && VAL_TAG(a[0]) != XS_NATIVE))
         return value_incref(XS_NULL_VAL);
     Value *fn = a[0];
     /* Call the effect function immediately */
@@ -7504,7 +7504,7 @@ static Value *native_reactive_effect(Interp *ig, Value **a, int n) {
     value_decref(result);
     /* Subscribe fn to any signal arguments passed after the function */
     for (int j = 1; j < n; j++) {
-        if (a[j]->tag == XS_SIGNAL && a[j]->signal) {
+        if (VAL_TAG(a[j]) == XS_SIGNAL && a[j]->signal) {
             XSSignal *sig = a[j]->signal;
             if (sig->nsubs >= sig->subcap) {
                 sig->subcap = sig->subcap ? sig->subcap * 2 : 4;
@@ -7528,7 +7528,7 @@ Value *make_reactive_module(void) {
 
 static Value *native_fs_read(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f = fopen(a[0]->s, "r");
     if (!f) return value_incref(XS_NULL_VAL);
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
@@ -7539,7 +7539,7 @@ static Value *native_fs_read(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_write(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *f = fopen(a[0]->s, "w");
     if (!f) return value_incref(XS_FALSE_VAL);
     fputs(a[1]->s, f); fclose(f);
@@ -7548,7 +7548,7 @@ static Value *native_fs_write(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_append(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *f = fopen(a[0]->s, "a");
     if (!f) return value_incref(XS_FALSE_VAL);
     fputs(a[1]->s, f); fclose(f);
@@ -7557,26 +7557,26 @@ static Value *native_fs_append(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_exists(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     return (access(a[0]->s, F_OK) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_remove(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     return (unlink(a[0]->s) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_mkdir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     int r = io_mkdirs(a[0]->s);
     return (r == 0 || errno == EEXIST) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_ls(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     DIR *d = opendir(a[0]->s); if (!d) return xs_array_new();
     Value *arr = xs_array_new();
     struct dirent *ent;
@@ -7589,28 +7589,28 @@ static Value *native_fs_ls(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_is_dir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s, &st) != 0) return value_incref(XS_FALSE_VAL);
     return S_ISDIR(st.st_mode) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_is_file(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     struct stat st; if (stat(a[0]->s, &st) != 0) return value_incref(XS_FALSE_VAL);
     return S_ISREG(st.st_mode) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_size(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_int(-1);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_int(-1);
     struct stat st; if (stat(a[0]->s, &st) != 0) return xs_int(-1);
     return xs_int((int64_t)st.st_size);
 }
 
 static Value *native_fs_stat(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     struct stat st;
     if (stat(a[0]->s, &st) != 0) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
@@ -7623,7 +7623,7 @@ static Value *native_fs_stat(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_read_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     FILE *f = fopen(a[0]->s, "rb");
     if (!f) return xs_array_new();
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
@@ -7637,12 +7637,12 @@ static Value *native_fs_read_bytes(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_write_bytes(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_ARRAY) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_ARRAY) return value_incref(XS_FALSE_VAL);
     FILE *f = fopen(a[0]->s, "wb");
     if (!f) return value_incref(XS_FALSE_VAL);
     XSArray *arr = a[1]->arr;
     for (int j = 0; j < arr->len; j++) {
-        uint8_t b = (arr->items[j]->tag == XS_INT) ? (uint8_t)arr->items[j]->i : 0;
+        uint8_t b = (VAL_TAG(arr->items[j]) == XS_INT) ? (uint8_t)VAL_INT(arr->items[j]) : 0;
         fwrite(&b, 1, 1, f);
     }
     fclose(f);
@@ -7651,26 +7651,26 @@ static Value *native_fs_write_bytes(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_mkdir_p(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     int r = io_mkdirs(a[0]->s);
     return (r == 0 || errno == EEXIST) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_rmdir(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
     return (rmdir(a[0]->s) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_rename(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     return (rename(a[0]->s, a[1]->s) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
 
 static Value *native_fs_copy(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     FILE *src = fopen(a[0]->s, "rb"); if (!src) return value_incref(XS_FALSE_VAL);
     FILE *dst = fopen(a[1]->s, "wb"); if (!dst) { fclose(src); return value_incref(XS_FALSE_VAL); }
     char buf[4096]; size_t nr;
@@ -7684,12 +7684,12 @@ static Value *native_fs_join(Interp *ig, Value **a, int n) {
     if (n < 1) return xs_str("");
     int total = 0;
     for (int j = 0; j < n; j++) {
-        if (a[j]->tag != XS_STR) continue;
+        if (VAL_TAG(a[j]) != XS_STR) continue;
         total += (int)strlen(a[j]->s) + 1;
     }
     char *res = xs_malloc(total + 1); res[0] = '\0';
     for (int j = 0; j < n; j++) {
-        if (a[j]->tag != XS_STR) continue;
+        if (VAL_TAG(a[j]) != XS_STR) continue;
         if (j > 0 && res[0] != '\0') {
             int rlen = (int)strlen(res);
             if (rlen > 0 && res[rlen-1] != '/') strcat(res, "/");
@@ -7701,7 +7701,7 @@ static Value *native_fs_join(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_basename(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *s = a[0]->s;
     const char *last = strrchr(s, '/');
     return xs_str(last ? last + 1 : s);
@@ -7709,7 +7709,7 @@ static Value *native_fs_basename(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_dirname(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str(".");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str(".");
     const char *s = a[0]->s;
     const char *last = strrchr(s, '/');
     if (!last) return xs_str(".");
@@ -7719,7 +7719,7 @@ static Value *native_fs_dirname(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_ext(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     const char *s = a[0]->s;
     const char *base = strrchr(s, '/');
     const char *dot = strrchr(base ? base : s, '.');
@@ -7728,7 +7728,7 @@ static Value *native_fs_ext(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_abs(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_str("");
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     char buf[4096];
 #ifdef _WIN32
     if (_fullpath(buf, a[0]->s, sizeof(buf))) return xs_str(buf);
@@ -7795,13 +7795,13 @@ static Value *native_fs_temp_file(Interp *ig, Value **a, int n) {
 /* fs.read_stream(path) - returns a reader map with read/read_line/read_all/close */
 static Value *native_fs_reader_read(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (!f) return value_incref(XS_NULL_VAL);
     int count = 4096;
-    if (n >= 2 && a[1]->tag == XS_INT) count = (int)a[1]->i;
+    if (n >= 2 && VAL_TAG(a[1]) == XS_INT) count = (int)VAL_INT(a[1]);
     if (count <= 0) count = 1;
     if (count > 1048576) count = 1048576;
     char *buf = xs_malloc((size_t)count + 1);
@@ -7813,10 +7813,10 @@ static Value *native_fs_reader_read(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_reader_read_line(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (!f) return value_incref(XS_NULL_VAL);
     int cap = 256; char *buf = xs_malloc(cap); int pos = 0;
     int c;
@@ -7833,10 +7833,10 @@ static Value *native_fs_reader_read_line(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_reader_read_all(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (!f) return value_incref(XS_NULL_VAL);
     int cap = 4096; char *buf = xs_malloc(cap); int pos = 0;
     int c;
@@ -7850,17 +7850,17 @@ static Value *native_fs_reader_read_all(Interp *ig, Value **a, int n) {
 
 static Value *native_fs_reader_close(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (f) { fclose(f); map_set(a[0]->map, "_fd", xs_int(0)); }
     return value_incref(XS_NULL_VAL);
 }
 
 static Value *native_fs_read_stream(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f = fopen(a[0]->s, "r");
     if (!f) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
@@ -7875,28 +7875,28 @@ static Value *native_fs_read_stream(Interp *ig, Value **a, int n) {
 /* fs.write_stream(path) - returns a writer map with write/flush/close */
 static Value *native_fs_writer_write(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 2 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_FALSE_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (!f) return value_incref(XS_FALSE_VAL);
-    if (a[1]->tag == XS_STR) fputs(a[1]->s, f);
+    if (VAL_TAG(a[1]) == XS_STR) fputs(a[1]->s, f);
     return value_incref(XS_TRUE_VAL);
 }
 
 static Value *native_fs_writer_flush(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || (a[0]->tag != XS_MAP && a[0]->tag != XS_MODULE)) return value_incref(XS_NULL_VAL);
+    if (n < 1 || (VAL_TAG(a[0]) != XS_MAP && VAL_TAG(a[0]) != XS_MODULE)) return value_incref(XS_NULL_VAL);
     Value *fdv = map_get(a[0]->map, "_fd");
-    if (!fdv || fdv->tag != XS_INT) return value_incref(XS_NULL_VAL);
-    FILE *f = (FILE*)(uintptr_t)fdv->i;
+    if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
+    FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
     if (f) fflush(f);
     return value_incref(XS_NULL_VAL);
 }
 
 static Value *native_fs_write_stream(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     FILE *f = fopen(a[0]->s, "w");
     if (!f) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
@@ -7910,7 +7910,7 @@ static Value *native_fs_write_stream(Interp *ig, Value **a, int n) {
 /* fs.read_lines(path) - returns array of lines */
 static Value *native_fs_read_lines(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     FILE *f = fopen(a[0]->s, "r");
     if (!f) return xs_array_new();
     Value *arr = xs_array_new();
@@ -7956,7 +7956,7 @@ static void fs_walk_recurse(const char *dir, Value *arr) {
 
 static Value *native_fs_walk(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     Value *arr = xs_array_new();
     fs_walk_recurse(a[0]->s, arr);
     return arr;
@@ -7966,7 +7966,7 @@ static Value *native_fs_walk(Interp *ig, Value **a, int n) {
 static Value *native_fs_glob(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_STR) return xs_array_new();
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_array_new();
     glob_t g;
     memset(&g, 0, sizeof(g));
     int rc = glob(a[0]->s, GLOB_NOSORT, NULL, &g);
@@ -7987,8 +7987,8 @@ static Value *native_fs_glob(Interp *ig, Value **a, int n) {
 static Value *native_fs_chmod(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_INT) return value_incref(XS_FALSE_VAL);
-    return (chmod(a[0]->s, (mode_t)a[1]->i) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_INT) return value_incref(XS_FALSE_VAL);
+    return (chmod(a[0]->s, (mode_t)VAL_INT(a[1])) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 #else
     (void)a; (void)n;
     return value_incref(XS_FALSE_VAL);
@@ -7999,7 +7999,7 @@ static Value *native_fs_chmod(Interp *ig, Value **a, int n) {
 static Value *native_fs_symlink(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 2 || a[0]->tag != XS_STR || a[1]->tag != XS_STR) return value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR) return value_incref(XS_FALSE_VAL);
     return (symlink(a[0]->s, a[1]->s) == 0) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 #else
     (void)a; (void)n;
@@ -8011,7 +8011,7 @@ static Value *native_fs_symlink(Interp *ig, Value **a, int n) {
 static Value *native_fs_readlink(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     char buf[4096];
     ssize_t len = readlink(a[0]->s, buf, sizeof(buf) - 1);
     if (len < 0) return value_incref(XS_NULL_VAL);
@@ -8026,7 +8026,7 @@ static Value *native_fs_readlink(Interp *ig, Value **a, int n) {
 /* fs.realpath(path) */
 static Value *native_fs_realpath(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n < 1 || a[0]->tag != XS_STR) return value_incref(XS_NULL_VAL);
+    if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
     char buf[4096];
 #ifdef _WIN32
     if (_fullpath(buf, a[0]->s, sizeof(buf))) return xs_str(buf);
@@ -8040,7 +8040,7 @@ static Value *native_fs_realpath(Interp *ig, Value **a, int n) {
 static Value *native_fs_watch(Interp *ig, Value **a, int n) {
     (void)ig;
 #if defined(__linux__) && !defined(__wasi__)
-    if (n < 2 || a[0]->tag != XS_STR || (a[1]->tag != XS_FUNC && a[1]->tag != XS_NATIVE))
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || (VAL_TAG(a[1]) != XS_FUNC && VAL_TAG(a[1]) != XS_NATIVE))
         return value_incref(XS_FALSE_VAL);
     /* single-shot watch: block until one event, call callback, return */
     int ifd = inotify_init();
@@ -8172,7 +8172,7 @@ static XSMap *toml_ensure_section(XSMap *root, const char *section) {
         char *dot=strchr(pp,'.');
         if (dot) *dot='\0';
         Value *existing=map_get(cur,pp);
-        if (existing&&(existing->tag==XS_MAP||existing->tag==XS_MODULE)) cur=existing->map;
+        if (existing&&(VAL_TAG(existing)==XS_MAP||VAL_TAG(existing)==XS_MODULE)) cur=existing->map;
         else { Value *nm=xs_map_new(); map_set(cur,pp,nm); cur=nm->map; value_decref(nm); }
         if (dot) pp=dot+1; else break;
     }
@@ -8180,7 +8180,7 @@ static XSMap *toml_ensure_section(XSMap *root, const char *section) {
 }
 static Value *native_toml_parse(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||a[0]->tag!=XS_STR) return xs_map_new();
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_map_new();
     const char *s=a[0]->s; int pos=0; int slen=(int)strlen(s);
     Value *root=xs_map_new(); XSMap *cur=root->map;
     while (pos<slen) {
@@ -8229,11 +8229,11 @@ Value *make_toml_module(void) {
 static Value *native_http_get(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     XSMap *hdrs=NULL;
-    if (n>=2&&a[1]->tag==XS_MAP) {
+    if (n>=2&&VAL_TAG(a[1])==XS_MAP) {
         Value *hv=map_get(a[1]->map,"headers");
-        if (hv&&hv->tag==XS_MAP) hdrs=hv->map;
+        if (hv&&VAL_TAG(hv)==XS_MAP) hdrs=hv->map;
     }
     return http_do_request("GET",a[0]->s,hdrs,NULL,0);
 #else
@@ -8243,13 +8243,13 @@ static Value *native_http_get(Interp *ig, Value **a, int n) {
 static Value *native_http_post(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *body=NULL; size_t body_len=0;
-    if (n>=2&&a[1]->tag==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
+    if (n>=2&&VAL_TAG(a[1])==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
     XSMap *hdrs=NULL;
-    if (n>=3&&a[2]->tag==XS_MAP) {
+    if (n>=3&&VAL_TAG(a[2])==XS_MAP) {
         Value *hv=map_get(a[2]->map,"headers");
-        if (hv&&hv->tag==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
+        if (hv&&VAL_TAG(hv)==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
     }
     return http_do_request("POST",a[0]->s,hdrs,body,body_len);
 #else
@@ -8259,13 +8259,13 @@ static Value *native_http_post(Interp *ig, Value **a, int n) {
 static Value *native_http_put(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *body=NULL; size_t body_len=0;
-    if (n>=2&&a[1]->tag==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
+    if (n>=2&&VAL_TAG(a[1])==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
     XSMap *hdrs=NULL;
-    if (n>=3&&a[2]->tag==XS_MAP) {
+    if (n>=3&&VAL_TAG(a[2])==XS_MAP) {
         Value *hv=map_get(a[2]->map,"headers");
-        if (hv&&hv->tag==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
+        if (hv&&VAL_TAG(hv)==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
     }
     return http_do_request("PUT",a[0]->s,hdrs,body,body_len);
 #else
@@ -8275,11 +8275,11 @@ static Value *native_http_put(Interp *ig, Value **a, int n) {
 static Value *native_http_delete(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     XSMap *hdrs=NULL;
-    if (n>=2&&a[1]->tag==XS_MAP) {
+    if (n>=2&&VAL_TAG(a[1])==XS_MAP) {
         Value *hv=map_get(a[1]->map,"headers");
-        if (hv&&hv->tag==XS_MAP) hdrs=hv->map;
+        if (hv&&VAL_TAG(hv)==XS_MAP) hdrs=hv->map;
     }
     return http_do_request("DELETE",a[0]->s,hdrs,NULL,0);
 #else
@@ -8289,13 +8289,13 @@ static Value *native_http_delete(Interp *ig, Value **a, int n) {
 static Value *native_http_patch(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<1||a[0]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *body=NULL; size_t body_len=0;
-    if (n>=2&&a[1]->tag==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
+    if (n>=2&&VAL_TAG(a[1])==XS_STR) { body=a[1]->s; body_len=strlen(a[1]->s); }
     XSMap *hdrs=NULL;
-    if (n>=3&&a[2]->tag==XS_MAP) {
+    if (n>=3&&VAL_TAG(a[2])==XS_MAP) {
         Value *hv=map_get(a[2]->map,"headers");
-        if (hv&&hv->tag==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
+        if (hv&&VAL_TAG(hv)==XS_MAP) hdrs=hv->map; else hdrs=a[2]->map;
     }
     return http_do_request("PATCH",a[0]->s,hdrs,body,body_len);
 #else
@@ -8307,24 +8307,24 @@ static Value *native_http_patch(Interp *ig, Value **a, int n) {
 static Value *native_http_request(Interp *ig, Value **a, int n) {
     (void)ig;
 #if !defined(__MINGW32__) && !defined(__wasi__)
-    if (n<2||a[0]->tag!=XS_STR||a[1]->tag!=XS_STR) return value_incref(XS_NULL_VAL);
+    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_NULL_VAL);
     const char *method = a[0]->s;
     const char *url = a[1]->s;
     XSMap *hdrs = NULL;
     const char *body = NULL;
     size_t body_len = 0;
-    if (n >= 3 && a[2]->tag == XS_MAP) {
+    if (n >= 3 && VAL_TAG(a[2]) == XS_MAP) {
         Value *hv = map_get(a[2]->map, "headers");
-        if (hv && hv->tag == XS_MAP) hdrs = hv->map;
+        if (hv && VAL_TAG(hv) == XS_MAP) hdrs = hv->map;
         Value *bv = map_get(a[2]->map, "body");
-        if (bv && bv->tag == XS_STR) { body = bv->s; body_len = strlen(bv->s); }
+        if (bv && VAL_TAG(bv) == XS_STR) { body = bv->s; body_len = strlen(bv->s); }
     }
     Value *result = http_do_request(method, url, hdrs, body, body_len);
     /* add 'ok' field for convenience */
-    if (result && result->tag == XS_MAP) {
+    if (result && VAL_TAG(result) == XS_MAP) {
         Value *sv = map_get(result->map, "status");
-        if (sv && sv->tag == XS_INT) {
-            int ok = (sv->i >= 200 && sv->i < 300) ? 1 : 0;
+        if (sv && VAL_TAG(sv) == XS_INT) {
+            int ok = (VAL_INT(sv) >= 200 && VAL_INT(sv) < 300) ? 1 : 0;
             map_set(result->map, "ok", ok ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL));
         }
     }
@@ -8354,12 +8354,12 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
     fprintf(stderr, "http.serve: not available on this platform\n");
     return value_incref(XS_NULL_VAL);
 #else
-    if (n < 2 || a[0]->tag != XS_INT ||
-        (a[1]->tag != XS_FUNC && a[1]->tag != XS_NATIVE)) {
+    if (n < 2 || VAL_TAG(a[0]) != XS_INT ||
+        (VAL_TAG(a[1]) != XS_FUNC && VAL_TAG(a[1]) != XS_NATIVE)) {
         fprintf(stderr, "http.serve: expected (port: int, handler: fn)\n");
         return value_incref(XS_NULL_VAL);
     }
-    int port = (int)a[0]->i;
+    int port = (int)VAL_INT(a[0]);
     Value *handler = a[1];
 
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -8459,14 +8459,14 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
         int status = 200;
         const char *rbody = "";
         XSMap *rheaders = NULL;
-        if (res && (res->tag == XS_MAP || res->tag == XS_MODULE) && res->map) {
+        if (res && (VAL_TAG(res) == XS_MAP || VAL_TAG(res) == XS_MODULE) && res->map) {
             Value *sv = map_get(res->map, "status");
-            if (sv && sv->tag == XS_INT) status = (int)sv->i;
+            if (sv && VAL_TAG(sv) == XS_INT) status = (int)VAL_INT(sv);
             Value *bv2 = map_get(res->map, "body");
-            if (bv2 && bv2->tag == XS_STR) rbody = bv2->s;
+            if (bv2 && VAL_TAG(bv2) == XS_STR) rbody = bv2->s;
             Value *hv = map_get(res->map, "headers");
-            if (hv && hv->tag == XS_MAP && hv->map) rheaders = hv->map;
-        } else if (res && res->tag == XS_STR) {
+            if (hv && VAL_TAG(hv) == XS_MAP && hv->map) rheaders = hv->map;
+        } else if (res && VAL_TAG(res) == XS_STR) {
             rbody = res->s;
         }
 
@@ -8481,7 +8481,7 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
             int nk = 0; char **ks = map_keys(rheaders, &nk);
             for (int k = 0; k < nk && hlen < (int)sizeof resp_hdr - 64; k++) {
                 Value *vv = map_get(rheaders, ks[k]);
-                if (vv && vv->tag == XS_STR) {
+                if (vv && VAL_TAG(vv) == XS_STR) {
                     hlen += snprintf(resp_hdr + hlen, sizeof resp_hdr - hlen,
                                      "%s: %s\r\n", ks[k], vv->s);
                 }

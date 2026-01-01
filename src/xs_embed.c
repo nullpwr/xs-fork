@@ -23,16 +23,16 @@ struct XSContext {
 static XSValue wrap_value(Value *v) {
     XSValue out;
     memset(&out, 0, sizeof out);
-    if (!v || v->tag == XS_NULL) {
+    if (!v || VAL_TAG(v) == XS_NULL) {
         out.tag = XS_VAL_NULL;
         out._internal = NULL;
         return out;
     }
     value_incref(v);
     out._internal = v;
-    switch (v->tag) {
-    case XS_BOOL:  out.tag = XS_VAL_BOOL;   out.b = (int)v->i; break;
-    case XS_INT:   out.tag = XS_VAL_INT;    out.i = v->i;      break;
+    switch (VAL_TAG(v)) {
+    case XS_BOOL:  out.tag = XS_VAL_BOOL;   out.b = (int)VAL_INT(v); break;
+    case XS_INT:   out.tag = XS_VAL_INT;    out.i = VAL_INT(v);      break;
     case XS_FLOAT: out.tag = XS_VAL_FLOAT;  out.f = v->f;      break;
     case XS_STR:   out.tag = XS_VAL_STRING; out.s = v->s;      break;
     case XS_ARRAY: out.tag = XS_VAL_ARRAY;                     break;
@@ -48,10 +48,10 @@ static XSValue wrap_value(Value *v) {
 static Value *unwrap_value(XSValue *v) {
     if (!v || !v->_internal) {
         /* synthesize from the tag */
-        switch (v ? v->tag : XS_VAL_NULL) {
+        switch (v ? VAL_TAG(v) : XS_VAL_NULL) {
         case XS_VAL_NULL:   return xs_null();
         case XS_VAL_BOOL:   return xs_bool(v->b);
-        case XS_VAL_INT:    return xs_int(v->i);
+        case XS_VAL_INT:    return xs_int(VAL_INT(v));
         case XS_VAL_FLOAT:  return xs_float(v->f);
         case XS_VAL_STRING: return xs_str(v->s ? v->s : "");
         default:            return xs_null();
@@ -114,7 +114,7 @@ static XSResult run_source(XSContext *ctx, const char *src, const char *fname) {
     if (ctx->interp->cf.signal == CF_ERROR || ctx->interp->cf.signal == CF_PANIC) {
         Value *err = ctx->interp->cf.value;
         const char *msg = "runtime error";
-        if (err && err->tag == XS_STR) msg = err->s;
+        if (err && VAL_TAG(err) == XS_STR) msg = err->s;
         else if (err) {
             char *s = value_repr(err);
             if (s) { snprintf(ctx->error_buf, sizeof ctx->error_buf, "%s", s); free(s); msg = ctx->error_buf; }
@@ -128,7 +128,7 @@ static XSResult run_source(XSContext *ctx, const char *src, const char *fname) {
     XSValue val;
     memset(&val, 0, sizeof val);
     val.tag = XS_VAL_NULL;
-    if (ctx->interp->cf.value && ctx->interp->cf.value->tag != XS_NULL) {
+    if (ctx->interp->cf.value && VAL_TAG(ctx->interp->cf.value) != XS_NULL) {
         val = wrap_value(ctx->interp->cf.value);
     }
     if (ctx->interp->cf.value) { value_decref(ctx->interp->cf.value); ctx->interp->cf.value = NULL; }
@@ -171,7 +171,7 @@ XSResult xs_call(XSContext *ctx, const char *fn_name, XSValue *args, int nargs) 
         snprintf(buf, sizeof buf, "function '%s' not found", fn_name);
         return make_err(ctx, buf);
     }
-    if (fn_val->tag != XS_FUNC && fn_val->tag != XS_NATIVE) {
+    if (VAL_TAG(fn_val) != XS_FUNC && VAL_TAG(fn_val) != XS_NATIVE) {
         char buf[256];
         snprintf(buf, sizeof buf, "'%s' is not callable", fn_name);
         return make_err(ctx, buf);
@@ -197,7 +197,7 @@ XSResult xs_call(XSContext *ctx, const char *fn_name, XSValue *args, int nargs) 
     if (ctx->interp->cf.signal == CF_ERROR || ctx->interp->cf.signal == CF_PANIC) {
         Value *err = ctx->interp->cf.value;
         const char *msg = "runtime error";
-        if (err && err->tag == XS_STR) msg = err->s;
+        if (err && VAL_TAG(err) == XS_STR) msg = err->s;
         else if (err) {
             char *s = value_repr(err);
             if (s) { snprintf(ctx->error_buf, sizeof ctx->error_buf, "%s", s); free(s); msg = ctx->error_buf; }
@@ -398,7 +398,7 @@ const char *xs_to_string(XSValue v) {
     if (v.tag == XS_VAL_STRING) return v.s ? v.s : "";
     if (v._internal) {
         Value *iv = (Value *)v._internal;
-        if (iv->tag == XS_STR) return iv->s;
+        if (VAL_TAG(iv) == XS_STR) return iv->s;
     }
     return "";
 }
@@ -506,7 +506,7 @@ int xs_eval_legacy(XSState *xs, const char *src) {
 
     if (xs->interp->cf.signal == CF_ERROR || xs->interp->cf.signal == CF_PANIC) {
         Value *err = xs->interp->cf.value;
-        if (err && err->tag == XS_STR) {
+        if (err && VAL_TAG(err) == XS_STR) {
             xs_set_error(xs, err->s);
         } else if (err) {
             char *s = value_repr(err);
@@ -523,7 +523,7 @@ int xs_eval_legacy(XSState *xs, const char *src) {
         return 1;
     }
 
-    if (xs->interp->cf.value && xs->interp->cf.value->tag != XS_NULL) {
+    if (xs->interp->cf.value && VAL_TAG(xs->interp->cf.value) != XS_NULL) {
         xs_push(xs, xs->interp->cf.value);
     }
     if (xs->interp->cf.value) {
@@ -640,7 +640,7 @@ int64_t xs_pop_int(XSState *xs) {
     Value *v = xs_pop(xs);
     if (!v) return 0;
     int64_t result = 0;
-    if (v->tag == XS_INT) result = v->i;
+    if (VAL_TAG(v) == XS_INT) result = VAL_INT(v);
     else xs_set_error(xs, "pop_int: value is not an int");
     value_decref(v);
     return result;
@@ -650,8 +650,8 @@ double xs_pop_float(XSState *xs) {
     Value *v = xs_pop(xs);
     if (!v) return 0.0;
     double result = 0.0;
-    if (v->tag == XS_FLOAT) result = v->f;
-    else if (v->tag == XS_INT) result = (double)v->i;
+    if (VAL_TAG(v) == XS_FLOAT) result = v->f;
+    else if (VAL_TAG(v) == XS_INT) result = (double)VAL_INT(v);
     else xs_set_error(xs, "pop_float: value is not a float");
     value_decref(v);
     return result;
@@ -661,7 +661,7 @@ char *xs_pop_str(XSState *xs) {
     Value *v = xs_pop(xs);
     if (!v) return NULL;
     char *result = NULL;
-    if (v->tag == XS_STR) result = xs_strdup(v->s);
+    if (VAL_TAG(v) == XS_STR) result = xs_strdup(v->s);
     else result = value_repr(v);
     value_decref(v);
     return result;
@@ -695,7 +695,7 @@ void xs_unpin(XSState *xs, XSRef ref) {
 
 const char *xs_ref_str(XSRef ref) {
     Value *v = (Value *)ref.opaque;
-    if (!v || v->tag != XS_STR) return NULL;
+    if (!v || VAL_TAG(v) != XS_STR) return NULL;
     return v->s;
 }
 
@@ -824,24 +824,24 @@ XSVal *xs_make_map_legacy(XSState *xs) {
 XSVal *xs_map_set_legacy(XSState *xs, XSVal *map_val, const char *key, XSVal *val) {
     (void)xs;
     Value *m = (Value *)map_val;
-    if (!m || m->tag != XS_MAP) return map_val;
+    if (!m || VAL_TAG(m) != XS_MAP) return map_val;
     map_set(m->map, key, (Value *)val);
     return map_val;
 }
 
 int xs_is_int_legacy(XSVal *v) {
     Value *val = (Value *)v;
-    return val && val->tag == XS_INT;
+    return val && VAL_TAG(val) == XS_INT;
 }
 
 int64_t xs_get_int_legacy(XSVal *v) {
     Value *val = (Value *)v;
-    if (!val || val->tag != XS_INT) return 0;
-    return val->i;
+    if (!val || VAL_TAG(val) != XS_INT) return 0;
+    return VAL_INT(val);
 }
 
 const char *xs_get_str_legacy(XSVal *v) {
     Value *val = (Value *)v;
-    if (!val || val->tag != XS_STR) return NULL;
+    if (!val || VAL_TAG(val) != XS_STR) return NULL;
     return val->s;
 }

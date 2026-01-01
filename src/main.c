@@ -91,11 +91,11 @@
 int g_no_color = 0;
 
 static int program_has_plugin_use(Node *program) {
-    if (!program || program->tag != NODE_PROGRAM) return 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
     for (int j = 0; j < program->program.stmts.len; j++) {
         Node *s = program->program.stmts.items[j];
-        if (s && s->tag == NODE_USE && s->use_.is_plugin) return 1;
-        if (s && s->tag == NODE_LOAD) return 1;
+        if (s && VAL_TAG(s) == NODE_USE && s->use_.is_plugin) return 1;
+        if (s && VAL_TAG(s) == NODE_LOAD) return 1;
     }
     return 0;
 }
@@ -108,24 +108,24 @@ static int node_uses_plugin_runtime_hook(Node *n) {
     if (!n) return 0;
     /* bind requires interp-side reactive tracking; VM compiles it as a
        plain let so subsequent mutations of dependencies do not propagate. */
-    if (n->tag == NODE_BIND) return 1;
-    if (n->tag == NODE_METHOD_CALL) {
+    if (VAL_TAG(n) == NODE_BIND) return 1;
+    if (VAL_TAG(n) == NODE_METHOD_CALL) {
         const char *m = n->method_call.method;
         if (m && (strcmp(m, "after_eval") == 0 ||
                   strcmp(m, "before_eval") == 0 ||
                   strcmp(m, "ast_hook") == 0)) {
             Node *obj = n->method_call.obj;
-            if (obj && obj->tag == NODE_FIELD && obj->field.name &&
+            if (obj && VAL_TAG(obj) == NODE_FIELD && obj->field.name &&
                 strcmp(obj->field.name, "runtime") == 0) {
                 Node *inner = obj->field.obj;
-                if (inner && inner->tag == NODE_IDENT && inner->ident.name &&
+                if (inner && VAL_TAG(inner) == NODE_IDENT && inner->ident.name &&
                     strcmp(inner->ident.name, "plugin") == 0)
                     return 1;
             }
         }
     }
     /* recurse into common children */
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_PROGRAM:
         for (int j = 0; j < n->program.stmts.len; j++)
             if (node_uses_plugin_runtime_hook(n->program.stmts.items[j])) return 1;
@@ -208,10 +208,10 @@ static int file_uses_runtime_hooks(const char *path) {
 
 static int program_uses_plugin_runtime_hook(Node *program) {
     if (node_uses_plugin_runtime_hook(program)) return 1;
-    if (!program || program->tag != NODE_PROGRAM) return 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
     for (int j = 0; j < program->program.stmts.len; j++) {
         Node *s = program->program.stmts.items[j];
-        if (s && s->tag == NODE_LOAD && s->load_.path &&
+        if (s && VAL_TAG(s) == NODE_LOAD && s->load_.path &&
             file_uses_runtime_hooks(s->load_.path))
             return 1;
     }
@@ -225,7 +225,7 @@ static void cov_register_nodelist(XSCoverage *cov, NodeList *nl);
 static void cov_register_node(XSCoverage *cov, Node *n) {
     if (!n || !cov) return;
     if (n->span.line > 0) coverage_register_line(cov, n->span.line);
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT: case NODE_LIT_BIGINT: case NODE_LIT_FLOAT: case NODE_LIT_BOOL:
     case NODE_LIT_NULL: case NODE_LIT_CHAR:
     case NODE_IDENT: case NODE_SCOPE:
@@ -691,7 +691,7 @@ static int watch_and_run(const char *filename, int file_arg, int argc, char **ar
 static void ast_dump(Node *n, int depth) {
     if (!n) return;
     for (int i = 0; i < depth; i++) fprintf(stdout, "  ");
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
         case NODE_PROGRAM: fprintf(stdout, "PROGRAM\n"); for (int i = 0; i < n->program.stmts.len; i++) ast_dump(n->program.stmts.items[i], depth+1); break;
         case NODE_FN_DECL: fprintf(stdout, "FN_DECL name=%s\n", n->fn_decl.name); ast_dump(n->fn_decl.body, depth+1); break;
         case NODE_LET: case NODE_VAR: fprintf(stdout, "%s name=%s\n", n->let.mutable ? "VAR" : "LET", n->let.name ? n->let.name : "_"); if (n->let.value) ast_dump(n->let.value, depth+1); break;
@@ -766,7 +766,7 @@ static void ast_dump(Node *n, int depth) {
         case NODE_PAT_CAPTURE: fprintf(stdout, "PAT_CAPTURE name=%s\n", n->pat_capture.name); break;
         case NODE_PAT_STRING_CONCAT: fprintf(stdout, "PAT_STRING_CONCAT prefix=\"%s\"\n", n->pat_str_concat.prefix); break;
         case NODE_PAT_REGEX: fprintf(stdout, "PAT_REGEX pattern=\"%s\"\n", n->pat_regex.pattern); break;
-        default: fprintf(stdout, "NODE_%d\n", n->tag); break;
+        default: fprintf(stdout, "NODE_%d\n", VAL_TAG(n)); break;
     }
 }
 
@@ -1367,10 +1367,10 @@ test_again: ;
 
                 typedef struct { char *names[1024]; int count; } TestList;
                 TestList tl; tl.count = 0;
-                if (prog->tag == NODE_PROGRAM) {
+                if (VAL_TAG(prog) == NODE_PROGRAM) {
                     for (int j = 0; j < prog->program.stmts.len; j++) {
                         Node *s = prog->program.stmts.items[j];
-                        if (s && s->tag == NODE_FN_DECL && s->fn_decl.is_test && s->fn_decl.name) {
+                        if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.is_test && s->fn_decl.name) {
                             if (tl.count < 1024) {
                                 tl.names[tl.count++] = s->fn_decl.name;
                             }
@@ -1396,7 +1396,7 @@ test_again: ;
 
                     char err_buf[512] = {0};
                     Value *fn_val = env_get(interp->globals, fname);
-                    if (!fn_val || fn_val->tag != XS_FUNC) {
+                    if (!fn_val || VAL_TAG(fn_val) != XS_FUNC) {
                         test_failed = 1;
                         err_msg = "function not found";
                     } else {
@@ -1508,10 +1508,10 @@ test_again: ;
                         int has_test_attrs = 0;
                         typedef struct { char *names[1024]; int cnt; } TL2;
                         TL2 tl2; tl2.cnt = 0;
-                        if (prog->tag == NODE_PROGRAM) {
+                        if (VAL_TAG(prog) == NODE_PROGRAM) {
                             for (int j = 0; j < prog->program.stmts.len; j++) {
                                 Node *s = prog->program.stmts.items[j];
-                                if (s && s->tag == NODE_FN_DECL && s->fn_decl.is_test && s->fn_decl.name) {
+                                if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.is_test && s->fn_decl.name) {
                                     has_test_attrs = 1;
                                     if (tl2.cnt < 1024) tl2.names[tl2.cnt++] = s->fn_decl.name;
                                 }
@@ -1534,7 +1534,7 @@ test_again: ;
                                 const char *tf_err = NULL;
 
                                 Value *fn_val = env_get(interp->globals, fname);
-                                if (!fn_val || fn_val->tag != XS_FUNC) {
+                                if (!fn_val || VAL_TAG(fn_val) != XS_FUNC) {
                                     tf_failed = 1;
                                     tf_err = "function not found";
                                 } else {

@@ -74,7 +74,7 @@ static int is_builtin_name(const char *name) {
 
 static void define_pattern_bindings(Node *pat, SymTab *st) {
     if (!pat) return;
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_IDENT:
         if (pat->pat_ident.name && strcmp(pat->pat_ident.name, "_") != 0)
             sym_define(st, pat->pat_ident.name, SYM_LOCAL, NULL, pat, pat->pat_ident.mutable);
@@ -134,11 +134,11 @@ static void define_pattern_bindings(Node *pat, SymTab *st) {
 
 /* pass 1: top-level decls */
 static void collect_toplevel(Node *prog, SymTab *st) {
-    if (!prog || prog->tag != NODE_PROGRAM) return;
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return;
     for (int i = 0; i < prog->program.stmts.len; i++) {
         Node *s = prog->program.stmts.items[i];
         if (!s) continue;
-        switch (s->tag) {
+        switch (VAL_TAG(s)) {
             case NODE_FN_DECL:
                 sym_define(st, s->fn_decl.name ? s->fn_decl.name : "",
                            SYM_FN, NULL, s, 0);
@@ -207,7 +207,7 @@ static void resolve_list(NodeList *nl, SymTab *st, SemaCtx *ctx) {
 static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
     if (!n) return;
     if (ctx->diag && diag_context_error_count(ctx->diag) >= RESOLVE_MAX_ERRORS) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
 
     case NODE_FN_DECL: {
         scope_push(st);
@@ -280,15 +280,15 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
         for (int hi = 0; hi < n->block.stmts.len; hi++) {
             Node *s = n->block.stmts.items[hi];
             if (!s) continue;
-            if (s->tag == NODE_FN_DECL && s->fn_decl.name)
+            if (VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name)
                 sym_define(st, s->fn_decl.name, SYM_FN, NULL, s, 0);
-            else if (s->tag == NODE_CLASS_DECL && s->class_decl.name)
+            else if (VAL_TAG(s) == NODE_CLASS_DECL && s->class_decl.name)
                 sym_define(st, s->class_decl.name, SYM_STRUCT, NULL, s, 0);
-            else if (s->tag == NODE_ACTOR_DECL && s->actor_decl.name)
+            else if (VAL_TAG(s) == NODE_ACTOR_DECL && s->actor_decl.name)
                 sym_define(st, s->actor_decl.name, SYM_STRUCT, NULL, s, 0);
-            else if (s->tag == NODE_STRUCT_DECL && s->struct_decl.name)
+            else if (VAL_TAG(s) == NODE_STRUCT_DECL && s->struct_decl.name)
                 sym_define(st, s->struct_decl.name, SYM_STRUCT, NULL, s, 0);
-            else if (s->tag == NODE_ENUM_DECL && s->enum_decl.name)
+            else if (VAL_TAG(s) == NODE_ENUM_DECL && s->enum_decl.name)
                 sym_define(st, s->enum_decl.name, SYM_ENUM, NULL, s, 0);
         }
         resolve_list(&n->block.stmts, st, ctx);
@@ -301,7 +301,7 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
             Span decl_span = n->span;
             if (unused[i]->decl) {
                 Node *decl = unused[i]->decl;
-                if ((decl->tag == NODE_LET || decl->tag == NODE_VAR || decl->tag == NODE_CONST)
+                if ((VAL_TAG(decl) == NODE_LET || VAL_TAG(decl) == NODE_VAR || VAL_TAG(decl) == NODE_CONST)
                     && decl->let.pattern) {
                     decl_span = decl->let.pattern->span;
                 } else {
@@ -525,7 +525,7 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
     case NODE_LIT_MAP:
         for (int i = 0; i < n->lit_map.keys.len; i++) {
             Node *k = n->lit_map.keys.items[i];
-            if (k && k->tag == NODE_SPREAD) resolve_node(k, st, ctx);
+            if (k && VAL_TAG(k) == NODE_SPREAD) resolve_node(k, st, ctx);
         }
         for (int i = 0; i < n->lit_map.vals.len; i++) {
             if (n->lit_map.vals.items[i])
@@ -535,7 +535,7 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
 
     case NODE_LIT_STRING:
     case NODE_INTERP_STRING:
-        if (n->lit_string.interpolated || n->tag == NODE_INTERP_STRING)
+        if (n->lit_string.interpolated || VAL_TAG(n) == NODE_INTERP_STRING)
             resolve_list(&n->lit_string.parts, st, ctx);
         break;
 

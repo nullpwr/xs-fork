@@ -176,7 +176,7 @@ static void ensure_init(void) {
 
 static int is_container(Value *v) {
     if (!v) return 0;
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_ARRAY:
         case XS_TUPLE:
         case XS_MAP:
@@ -280,7 +280,7 @@ typedef void (*visit_fn)(Value *child, void *ctx);
 
 static void visit_refs(Value *v, visit_fn visitor, void *ctx) {
     if (!v) return;
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
         case XS_ARRAY:
         case XS_TUPLE:
             if (v->arr) {
@@ -560,7 +560,7 @@ Value **gc_get_referrers(Value *obj, int *count_out) {
             /* check if v references obj */
             int found = 0;
             /* inline quick visitor */
-            switch (v->tag) {
+            switch (VAL_TAG(v)) {
                 case XS_ARRAY:
                 case XS_TUPLE:
                     if (v->arr) {
@@ -759,7 +759,7 @@ int gc_collect_gen(int generation) {
        external children get decref'd normally. */
     for (int i = 0; i < garbage_len; i++) {
         Value *v = garbage[i]->value;
-        switch (v->tag) {
+        switch (VAL_TAG(v)) {
             case XS_ARRAY:
             case XS_TUPLE:
                 if (v->arr) {
@@ -857,7 +857,7 @@ int gc_collect_gen(int generation) {
         nodemap_del(v);
 
         /* free container internals then the Value */
-        switch (v->tag) {
+        switch (VAL_TAG(v)) {
             case XS_ARRAY:
             case XS_TUPLE:
                 if (v->arr) {

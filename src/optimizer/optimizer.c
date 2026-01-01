@@ -24,7 +24,7 @@ typedef struct {
 static ConstVal const_val(const Node *n) {
     ConstVal cv = {CV_NONE, 0, 0.0, 0, NULL};
     if (!n) return cv;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:   cv.kind = CV_INT;    cv.ival = n->lit_int.ival; break;
     case NODE_LIT_BIGINT: break;  /* bigint not supported for constant folding */
     case NODE_LIT_FLOAT: cv.kind = CV_FLOAT;  cv.fval = n->lit_float.fval; break;
@@ -68,9 +68,9 @@ static Node *make_string(const char *s, Span span) {
 
 static int is_exit(const Node *n) {
     if (!n) return 0;
-    return n->tag == NODE_RETURN ||
-           n->tag == NODE_BREAK  ||
-           n->tag == NODE_CONTINUE;
+    return VAL_TAG(n) == NODE_RETURN ||
+           VAL_TAG(n) == NODE_BREAK  ||
+           VAL_TAG(n) == NODE_CONTINUE;
 }
 
 static int is_power2(int64_t n) {
@@ -86,8 +86,8 @@ static int log2_int(int64_t n) {
 /* expression hashing for CSE */
 static uint64_t expr_hash(const Node *n) {
     if (!n) return 0;
-    uint64_t h = (uint64_t)n->tag * 2654435761ULL;
-    switch (n->tag) {
+    uint64_t h = (uint64_t)VAL_TAG(n) * 2654435761ULL;
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         h ^= (uint64_t)n->lit_int.ival * 6364136223846793005ULL;
         break;
@@ -146,8 +146,8 @@ static uint64_t expr_hash(const Node *n) {
 static int expr_equal(const Node *a, const Node *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
-    if (a->tag != b->tag) return 0;
-    switch (a->tag) {
+    if (VAL_TAG(a) != VAL_TAG(b)) return 0;
+    switch (VAL_TAG(a)) {
     case NODE_LIT_INT:   return a->lit_int.ival == b->lit_int.ival;
     case NODE_LIT_BIGINT:
         return a->lit_bigint.bigint_str && b->lit_bigint.bigint_str &&
@@ -184,7 +184,7 @@ static int expr_equal(const Node *a, const Node *b) {
 
 static int is_pure(const Node *n) {
     if (!n) return 1;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT: case NODE_LIT_BIGINT: case NODE_LIT_FLOAT: case NODE_LIT_BOOL:
     case NODE_LIT_NULL: case NODE_LIT_STRING: case NODE_LIT_CHAR:
     case NODE_IDENT:
@@ -207,7 +207,7 @@ static int is_pure(const Node *n) {
 Node *opt_constant_fold(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BINOP: {
         node->binop.left  = opt_constant_fold(node->binop.left, count);
         node->binop.right = opt_constant_fold(node->binop.right, count);
@@ -527,7 +527,7 @@ Node *opt_constant_fold(Node *node, int *count) {
 Node *opt_dead_code_elim(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK: {
         for (int i = 0; i < node->block.stmts.len; i++)
             node->block.stmts.items[i] = opt_dead_code_elim(node->block.stmts.items[i], count);
@@ -679,7 +679,7 @@ Node *opt_dead_code_elim(Node *node, int *count) {
 Node *opt_strength_reduce(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BINOP: {
         node->binop.left  = opt_strength_reduce(node->binop.left, count);
         node->binop.right = opt_strength_reduce(node->binop.right, count);
@@ -698,9 +698,9 @@ Node *opt_strength_reduce(Node *node, int *count) {
             Node *mul = node_new(NODE_BINOP, span);
             strcpy(mul->binop.op, "*");
             mul->binop.left = left;
-            Node *dup = node_new(left->tag, left->span);
+            Node *dup = node_new(VAL_TAG(left), left->span);
             *dup = *left;
-            if (left->tag == NODE_IDENT && left->ident.name)
+            if (VAL_TAG(left) == NODE_IDENT && left->ident.name)
                 dup->ident.name = xs_strdup(left->ident.name);
             mul->binop.right = dup;
             node_free(node);
@@ -838,9 +838,9 @@ typedef struct {
 } InlineCandidateList;
 
 static int fn_is_inlineable(const Node *fn) {
-    if (fn->tag != NODE_FN_DECL) return 0;
+    if (VAL_TAG(fn) != NODE_FN_DECL) return 0;
     if (!fn->fn_decl.body) return 0;
-    if (fn->fn_decl.body->tag == NODE_BLOCK) return 0;
+    if (VAL_TAG(fn->fn_decl.body) == NODE_BLOCK) return 0;
     if (fn->fn_decl.params.len > MAX_INLINE_PARAMS) return 0;
     if (fn->fn_decl.n_type_params > 0) return 0;
     return 1;
@@ -852,8 +852,8 @@ static Node *substitute_idents(Node *node,
 
 static Node *node_dup(const Node *n) {
     if (!n) return NULL;
-    Node *d = node_new(n->tag, n->span);
-    switch (n->tag) {
+    Node *d = node_new(VAL_TAG(n), n->span);
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         d->lit_int.ival = n->lit_int.ival;
         break;
@@ -919,7 +919,7 @@ static Node *substitute_idents(Node *node,
                                int nparam) {
     if (!node) return NULL;
 
-    if (node->tag == NODE_IDENT && node->ident.name) {
+    if (VAL_TAG(node) == NODE_IDENT && node->ident.name) {
         for (int i = 0; i < nparam; i++) {
             if (param_names[i] && strcmp(node->ident.name, param_names[i]) == 0) {
                 Node *replacement = node_dup(arg_vals[i]);
@@ -930,7 +930,7 @@ static Node *substitute_idents(Node *node,
         return node;
     }
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BINOP:
         node->binop.left  = substitute_idents(node->binop.left, param_names, arg_vals, nparam);
         node->binop.right = substitute_idents(node->binop.right, param_names, arg_vals, nparam);
@@ -962,9 +962,9 @@ static Node *substitute_idents(Node *node,
 static Node *try_inline_call(Node *call_node,
                              InlineCandidateList *candidates,
                              int *count) {
-    if (call_node->tag != NODE_CALL) return NULL;
+    if (VAL_TAG(call_node) != NODE_CALL) return NULL;
     if (!call_node->call.callee) return NULL;
-    if (call_node->call.callee->tag != NODE_IDENT) return NULL;
+    if (VAL_TAG(call_node->call.callee) != NODE_IDENT) return NULL;
 
     const char *name = call_node->call.callee->ident.name;
     if (!name) return NULL;
@@ -1000,7 +1000,7 @@ static Node *try_inline_call(Node *call_node,
 static Node *inline_walk(Node *node, InlineCandidateList *candidates, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_CALL: {
         node->call.callee = inline_walk(node->call.callee, candidates, count);
         for (int i = 0; i < node->call.args.len; i++)
@@ -1116,7 +1116,7 @@ Node *opt_inline_expand(Node *program, int *count) {
     if (!program) return NULL;
 
     NodeList *stmts = NULL;
-    if (program->tag == NODE_PROGRAM)
+    if (VAL_TAG(program) == NODE_PROGRAM)
         stmts = &program->program.stmts;
     else
         return program; /* nothing to do for non-program nodes */
@@ -1206,7 +1206,7 @@ static const char *cse_map_insert(CSEMap *m, const Node *expr, uint64_t h) {
 Node *opt_cse(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK: {
         for (int i = 0; i < node->block.stmts.len; i++)
             node->block.stmts.items[i] = opt_cse(node->block.stmts.items[i], count);
@@ -1219,21 +1219,21 @@ Node *opt_cse(Node *node, int *count) {
         for (int i = 0; i < node->block.stmts.len; i++) {
             Node *stmt = node->block.stmts.items[i];
             Node *rhs = NULL;
-            if ((stmt->tag == NODE_LET || stmt->tag == NODE_VAR) && stmt->let.value)
+            if ((VAL_TAG(stmt) == NODE_LET || VAL_TAG(stmt) == NODE_VAR) && stmt->let.value)
                 rhs = stmt->let.value;
-            else if (stmt->tag == NODE_CONST && stmt->const_.value)
+            else if (VAL_TAG(stmt) == NODE_CONST && stmt->const_.value)
                 rhs = stmt->const_.value;
-            else if (stmt->tag == NODE_EXPR_STMT)
+            else if (VAL_TAG(stmt) == NODE_EXPR_STMT)
                 rhs = stmt->expr_stmt.expr;
 
-            if (rhs && (rhs->tag == NODE_BINOP || rhs->tag == NODE_UNARY) && is_pure(rhs)) {
-                if (rhs->tag == NODE_BINOP) {
+            if (rhs && (VAL_TAG(rhs) == NODE_BINOP || VAL_TAG(rhs) == NODE_UNARY) && is_pure(rhs)) {
+                if (VAL_TAG(rhs) == NODE_BINOP) {
                     Node *parts[2] = { rhs->binop.left, rhs->binop.right };
                     for (int p = 0; p < 2; p++) {
                         Node *sub = parts[p];
                         if (!sub) continue;
                         if (!is_pure(sub)) continue;
-                        if (sub->tag != NODE_BINOP && sub->tag != NODE_UNARY) continue;
+                        if (VAL_TAG(sub) != NODE_BINOP && VAL_TAG(sub) != NODE_UNARY) continue;
 
                         uint64_t h = expr_hash(sub);
                         const char *existing = cse_map_lookup(&map, sub, h);
@@ -1258,13 +1258,13 @@ Node *opt_cse(Node *node, int *count) {
                 if (existing) {
                     Node *ident = node_new(NODE_IDENT, rhs->span);
                     ident->ident.name = xs_strdup(existing);
-                    if ((stmt->tag == NODE_LET || stmt->tag == NODE_VAR)) {
+                    if ((VAL_TAG(stmt) == NODE_LET || VAL_TAG(stmt) == NODE_VAR)) {
                         node_free(stmt->let.value);
                         stmt->let.value = ident;
-                    } else if (stmt->tag == NODE_CONST) {
+                    } else if (VAL_TAG(stmt) == NODE_CONST) {
                         node_free(stmt->const_.value);
                         stmt->const_.value = ident;
-                    } else if (stmt->tag == NODE_EXPR_STMT) {
+                    } else if (VAL_TAG(stmt) == NODE_EXPR_STMT) {
                         node_free(stmt->expr_stmt.expr);
                         stmt->expr_stmt.expr = ident;
                     }
@@ -1359,7 +1359,7 @@ static int same_expr(const Node *a, const Node *b) {
 Node *opt_algebraic_simplify(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BINOP: {
         node->binop.left  = opt_algebraic_simplify(node->binop.left, count);
         node->binop.right = opt_algebraic_simplify(node->binop.right, count);
@@ -1426,7 +1426,7 @@ Node *opt_algebraic_simplify(Node *node, int *count) {
             if (cv.kind == CV_FLOAT && cv.fval != 0.0) known_nonzero = 1;
             /* Identifiers: we conservatively fold x/x for identifiers too,
              * since division by zero would be a bug anyway. */
-            if (node->binop.left->tag == NODE_IDENT) known_nonzero = 1;
+            if (VAL_TAG(node->binop.left) == NODE_IDENT) known_nonzero = 1;
             if (known_nonzero) {
                 if (count) (*count)++;
                 Node *r2 = make_int(1, span);
@@ -1512,7 +1512,7 @@ Node *opt_algebraic_simplify(Node *node, int *count) {
 
         /* double negation */
         if (strcmp(op, "!") == 0 && node->unary.expr &&
-            node->unary.expr->tag == NODE_UNARY &&
+            VAL_TAG(node->unary.expr) == NODE_UNARY &&
             strcmp(node->unary.expr->unary.op, "!") == 0) {
             if (count) (*count)++;
             Node *inner = node->unary.expr->unary.expr;
@@ -1521,7 +1521,7 @@ Node *opt_algebraic_simplify(Node *node, int *count) {
             return inner;
         }
         if (strcmp(op, "-") == 0 && node->unary.expr &&
-            node->unary.expr->tag == NODE_UNARY &&
+            VAL_TAG(node->unary.expr) == NODE_UNARY &&
             strcmp(node->unary.expr->unary.op, "-") == 0) {
             if (count) (*count)++;
             Node *inner = node->unary.expr->unary.expr;
@@ -1530,7 +1530,7 @@ Node *opt_algebraic_simplify(Node *node, int *count) {
             return inner;
         }
         if (strcmp(op, "~") == 0 && node->unary.expr &&
-            node->unary.expr->tag == NODE_UNARY &&
+            VAL_TAG(node->unary.expr) == NODE_UNARY &&
             strcmp(node->unary.expr->unary.op, "~") == 0) {
             if (count) (*count)++;
             Node *inner = node->unary.expr->unary.expr;
@@ -1716,7 +1716,7 @@ static void cprop_remove(CPropMap *m, const char *name) {
 static Node *cprop_walk(Node *node, CPropMap *env, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_IDENT: {
         if (node->ident.name) {
             Node *val = cprop_lookup(env, node->ident.name);
@@ -1760,7 +1760,7 @@ static Node *cprop_walk(Node *node, CPropMap *env, int *count) {
 
     case NODE_ASSIGN: {
         node->assign.value = cprop_walk(node->assign.value, env, count);
-        if (node->assign.target && node->assign.target->tag == NODE_IDENT &&
+        if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT &&
             node->assign.target->ident.name) {
             cprop_remove(env, node->assign.target->ident.name);
         }
@@ -1908,9 +1908,9 @@ static int namelist_contains(const NameList *nl, const char *name) {
 
 static void collect_modified_names(const Node *n, NameList *names) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_ASSIGN:
-        if (n->assign.target && n->assign.target->tag == NODE_IDENT &&
+        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_IDENT &&
             n->assign.target->ident.name)
             namelist_push(names, n->assign.target->ident.name);
         collect_modified_names(n->assign.value, names);
@@ -1942,7 +1942,7 @@ static void collect_modified_names(const Node *n, NameList *names) {
         collect_modified_names(n->while_loop.body, names);
         break;
     case NODE_FOR:
-        if (n->for_loop.pattern && n->for_loop.pattern->tag == NODE_PAT_IDENT) {
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT) {
             if (n->for_loop.pattern->pat_ident.name)
                 namelist_push(names, n->for_loop.pattern->pat_ident.name);
         }
@@ -1976,7 +1976,7 @@ static void collect_modified_names(const Node *n, NameList *names) {
 
 static int references_modified(const Node *n, const NameList *modified) {
     if (!n) return 0;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_IDENT:
         return n->ident.name && namelist_contains(modified, n->ident.name);
     case NODE_BINOP:
@@ -2002,11 +2002,11 @@ static int is_loop_invariant(const Node *expr, const NameList *modified) {
     if (!expr) return 0;
     if (!is_pure(expr)) return 0;
     if (references_modified(expr, modified)) return 0;
-    if (expr->tag == NODE_LIT_INT || expr->tag == NODE_LIT_BIGINT ||
-        expr->tag == NODE_LIT_FLOAT ||
-        expr->tag == NODE_LIT_BOOL || expr->tag == NODE_LIT_NULL ||
-        expr->tag == NODE_LIT_STRING || expr->tag == NODE_LIT_CHAR ||
-        expr->tag == NODE_IDENT)
+    if (VAL_TAG(expr) == NODE_LIT_INT || VAL_TAG(expr) == NODE_LIT_BIGINT ||
+        VAL_TAG(expr) == NODE_LIT_FLOAT ||
+        VAL_TAG(expr) == NODE_LIT_BOOL || VAL_TAG(expr) == NODE_LIT_NULL ||
+        VAL_TAG(expr) == NODE_LIT_STRING || VAL_TAG(expr) == NODE_LIT_CHAR ||
+        VAL_TAG(expr) == NODE_IDENT)
         return 0;
     return 1;
 }
@@ -2014,11 +2014,11 @@ static int is_loop_invariant(const Node *expr, const NameList *modified) {
 static NodeList hoist_from_block(Node *block, const NameList *modified,
                                  int *count, int *hoist_counter) {
     NodeList hoisted = nodelist_new();
-    if (!block || block->tag != NODE_BLOCK) return hoisted;
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return hoisted;
 
     for (int i = 0; i < block->block.stmts.len; i++) {
         Node *stmt = block->block.stmts.items[i];
-        if ((stmt->tag == NODE_LET || stmt->tag == NODE_VAR) &&
+        if ((VAL_TAG(stmt) == NODE_LET || VAL_TAG(stmt) == NODE_VAR) &&
             stmt->let.value && !stmt->let.mutable) {
             Node *rhs = stmt->let.value;
             if (is_loop_invariant(rhs, modified)) {
@@ -2066,7 +2066,7 @@ static Node *wrap_with_hoisted(Node *loop_node, NodeList hoisted) {
 static Node *licm_walk(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_WHILE: {
         /* Recurse into body first */
         node->while_loop.body = licm_walk(node->while_loop.body, count);
@@ -2091,7 +2091,7 @@ static Node *licm_walk(Node *node, int *count) {
         namelist_init(&modified);
         collect_modified_names(node->for_loop.body, &modified);
         /* The loop variable is also modified each iteration */
-        if (node->for_loop.pattern && node->for_loop.pattern->tag == NODE_PAT_IDENT) {
+        if (node->for_loop.pattern && VAL_TAG(node->for_loop.pattern) == NODE_PAT_IDENT) {
             /* Access pattern name - check the struct */
             const Node *pat = node->for_loop.pattern;
             if (pat->pat_ident.name)
@@ -2183,7 +2183,7 @@ Node *opt_loop_invariant_motion(Node *node, int *count) {
  * excluding the binding site itself. */
 static int count_ident_refs(const Node *n, const char *name) {
     if (!n) return 0;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_IDENT:
         return (n->ident.name && strcmp(n->ident.name, name) == 0) ? 1 : 0;
     case NODE_BINOP:
@@ -2282,7 +2282,7 @@ static int refs_in_siblings(const NodeList *stmts, int start, const char *name,
 Node *opt_unused_var_elim(Node *node, int *count) {
     if (!node) return NULL;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK: {
         /* First recurse into all children */
         for (int i = 0; i < node->block.stmts.len; i++)
@@ -2295,7 +2295,7 @@ Node *opt_unused_var_elim(Node *node, int *count) {
             Node *stmt = node->block.stmts.items[i];
             int can_remove = 0;
 
-            if (stmt->tag == NODE_LET && stmt->let.name && !stmt->let.mutable) {
+            if (VAL_TAG(stmt) == NODE_LET && stmt->let.name && !stmt->let.mutable) {
                 /* Check if the RHS is pure (no side effects) */
                 if (is_pure(stmt->let.value)) {
                     /* Check if the name is referenced anywhere in subsequent stmts
@@ -2330,7 +2330,7 @@ Node *opt_unused_var_elim(Node *node, int *count) {
             Node *stmt = node->program.stmts.items[i];
             int can_remove = 0;
 
-            if (stmt->tag == NODE_LET && stmt->let.name && !stmt->let.mutable) {
+            if (VAL_TAG(stmt) == NODE_LET && stmt->let.name && !stmt->let.mutable) {
                 if (is_pure(stmt->let.value)) {
                     /* Check remaining siblings */
                     int found = 0;
@@ -2421,10 +2421,10 @@ Node *opt_unused_var_elim(Node *node, int *count) {
 
 static int is_tail_position(const Node *n, const char *fn_name) {
     if (!n || !fn_name) return 0;
-    if (n->tag == NODE_RETURN && n->ret.value &&
-        n->ret.value->tag == NODE_CALL &&
+    if (VAL_TAG(n) == NODE_RETURN && n->ret.value &&
+        VAL_TAG(n->ret.value) == NODE_CALL &&
         n->ret.value->call.callee &&
-        n->ret.value->call.callee->tag == NODE_IDENT &&
+        VAL_TAG(n->ret.value->call.callee) == NODE_IDENT &&
         n->ret.value->call.callee->ident.name &&
         strcmp(n->ret.value->call.callee->ident.name, fn_name) == 0) {
         return 1;
@@ -2434,7 +2434,7 @@ static int is_tail_position(const Node *n, const char *fn_name) {
 
 static Node *tail_call_walk(Node *node, const char *fn_name, int *count) {
     if (!node) return NULL;
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK:
         for (int i = 0; i < node->block.stmts.len; i++) {
             Node *stmt = node->block.stmts.items[i];
@@ -2471,7 +2471,7 @@ Node *opt_tail_call_detect(Node *node, int *count) {
 
 static Node *const_fn_walk(Node *node, int *count) {
     if (!node) return NULL;
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK:
         for (int i = 0; i < node->block.stmts.len; i++)
             node->block.stmts.items[i] = const_fn_walk(node->block.stmts.items[i], count);
@@ -2497,7 +2497,7 @@ Node *opt_const_fn_propagate(Node *program, int *count) {
 
 Node *opt_loop_unroll(Node *node, int *count) {
     if (!node) return NULL;
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK:
         for (int i = 0; i < node->block.stmts.len; i++)
             node->block.stmts.items[i] = opt_loop_unroll(node->block.stmts.items[i], count);
@@ -2518,7 +2518,7 @@ Node *opt_loop_unroll(Node *node, int *count) {
 /* SSA-based optimization pipeline for a single function */
 
 void opt_ssa_pipeline(Node *fn_decl, OptStats *stats) {
-    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return;
+    if (!fn_decl || VAL_TAG(fn_decl) != NODE_FN_DECL) return;
     if (!fn_decl->fn_decl.body) return;
 
     /* collect parameter names */
@@ -2581,10 +2581,10 @@ Node *optimize(Node *program, OptStats *stats) {
     program = opt_dead_code_elim(program, &s.dead_code_removed);
 
     /* SSA-based passes on each function */
-    if (program && program->tag == NODE_PROGRAM) {
+    if (program && VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *stmt = program->program.stmts.items[i];
-            if (stmt && stmt->tag == NODE_FN_DECL)
+            if (stmt && VAL_TAG(stmt) == NODE_FN_DECL)
                 opt_ssa_pipeline(stmt, &s);
         }
     }

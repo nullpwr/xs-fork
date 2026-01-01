@@ -142,7 +142,7 @@ static LspDocument *doc_open(const char *uri, const char *text) {
 
 static void collect_idents(LspDocument *doc, Node *n) {
     if (!n) return;
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_IDENT:
         doc_add_ident(doc, n->ident.name);
         break;
@@ -601,7 +601,7 @@ static const char *node_tag_name(NodeTag tag) {
 static Node *find_decl_in_ast(Node *n, const char *name) {
     if (!n || !name) return NULL;
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_FN_DECL:
         if (n->fn_decl.name && strcmp(n->fn_decl.name, name) == 0) return n;
             return find_decl_in_ast(n->fn_decl.body, name);
@@ -694,7 +694,7 @@ typedef struct {
 static int find_refs_in_ast(Node *n, const char *name, LspRef *refs, int max_refs, int count) {
     if (!n || count >= max_refs) return count;
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_IDENT:
         if (n->ident.name && strcmp(n->ident.name, name) == 0) {
             refs[count].line = n->span.line;
@@ -974,9 +974,9 @@ static void build_hover_text(Node *decl, const char *name, char *out, size_t out
         return;
     }
 
-    const char *kind = node_tag_name(decl->tag);
+    const char *kind = node_tag_name(VAL_TAG(decl));
 
-    switch (decl->tag) {
+    switch (VAL_TAG(decl)) {
     case NODE_FN_DECL: {
         int off = 0;
         off += snprintf(out + off, outsz - (size_t)off, "fn %s(", name);
@@ -1292,7 +1292,7 @@ static void lsp_handle_completions(int id, const char *json) {
                 if (doc->ast) {
                     Node *decl = find_decl_in_ast(doc->ast, doc->idents[i]);
                     if (decl) {
-                        switch (decl->tag) {
+                        switch (VAL_TAG(decl)) {
                         case NODE_FN_DECL: kind = 3; break;
                         case NODE_TAG_DECL: kind = 3; break;     /* Function */
                         case NODE_ADAPT_FN: kind = 3; break;     /* Function */
@@ -1404,7 +1404,7 @@ static void lsp_handle_signature_help(int id, const char *json) {
     char sig_label[1024];
     char params_json[2048];
 
-    if (decl && decl->tag == NODE_FN_DECL) {
+    if (decl && VAL_TAG(decl) == NODE_FN_DECL) {
         int soff = 0;
         soff += snprintf(sig_label + soff, sizeof(sig_label) - (size_t)soff, "fn %s(", fn_name);
         int poff = 0;
@@ -1554,7 +1554,7 @@ static void collect_symbols_json(Node *n, char *buf, size_t bufsz, int *off, int
     if (!n) return;
     (void)uri;
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_PROGRAM:
         for (int i = 0; i < n->program.stmts.len; i++)
             collect_symbols_json(n->program.stmts.items[i], buf, bufsz, off, first, uri);

@@ -114,7 +114,7 @@ static void *thread_entry(void *arg_) {
 }
 
 Value *xs_spawn_thread(Interp *parent, Value *closure) {
-    if (!closure || (closure->tag != XS_FUNC && closure->tag != XS_NATIVE)) {
+    if (!closure || (VAL_TAG(closure) != XS_FUNC && VAL_TAG(closure) != XS_NATIVE)) {
         return value_incref(XS_NULL_VAL);
     }
     tasks_mu_init_once();
@@ -212,18 +212,18 @@ int xs_chan_alloc(void) {
 }
 
 static ChanState *chan_state(Value *ch) {
-    if (!ch || (ch->tag != XS_MAP && ch->tag != XS_MODULE) || !ch->map) return NULL;
+    if (!ch || (VAL_TAG(ch) != XS_MAP && VAL_TAG(ch) != XS_MODULE) || !ch->map) return NULL;
     Value *p = map_get(ch->map, "_chan_id");
-    if (!p || p->tag != XS_INT) return NULL;
-    int id = (int)p->i;
+    if (!p || VAL_TAG(p) != XS_INT) return NULL;
+    int id = (int)VAL_INT(p);
     if (id < 0 || id >= g_n_chans) return NULL;
     return &g_chans[id];
 }
 
 static XSArray *chan_buf(Value *ch) {
-    if (!ch || (ch->tag != XS_MAP && ch->tag != XS_MODULE) || !ch->map) return NULL;
+    if (!ch || (VAL_TAG(ch) != XS_MAP && VAL_TAG(ch) != XS_MODULE) || !ch->map) return NULL;
     Value *b = map_get(ch->map, "_buf");
-    if (!b || b->tag != XS_ARRAY) return NULL;
+    if (!b || VAL_TAG(b) != XS_ARRAY) return NULL;
     return b->arr;
 }
 

@@ -125,7 +125,7 @@ Value *effect_perform(Interp *interp, const char *effect, const char *op,
     for (int j = 0; j < frame->params.len && j < argc; j++) {
         Param *pm = &frame->params.items[j];
         const char *pname = pm->name ? pm->name :
-            (pm->pattern && pm->pattern->tag == NODE_PAT_IDENT ?
+            (pm->pattern && VAL_TAG(pm->pattern) == NODE_PAT_IDENT ?
              pm->pattern->pat_ident.name : NULL);
         if (pname)
             env_define(handler_call_env, pname, args[j], 1);

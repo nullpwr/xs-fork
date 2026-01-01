@@ -692,7 +692,7 @@ static void emit_defers(WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
 
 static void compile_block(Node *block, WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
     if (!block) return;
-    if (block->tag == NODE_BLOCK) {
+    if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++)
             compile_stmt(block->block.stmts.items[i], code, locals, ctx);
         /* Handle trailing expression (block as expression) */
@@ -708,7 +708,7 @@ static void compile_block(Node *block, WasmBuf *code, LocalMap *locals, Compiler
 /* Compile a block as an expression (returns a value pointer) */
 static void compile_block_expr(Node *block, WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
     if (!block) { emit_null(code); return; }
-    if (block->tag == NODE_BLOCK) {
+    if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++)
             compile_stmt(block->block.stmts.items[i], code, locals, ctx);
         if (block->block.expr)
@@ -730,7 +730,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         return;
     }
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
 
     /* ---- Literals ---- */
 
@@ -811,7 +811,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             break;
         }
         /* compile first part */
-        if (parts->items[0]->tag == NODE_LIT_STRING) {
+        if (VAL_TAG(parts->items[0]) == NODE_LIT_STRING) {
             const char *s = parts->items[0]->lit_string.sval ? parts->items[0]->lit_string.sval : "";
             int slen = 0;
             int off = strtab_add_with_len(ctx->strtab, s, &slen);
@@ -822,7 +822,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         }
         /* concatenate remaining parts */
         for (int i = 1; i < parts->len; i++) {
-            if (parts->items[i]->tag == NODE_LIT_STRING) {
+            if (VAL_TAG(parts->items[i]) == NODE_LIT_STRING) {
                 const char *s = parts->items[i]->lit_string.sval ? parts->items[i]->lit_string.sval : "";
                 int slen = 0;
                 int off = strtab_add_with_len(ctx->strtab, s, &slen);
@@ -1033,7 +1033,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Assignments (as expression, returns the assigned value) ---- */
 
     case NODE_ASSIGN: {
-        if (node->assign.target && node->assign.target->tag == NODE_IDENT) {
+        if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT) {
             int idx = locals_ensure(locals, node->assign.target->ident.name);
             const char *op = node->assign.op;
             if (strcmp(op, "=") == 0) {
@@ -1066,7 +1066,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 compile_expr(node->assign.value, code, locals, ctx);
             }
             emit_local_tee(code, idx);
-        } else if (node->assign.target && node->assign.target->tag == NODE_INDEX) {
+        } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_INDEX) {
             /* array/map index assignment: obj[idx] = val */
             compile_expr(node->assign.target->index.obj, code, locals, ctx);
             compile_expr(node->assign.target->index.index, code, locals, ctx);
@@ -1074,7 +1074,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             emit_call(code, RT_VAL_INDEX_SET);
             /* return the value */
             compile_expr(node->assign.value, code, locals, ctx);
-        } else if (node->assign.target && node->assign.target->tag == NODE_FIELD) {
+        } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_FIELD) {
             /* field assignment: obj.name = val */
             compile_expr(node->assign.target->field.obj, code, locals, ctx);
             const char *fname = node->assign.target->field.name;
@@ -1097,7 +1097,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         int nargs = node->call.args.len;
 
         /* Built-in functions */
-        if (callee && callee->tag == NODE_IDENT) {
+        if (callee && VAL_TAG(callee) == NODE_IDENT) {
             const char *name = callee->ident.name;
 
             /* println(args...) */
@@ -1819,11 +1819,11 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             Node *iter = node->list_comp.clause_iters.items[c];
             Node *pat = node->list_comp.clause_pats.items[c];
             const char *vname = "__lc_elem";
-            if (pat && pat->tag == NODE_PAT_IDENT) vname = pat->pat_ident.name;
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT) vname = pat->pat_ident.name;
             int elem_idx = locals_ensure(locals, vname);
 
             /* Check if iterator is a range */
-            if (iter && iter->tag == NODE_RANGE) {
+            if (iter && VAL_TAG(iter) == NODE_RANGE) {
                 clause_is_range[c] = 1;
                 int i_idx = locals_add(locals, "__lc_ri");
                 int end_idx = locals_add(locals, "__lc_re");
@@ -1939,7 +1939,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             Node *iter = node->map_comp.clause_iters.items[0];
             Node *pat = node->map_comp.clause_pats.items[0];
             const char *vname = "__mc_elem";
-            if (pat && pat->tag == NODE_PAT_IDENT) vname = pat->pat_ident.name;
+            if (pat && VAL_TAG(pat) == NODE_PAT_IDENT) vname = pat->pat_ident.name;
             int elem_idx = locals_ensure(locals, vname);
             int arr_src = locals_add(locals, "__mc_src");
             int i_idx = locals_add(locals, "__mc_i");
@@ -2113,7 +2113,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         emit_global_set(code, GLOBAL_ERR_FLAG);
         if (node->try_.catch_arms.len > 0) {
             MatchArm *arm = &node->try_.catch_arms.items[0];
-            if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                 int eidx = locals_ensure(locals, arm->pattern->pat_ident.name);
                 emit_global_get(code, GLOBAL_ERR_VAL);
                 emit_local_set(code, eidx);
@@ -2322,7 +2322,7 @@ static void compile_pattern_cond(Node *pat, int subject_local, WasmBuf *code,
         return;
     }
 
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_WILD:
         emit_i32(code, 1);
         break;
@@ -2529,7 +2529,7 @@ static void compile_pattern_bindings(Node *pat, int subject_local, WasmBuf *code
                                       LocalMap *locals, CompilerCtx *ctx) {
     if (!pat) return;
 
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_IDENT: {
         int idx = locals_ensure(locals, pat->pat_ident.name);
         emit_local_get(code, subject_local);
@@ -2628,7 +2628,7 @@ static void compile_pattern_bindings(Node *pat, int subject_local, WasmBuf *code
 static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
     if (!node) return;
 
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
 
     /* ---- Variable declarations ---- */
 
@@ -2741,11 +2741,11 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         int saved_break = ctx->break_depth;
         int saved_continue = ctx->continue_depth;
         const char *var_name = "__for_elem";
-        if (node->for_loop.pattern && node->for_loop.pattern->tag == NODE_PAT_IDENT)
+        if (node->for_loop.pattern && VAL_TAG(node->for_loop.pattern) == NODE_PAT_IDENT)
             var_name = node->for_loop.pattern->pat_ident.name;
 
         /* Check if iterator is a range */
-        if (node->for_loop.iter && node->for_loop.iter->tag == NODE_RANGE) {
+        if (node->for_loop.iter && VAL_TAG(node->for_loop.iter) == NODE_RANGE) {
             Node *range = node->for_loop.iter;
             int idx = locals_ensure(locals, var_name);
             int end_idx = locals_add(locals, "__for_end");
@@ -2843,7 +2843,7 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             emit_local_set(code, elem_idx);
 
             /* If pattern is a destructuring pattern, bind it */
-            if (node->for_loop.pattern && node->for_loop.pattern->tag != NODE_PAT_IDENT) {
+            if (node->for_loop.pattern && VAL_TAG(node->for_loop.pattern) != NODE_PAT_IDENT) {
                 compile_pattern_bindings(node->for_loop.pattern, elem_idx, code, locals, ctx);
             }
 
@@ -2982,7 +2982,7 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             emit_global_set(code, GLOBAL_ERR_FLAG);
             if (node->try_.catch_arms.len > 0) {
                 MatchArm *arm = &node->try_.catch_arms.items[0];
-                if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT) {
+                if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
                     int eidx = locals_ensure(locals, arm->pattern->pat_ident.name);
                     emit_global_get(code, GLOBAL_ERR_VAL);
                     emit_local_set(code, eidx);
@@ -3048,7 +3048,7 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         /* Compile class methods as standalone functions */
         for (int i = 0; i < node->class_decl.members.len; i++) {
             Node *m = node->class_decl.members.items[i];
-            if (m && m->tag == NODE_FN_DECL) {
+            if (m && VAL_TAG(m) == NODE_FN_DECL) {
                 /* These should already be in the function table */
             }
         }
@@ -4795,7 +4795,7 @@ static int collect_nested_list(NodeList *list, FuncInfo *out, int max, FuncMap *
 static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
                               char **out, int *n, int max) {
     if (!node || *n >= max) return;
-    if (node->tag == NODE_IDENT) {
+    if (VAL_TAG(node) == NODE_IDENT) {
         const char *name = node->ident.name;
         if (!name) return;
         /* Skip if it's a parameter */
@@ -4815,7 +4815,7 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
         return;
     }
     /* Recurse into children */
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BINOP:
         collect_free_vars(node->binop.left, params, funcs, out, n, max);
         collect_free_vars(node->binop.right, params, funcs, out, n, max);
@@ -4858,7 +4858,7 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
 static int collect_nested(Node *node, FuncInfo *out, int max, FuncMap *funcs, int count) {
     if (!node || count >= max) return count;
 
-    if (node->tag == NODE_LAMBDA) {
+    if (VAL_TAG(node) == NODE_LAMBDA) {
         /* Assign a synthetic name */
         char lname[64];
         snprintf(lname, sizeof(lname), "__lambda_%d", count);
@@ -4882,7 +4882,7 @@ static int collect_nested(Node *node, FuncInfo *out, int max, FuncMap *funcs, in
     }
 
     /* Scan children based on node type */
-    switch (node->tag) {
+    switch (VAL_TAG(node)) {
     case NODE_BLOCK:
         count = collect_nested_list(&node->block.stmts, out, max, funcs, count);
         if (node->block.expr) count = collect_nested(node->block.expr, out, max, funcs, count);
@@ -4942,22 +4942,22 @@ static int collect_nested(Node *node, FuncInfo *out, int max, FuncMap *funcs, in
 }
 
 static int collect_functions(Node *program, FuncInfo *out, int max, FuncMap *funcs) {
-    if (!program || program->tag != NODE_PROGRAM) return 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
     int count = 0;
     NodeList *stmts = &program->program.stmts;
     for (int i = 0; i < stmts->len && count < max; i++) {
         Node *s = stmts->items[i];
-        if (s && s->tag == NODE_FN_DECL && s->fn_decl.name) {
+        if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name) {
             funcs_add(funcs, s->fn_decl.name);
             out[count].node = s;
             out[count].n_params = s->fn_decl.params.len;
             count++;
         }
         /* Also collect methods from impl blocks */
-        if (s && s->tag == NODE_IMPL_DECL) {
+        if (s && VAL_TAG(s) == NODE_IMPL_DECL) {
             for (int j = 0; j < s->impl_decl.members.len && count < max; j++) {
                 Node *m = s->impl_decl.members.items[j];
-                if (m && m->tag == NODE_FN_DECL && m->fn_decl.name) {
+                if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.name) {
                     funcs_add(funcs, m->fn_decl.name);
                     out[count].node = m;
                     out[count].n_params = m->fn_decl.params.len;
@@ -4966,10 +4966,10 @@ static int collect_functions(Node *program, FuncInfo *out, int max, FuncMap *fun
             }
         }
         /* Methods from class declarations */
-        if (s && s->tag == NODE_CLASS_DECL) {
+        if (s && VAL_TAG(s) == NODE_CLASS_DECL) {
             for (int j = 0; j < s->class_decl.members.len && count < max; j++) {
                 Node *m = s->class_decl.members.items[j];
-                if (m && m->tag == NODE_FN_DECL && m->fn_decl.name) {
+                if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.name) {
                     funcs_add(funcs, m->fn_decl.name);
                     out[count].node = m;
                     out[count].n_params = m->fn_decl.params.len;
@@ -5108,15 +5108,15 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     enum_layouts_init(&enum_layouts);
 
     /* Pre-scan: collect struct and enum layouts */
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         NodeList *stmts = &program->program.stmts;
         for (int i = 0; i < stmts->len; i++) {
             Node *s = stmts->items[i];
-            if (s && s->tag == NODE_STRUCT_DECL && s->struct_decl.name) {
+            if (s && VAL_TAG(s) == NODE_STRUCT_DECL && s->struct_decl.name) {
                 struct_layouts_add(&struct_layouts, s->struct_decl.name,
                                    &s->struct_decl.fields, &strtab);
             }
-            if (s && s->tag == NODE_ENUM_DECL && s->enum_decl.name) {
+            if (s && VAL_TAG(s) == NODE_ENUM_DECL && s->enum_decl.name) {
                 enum_layouts_add(&enum_layouts, s->enum_decl.name,
                                  &s->enum_decl.variants);
             }
@@ -5165,14 +5165,14 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         ctx.cur_fn_idx = i;
 
         /* Add parameters - for closures, add __env as first param */
-        if (fn->tag == NODE_LAMBDA && fn_infos[i].n_captures > 0) {
+        if (VAL_TAG(fn) == NODE_LAMBDA && fn_infos[i].n_captures > 0) {
             locals_add(&locals, "__env");
         }
 
         /* Add parameters */
         ParamList *params;
         Node *fn_body;
-        if (fn->tag == NODE_LAMBDA) {
+        if (VAL_TAG(fn) == NODE_LAMBDA) {
             params = &fn->lambda.params;
             fn_body = fn->lambda.body;
         } else {
@@ -5187,7 +5187,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
 
         /* Compile body */
         if (fn_body) {
-            if (fn_body->tag == NODE_BLOCK) {
+            if (VAL_TAG(fn_body) == NODE_BLOCK) {
                 NodeList *stmts = &fn_body->block.stmts;
                 for (int si = 0; si < stmts->len; si++)
                     compile_stmt(stmts->items[si], &body, &locals, &ctx);
@@ -5235,13 +5235,13 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         ctx.fn_infos = fn_infos;
         ctx.cur_fn_idx = -1;
 
-        if (program->tag == NODE_PROGRAM) {
+        if (VAL_TAG(program) == NODE_PROGRAM) {
             NodeList *stmts = &program->program.stmts;
             for (int i = 0; i < stmts->len; i++) {
                 Node *s = stmts->items[i];
-                if (s && s->tag != NODE_FN_DECL && s->tag != NODE_STRUCT_DECL &&
-                    s->tag != NODE_ENUM_DECL && s->tag != NODE_CLASS_DECL &&
-                    s->tag != NODE_IMPL_DECL && s->tag != NODE_TRAIT_DECL) {
+                if (s && VAL_TAG(s) != NODE_FN_DECL && VAL_TAG(s) != NODE_STRUCT_DECL &&
+                    VAL_TAG(s) != NODE_ENUM_DECL && VAL_TAG(s) != NODE_CLASS_DECL &&
+                    VAL_TAG(s) != NODE_IMPL_DECL && VAL_TAG(s) != NODE_TRAIT_DECL) {
                     compile_stmt(s, &body, &locals, &ctx);
                 }
             }

@@ -95,10 +95,10 @@ static Value *vm_len(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
     Value *v = args[0];
-    if (v->tag == XS_ARRAY || v->tag == XS_TUPLE) return xs_int(v->arr->len);
-    if (v->tag == XS_MAP)   return xs_int(v->map->len);
-    if (v->tag == XS_STR)   return xs_int((int64_t)strlen(v->s));
-    if (v->tag == XS_RANGE && v->range) {
+    if (VAL_TAG(v) == XS_ARRAY || VAL_TAG(v) == XS_TUPLE) return xs_int(v->arr->len);
+    if (VAL_TAG(v) == XS_MAP)   return xs_int(v->map->len);
+    if (VAL_TAG(v) == XS_STR)   return xs_int((int64_t)strlen(v->s));
+    if (VAL_TAG(v) == XS_RANGE && v->range) {
         int64_t n = v->range->end - v->range->start + (v->range->inclusive ? 1 : 0);
         return xs_int(n < 0 ? 0 : n);
     }
@@ -118,9 +118,9 @@ static Value *vm_int_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
     Value *v = args[0];
-    if (v->tag == XS_INT)   return xs_int(v->i);
-    if (v->tag == XS_FLOAT) return xs_int((int64_t)v->f);
-    if (v->tag == XS_STR)   return xs_int(atoll(v->s));
+    if (VAL_TAG(v) == XS_INT)   return xs_int(VAL_INT(v));
+    if (VAL_TAG(v) == XS_FLOAT) return xs_int((int64_t)v->f);
+    if (VAL_TAG(v) == XS_STR)   return xs_int(atoll(v->s));
     return xs_int(0);
 }
 
@@ -128,9 +128,9 @@ static Value *vm_float_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_float(0.0);
     Value *v = args[0];
-    if (v->tag == XS_INT)   return xs_float((double)v->i);
-    if (v->tag == XS_FLOAT) return xs_float(v->f);
-    if (v->tag == XS_STR)   return xs_float(atof(v->s));
+    if (VAL_TAG(v) == XS_INT)   return xs_float((double)VAL_INT(v));
+    if (VAL_TAG(v) == XS_FLOAT) return xs_float(v->f);
+    if (VAL_TAG(v) == XS_STR)   return xs_float(atof(v->s));
     return xs_float(0.0);
 }
 
@@ -147,7 +147,7 @@ static Value *vm_type(Interp *interp, Value **args, int argc) {
         "fn", /* overload */
         "fn", /* closure */
     };
-    int tag = (int)args[0]->tag;
+    int tag = (int)VAL_TAG(args[0]);
     return xs_str(tag >= 0 && tag < (int)(sizeof names/sizeof *names) ? names[tag] : "?");
 }
 
@@ -155,10 +155,10 @@ static Value *vm_range(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_array_new();
     int64_t start = 0, end = 0, step = 1;
-    if (argc == 1) { end = args[0]->tag==XS_INT ? args[0]->i : 0; }
-    else { start = args[0]->tag==XS_INT ? args[0]->i : 0;
-           end = args[1]->tag==XS_INT ? args[1]->i : 0; }
-    if (argc >= 3 && args[2]->tag==XS_INT) step = args[2]->i;
+    if (argc == 1) { end = VAL_TAG(args[0])==XS_INT ? VAL_INT(args[0]) : 0; }
+    else { start = VAL_TAG(args[0])==XS_INT ? VAL_INT(args[0]) : 0;
+           end = VAL_TAG(args[1])==XS_INT ? VAL_INT(args[1]) : 0; }
+    if (argc >= 3 && VAL_TAG(args[2])==XS_INT) step = VAL_INT(args[2]);
     if (step == 0) {
         fprintf(stderr, "range: step cannot be zero\n");
         return xs_range(0, 0, 0);
@@ -169,8 +169,8 @@ static Value *vm_range(Interp *interp, Value **args, int argc) {
 static Value *vm_abs(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
-    if (args[0]->tag==XS_INT) return xs_int(args[0]->i < 0 ? -args[0]->i : args[0]->i);
-    if (args[0]->tag==XS_FLOAT) return xs_float(fabs(args[0]->f));
+    if (VAL_TAG(args[0])==XS_INT) return xs_int(VAL_INT(args[0]) < 0 ? -VAL_INT(args[0]) : VAL_INT(args[0]));
+    if (VAL_TAG(args[0])==XS_FLOAT) return xs_float(fabs(args[0]->f));
     return xs_int(0);
 }
 
@@ -189,43 +189,43 @@ static Value *vm_max(Interp *interp, Value **args, int argc) {
 static Value *vm_sqrt(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_float(0.0);
-    double v = args[0]->tag==XS_INT ? (double)args[0]->i : args[0]->f;
+    double v = VAL_TAG(args[0])==XS_INT ? (double)VAL_INT(args[0]) : args[0]->f;
     return xs_float(sqrt(v));
 }
 
 static Value *vm_pow(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_float(0.0);
-    double a = args[0]->tag==XS_INT ? (double)args[0]->i : args[0]->f;
-    double b = args[1]->tag==XS_INT ? (double)args[1]->i : args[1]->f;
+    double a = VAL_TAG(args[0])==XS_INT ? (double)VAL_INT(args[0]) : args[0]->f;
+    double b = VAL_TAG(args[1])==XS_INT ? (double)VAL_INT(args[1]) : args[1]->f;
     return xs_float(pow(a, b));
 }
 
 static Value *vm_floor(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
-    double v = args[0]->tag==XS_INT ? (double)args[0]->i : args[0]->f;
+    double v = VAL_TAG(args[0])==XS_INT ? (double)VAL_INT(args[0]) : args[0]->f;
     return xs_int((int64_t)floor(v));
 }
 
 static Value *vm_ceil(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
-    double v = args[0]->tag==XS_INT ? (double)args[0]->i : args[0]->f;
+    double v = VAL_TAG(args[0])==XS_INT ? (double)VAL_INT(args[0]) : args[0]->f;
     return xs_int((int64_t)ceil(v));
 }
 
 static Value *vm_round(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
-    double v = args[0]->tag==XS_INT ? (double)args[0]->i : args[0]->f;
+    double v = VAL_TAG(args[0])==XS_INT ? (double)VAL_INT(args[0]) : args[0]->f;
     return xs_int((int64_t)round(v));
 }
 
 static Value *vm_assert(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1 || !value_truthy(args[0])) {
-        const char *msg = (argc >= 2 && args[1]->tag == XS_STR) ? args[1]->s : "assertion failed";
+        const char *msg = (argc >= 2 && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : "assertion failed";
         fprintf(stderr, "xs: %s\n", msg);
         exit(1);
     }
@@ -241,7 +241,7 @@ static Value *vm_assert_eq(Interp *interp, Value **args, int argc) {
     if (!value_equal(args[0], args[1])) {
         char *a = value_repr(args[0]);
         char *b = value_repr(args[1]);
-        const char *msg = (argc >= 3 && args[2]->tag == XS_STR) ? args[2]->s : "";
+        const char *msg = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
         fprintf(stderr, "xs: assertion failed: assert_eq(%s, %s)%s%s\n",
                 a, b, msg[0] ? ": " : "", msg);
         free(a); free(b);
@@ -252,14 +252,14 @@ static Value *vm_assert_eq(Interp *interp, Value **args, int argc) {
 
 static Value *vm_panic(Interp *interp, Value **args, int argc) {
     (void)interp;
-    const char *msg = (argc >= 1 && args[0]->tag == XS_STR) ? args[0]->s : "panic";
+    const char *msg = (argc >= 1 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : "panic";
     fprintf(stderr, "xs: panic: %s\n", msg);
     exit(1);
 }
 
 static Value *vm_exit_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
-    int code = (argc >= 1 && args[0]->tag == XS_INT) ? (int)args[0]->i : 0;
+    int code = (argc >= 1 && VAL_TAG(args[0]) == XS_INT) ? (int)VAL_INT(args[0]) : 0;
     exit(code);
 }
 
@@ -296,12 +296,12 @@ static Value *vm_contains(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_bool(0);
     Value *col = args[0], *item = args[1];
-    if (col->tag == XS_ARRAY || col->tag == XS_TUPLE) {
+    if (VAL_TAG(col) == XS_ARRAY || VAL_TAG(col) == XS_TUPLE) {
         for (int j = 0; j < col->arr->len; j++)
             if (value_equal(col->arr->items[j], item)) return xs_bool(1);
-    } else if (col->tag == XS_STR && item->tag == XS_STR) {
+    } else if (VAL_TAG(col) == XS_STR && VAL_TAG(item) == XS_STR) {
         return xs_bool(strstr(col->s, item->s) != NULL);
-    } else if (col->tag == XS_MAP && item->tag == XS_STR) {
+    } else if (VAL_TAG(col) == XS_MAP && VAL_TAG(item) == XS_STR) {
         return xs_bool(map_get(col->map, item->s) != NULL);
     }
     return xs_bool(0);
@@ -309,7 +309,7 @@ static Value *vm_contains(Interp *interp, Value **args, int argc) {
 
 static Value *vm_sorted(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_ARRAY && args[0]->tag != XS_TUPLE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_ARRAY && VAL_TAG(args[0]) != XS_TUPLE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->arr->len; j++)
@@ -326,7 +326,7 @@ static Value *vm_sorted(Interp *interp, Value **args, int argc) {
 
 static Value *vm_reversed(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_ARRAY && args[0]->tag != XS_TUPLE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_ARRAY && VAL_TAG(args[0]) != XS_TUPLE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = args[0]->arr->len - 1; j >= 0; j--)
@@ -336,7 +336,7 @@ static Value *vm_reversed(Interp *interp, Value **args, int argc) {
 
 static Value *vm_enumerate(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_ARRAY && args[0]->tag != XS_TUPLE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_ARRAY && VAL_TAG(args[0]) != XS_TUPLE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->arr->len; j++) {
@@ -352,8 +352,8 @@ static Value *vm_zip(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_array_new();
     Value *a = args[0], *b = args[1];
-    if ((a->tag != XS_ARRAY && a->tag != XS_TUPLE) ||
-        (b->tag != XS_ARRAY && b->tag != XS_TUPLE)) return xs_array_new();
+    if ((VAL_TAG(a) != XS_ARRAY && VAL_TAG(a) != XS_TUPLE) ||
+        (VAL_TAG(b) != XS_ARRAY && VAL_TAG(b) != XS_TUPLE)) return xs_array_new();
     Value *arr = xs_array_new();
     int n = a->arr->len < b->arr->len ? a->arr->len : b->arr->len;
     for (int j = 0; j < n; j++) {
@@ -367,13 +367,13 @@ static Value *vm_zip(Interp *interp, Value **args, int argc) {
 
 static Value *vm_sum(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_ARRAY && args[0]->tag != XS_TUPLE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_ARRAY && VAL_TAG(args[0]) != XS_TUPLE))
         return xs_int(0);
     int64_t si = 0; double sf = 0; int is_float = 0;
     for (int j = 0; j < args[0]->arr->len; j++) {
         Value *v = args[0]->arr->items[j];
-        if (v->tag == XS_INT) si += v->i;
-        else if (v->tag == XS_FLOAT) { sf += v->f; is_float = 1; }
+        if (VAL_TAG(v) == XS_INT) si += VAL_INT(v);
+        else if (VAL_TAG(v) == XS_FLOAT) { sf += v->f; is_float = 1; }
     }
     return is_float ? xs_float(sf + (double)si) : xs_int(si);
 }
@@ -382,13 +382,13 @@ static Value *vm_map_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_array_new();
     Value *fn = args[0], *col = args[1];
-    if ((col->tag != XS_ARRAY && col->tag != XS_TUPLE)) return xs_array_new();
+    if ((VAL_TAG(col) != XS_ARRAY && VAL_TAG(col) != XS_TUPLE)) return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < col->arr->len; j++) {
         Value *elem = col->arr->items[j];
-        Value *r = (fn->tag == XS_NATIVE)
+        Value *r = (VAL_TAG(fn) == XS_NATIVE)
             ? fn->native(NULL, &elem, 1)
-            : (fn->tag == XS_CLOSURE ? vm_invoke(g_vm_for_invoke, fn, &elem, 1) : value_incref(elem));
+            : (VAL_TAG(fn) == XS_CLOSURE ? vm_invoke(g_vm_for_invoke, fn, &elem, 1) : value_incref(elem));
         array_push(arr->arr, r ? r : value_incref(XS_NULL_VAL));
     }
     return arr;
@@ -398,13 +398,13 @@ static Value *vm_filter_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_array_new();
     Value *fn = args[0], *col = args[1];
-    if ((col->tag != XS_ARRAY && col->tag != XS_TUPLE)) return xs_array_new();
+    if ((VAL_TAG(col) != XS_ARRAY && VAL_TAG(col) != XS_TUPLE)) return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < col->arr->len; j++) {
         Value *elem = col->arr->items[j];
-        Value *r = (fn->tag == XS_NATIVE)
+        Value *r = (VAL_TAG(fn) == XS_NATIVE)
             ? fn->native(NULL, &elem, 1)
-            : (fn->tag == XS_CLOSURE ? vm_invoke(g_vm_for_invoke, fn, &elem, 1) : value_incref(XS_FALSE_VAL));
+            : (VAL_TAG(fn) == XS_CLOSURE ? vm_invoke(g_vm_for_invoke, fn, &elem, 1) : value_incref(XS_FALSE_VAL));
         if (value_truthy(r)) array_push(arr->arr, value_incref(elem));
         value_decref(r);
     }
@@ -415,14 +415,14 @@ static Value *vm_reduce_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 2) return xs_null();
     Value *fn = args[0], *col = args[1];
-    if ((col->tag != XS_ARRAY && col->tag != XS_TUPLE) || col->arr->len == 0)
+    if ((VAL_TAG(col) != XS_ARRAY && VAL_TAG(col) != XS_TUPLE) || col->arr->len == 0)
         return argc >= 3 ? value_incref(args[2]) : xs_null();
     Value *acc = argc >= 3 ? value_incref(args[2]) : value_incref(col->arr->items[0]);
     int start = argc >= 3 ? 0 : 1;
-    if (fn->tag == XS_NATIVE || fn->tag == XS_CLOSURE) {
+    if (VAL_TAG(fn) == XS_NATIVE || VAL_TAG(fn) == XS_CLOSURE) {
         for (int j = start; j < col->arr->len; j++) {
             Value *pair[2] = {acc, col->arr->items[j]};
-            Value *r = (fn->tag == XS_NATIVE)
+            Value *r = (VAL_TAG(fn) == XS_NATIVE)
                 ? fn->native(NULL, pair, 2)
                 : vm_invoke(g_vm_for_invoke, fn, pair, 2);
             value_decref(acc); acc = r ? r : xs_null();
@@ -433,7 +433,7 @@ static Value *vm_reduce_fn(Interp *interp, Value **args, int argc) {
 
 static Value *vm_keys(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_MAP && args[0]->tag != XS_MODULE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_MAP && VAL_TAG(args[0]) != XS_MODULE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->map->cap; j++)
@@ -444,7 +444,7 @@ static Value *vm_keys(Interp *interp, Value **args, int argc) {
 
 static Value *vm_values(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_MAP && args[0]->tag != XS_MODULE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_MAP && VAL_TAG(args[0]) != XS_MODULE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->map->cap; j++)
@@ -455,7 +455,7 @@ static Value *vm_values(Interp *interp, Value **args, int argc) {
 
 static Value *vm_entries(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || (args[0]->tag != XS_MAP && args[0]->tag != XS_MODULE))
+    if (argc < 1 || (VAL_TAG(args[0]) != XS_MAP && VAL_TAG(args[0]) != XS_MODULE))
         return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->map->cap; j++)
@@ -470,7 +470,7 @@ static Value *vm_entries(Interp *interp, Value **args, int argc) {
 
 static Value *vm_chars(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_STR) return xs_array_new();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return xs_array_new();
     Value *arr = xs_array_new();
     const char *s = args[0]->s;
     for (int j = 0; s[j]; j++) {
@@ -482,11 +482,11 @@ static Value *vm_chars(Interp *interp, Value **args, int argc) {
 
 static Value *vm_flatten(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_ARRAY) return xs_array_new();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return xs_array_new();
     Value *arr = xs_array_new();
     for (int j = 0; j < args[0]->arr->len; j++) {
         Value *el = args[0]->arr->items[j];
-        if (el->tag == XS_ARRAY)
+        if (VAL_TAG(el) == XS_ARRAY)
             for (int k = 0; k < el->arr->len; k++)
                 array_push(arr->arr, value_incref(el->arr->items[k]));
         else
@@ -497,7 +497,7 @@ static Value *vm_flatten(Interp *interp, Value **args, int argc) {
 
 static Value *vm_is_null(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && args[0]->tag == XS_NULL);
+    return xs_bool(argc >= 1 && VAL_TAG(args[0]) == XS_NULL);
 }
 
 static Value *vm_copy(Interp *interp, Value **args, int argc) {
@@ -543,7 +543,7 @@ static Value *vm_None_fn(Interp *interp, Value **args, int argc) {
 static Value *vm_format(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_str("");
-    if (args[0]->tag != XS_STR) { char *s = value_str(args[0]); Value *r = xs_str(s); free(s); return r; }
+    if (VAL_TAG(args[0]) != XS_STR) { char *s = value_str(args[0]); Value *r = xs_str(s); free(s); return r; }
     const char *fmt = args[0]->s;
     int argidx = 1;
     char *result = xs_strdup(""); int rlen = 0;
@@ -564,7 +564,7 @@ static Value *vm_format(Interp *interp, Value **args, int argc) {
 
 static Value *vm_todo(Interp *interp, Value **args, int argc) {
     (void)interp;
-    const char *msg = (argc >= 1 && args[0]->tag == XS_STR) ? args[0]->s : "not yet implemented";
+    const char *msg = (argc >= 1 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : "not yet implemented";
     fprintf(stderr, "xs: TODO: %s\n", msg);
     exit(1);
 }
@@ -605,10 +605,10 @@ static Value *vm_eprintln(Interp *interp, Value **args, int argc) {
     return xs_null();
 }
 
-static Value *vm_sin(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(sin(a[0]->tag==XS_INT?(double)a[0]->i:a[0]->f)) : xs_float(0); }
-static Value *vm_cos(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(cos(a[0]->tag==XS_INT?(double)a[0]->i:a[0]->f)) : xs_float(0); }
-static Value *vm_tan(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(tan(a[0]->tag==XS_INT?(double)a[0]->i:a[0]->f)) : xs_float(0); }
-static Value *vm_log_fn(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(log(a[0]->tag==XS_INT?(double)a[0]->i:a[0]->f)) : xs_float(0); }
+static Value *vm_sin(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(sin(VAL_TAG(a[0])==XS_INT?(double)VAL_INT(a[0]):a[0]->f)) : xs_float(0); }
+static Value *vm_cos(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(cos(VAL_TAG(a[0])==XS_INT?(double)VAL_INT(a[0]):a[0]->f)) : xs_float(0); }
+static Value *vm_tan(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(tan(VAL_TAG(a[0])==XS_INT?(double)VAL_INT(a[0]):a[0]->f)) : xs_float(0); }
+static Value *vm_log_fn(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(log(VAL_TAG(a[0])==XS_INT?(double)VAL_INT(a[0]):a[0]->f)) : xs_float(0); }
 
 /* plugin loading */
 static VM *g_plugin_vm;
@@ -616,9 +616,9 @@ static VM *g_plugin_vm;
 static Value *vm_plugin_global_set(Interp *interp, Value **args, int argc) {
     (void)interp;
     /* called as method: global.set(name, fn) → args = [self, name, fn] */
-    if (argc >= 3 && args[1]->tag == XS_STR && g_plugin_vm) {
+    if (argc >= 3 && VAL_TAG(args[1]) == XS_STR && g_plugin_vm) {
         map_set(g_plugin_vm->globals, args[1]->s, args[2]);
-    } else if (argc >= 2 && args[0]->tag == XS_STR && g_plugin_vm) {
+    } else if (argc >= 2 && VAL_TAG(args[0]) == XS_STR && g_plugin_vm) {
         map_set(g_plugin_vm->globals, args[0]->s, args[1]);
     }
     return xs_null();
@@ -627,8 +627,8 @@ static Value *vm_plugin_global_set(Interp *interp, Value **args, int argc) {
 static Value *vm_plugin_add_method(Interp *interp, Value **args, int argc) {
     (void)interp;
     /* called as method: runtime.add_method(type, name, fn) → args = [self, type, name, fn] */
-    int off = (argc >= 4 && args[0]->tag == XS_MAP) ? 1 : 0;
-    if (argc >= 3 + off && args[off]->tag == XS_STR && args[off+1]->tag == XS_STR && g_plugin_vm) {
+    int off = (argc >= 4 && VAL_TAG(args[0]) == XS_MAP) ? 1 : 0;
+    if (argc >= 3 + off && VAL_TAG(args[off]) == XS_STR && VAL_TAG(args[off+1]) == XS_STR && g_plugin_vm) {
         Value *pmethods = map_get(g_plugin_vm->globals, "__plugin_methods");
         if (!pmethods) {
             pmethods = xs_map_new();
@@ -655,7 +655,7 @@ extern XSProto *compile_program(Node *program);
 
 static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_STR || !g_plugin_vm) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_STR || !g_plugin_vm) return xs_null();
 
     const char *path = args[0]->s;
     FILE *f = fopen(path, "r");
@@ -663,7 +663,7 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     char resolved[1024];
     if (!f) {
         Value *src_file = map_get(g_plugin_vm->globals, "__source_file");
-        if (src_file && src_file->tag == XS_STR) {
+        if (src_file && VAL_TAG(src_file) == XS_STR) {
             const char *dir_end = strrchr(src_file->s, '/');
             if (!dir_end) dir_end = strrchr(src_file->s, '\\');
             if (dir_end) {
@@ -743,7 +743,7 @@ static Value *vm_channel(Interp *interp, Value **args, int argc) {
     map_set(ch->map, "__type", type); value_decref(type);
     Value *buf = xs_array_new();
     map_set(ch->map, "_buf", buf); value_decref(buf);
-    int64_t cap = (argc >= 1 && args[0]->tag == XS_INT) ? args[0]->i : 0;
+    int64_t cap = (argc >= 1 && VAL_TAG(args[0]) == XS_INT) ? VAL_INT(args[0]) : 0;
     Value *cap_v = xs_int(cap);
     map_set(ch->map, "_cap", cap_v); value_decref(cap_v);
     return ch;
@@ -751,39 +751,39 @@ static Value *vm_channel(Interp *interp, Value **args, int argc) {
 
 static Value *vm_is_int(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && (args[0]->tag == XS_INT || args[0]->tag == XS_BIGINT));
+    return xs_bool(argc >= 1 && (VAL_TAG(args[0]) == XS_INT || VAL_TAG(args[0]) == XS_BIGINT));
 }
 static Value *vm_is_float(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && args[0]->tag == XS_FLOAT);
+    return xs_bool(argc >= 1 && VAL_TAG(args[0]) == XS_FLOAT);
 }
 static Value *vm_is_str(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && args[0]->tag == XS_STR);
+    return xs_bool(argc >= 1 && VAL_TAG(args[0]) == XS_STR);
 }
 static Value *vm_is_bool(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && args[0]->tag == XS_BOOL);
+    return xs_bool(argc >= 1 && VAL_TAG(args[0]) == XS_BOOL);
 }
 static Value *vm_is_array(Interp *interp, Value **args, int argc) {
     (void)interp;
-    return xs_bool(argc >= 1 && args[0]->tag == XS_ARRAY);
+    return xs_bool(argc >= 1 && VAL_TAG(args[0]) == XS_ARRAY);
 }
 static Value *vm_is_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_bool(0);
-    ValueTag t = args[0]->tag;
+    ValueTag t = VAL_TAG(args[0]);
     return xs_bool(t == XS_FUNC || t == XS_NATIVE || t == XS_CLOSURE);
 }
 static Value *vm_char_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_str("");
     Value *v = args[0];
-    if (v->tag == XS_INT) {
-        char buf[2] = { (char)v->i, '\0' };
+    if (VAL_TAG(v) == XS_INT) {
+        char buf[2] = { (char)VAL_INT(v), '\0' };
         return xs_str(buf);
     }
-    if (v->tag == XS_STR && v->s[0]) {
+    if (VAL_TAG(v) == XS_STR && v->s[0]) {
         char buf[2] = { v->s[0], '\0' };
         return xs_str(buf);
     }
@@ -793,8 +793,8 @@ static Value *vm_ord(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
     Value *v = args[0];
-    if (v->tag == XS_STR) return xs_int((int64_t)(unsigned char)v->s[0]);
-    if (v->tag == XS_INT) return xs_int(v->i);
+    if (VAL_TAG(v) == XS_STR) return xs_int((int64_t)(unsigned char)v->s[0]);
+    if (VAL_TAG(v) == XS_INT) return xs_int(VAL_INT(v));
     return xs_int(0);
 }
 static Value *vm_bytes(Interp *interp, Value **args, int argc) {
@@ -802,7 +802,7 @@ static Value *vm_bytes(Interp *interp, Value **args, int argc) {
     Value *arr = xs_array_new();
     if (argc < 1) return arr;
     Value *v = args[0];
-    if (v->tag == XS_STR) {
+    if (VAL_TAG(v) == XS_STR) {
         for (const unsigned char *p = (const unsigned char *)v->s; *p; p++) {
             Value *b = xs_int((int64_t)*p);
             array_push(arr->arr, b);
@@ -1206,10 +1206,10 @@ static int call_frame_push(VM *vm, Value *closure_val, int argc) {
 }
 
 static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc) {
-    if (fn->tag == XS_NATIVE) {
+    if (VAL_TAG(fn) == XS_NATIVE) {
         return fn->native(NULL, args, argc);
     }
-    if (fn->tag != XS_CLOSURE) return value_incref(XS_NULL_VAL);
+    if (VAL_TAG(fn) != XS_CLOSURE) return value_incref(XS_NULL_VAL);
 
     for (int i = 0; i < argc; i++) PUSH(value_incref(args[i]));
 
@@ -1235,24 +1235,24 @@ static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc) {
 }
 
 static Value *vm_try_struct_op(VM *vm, Value *a, const char *op, Value *b) {
-    if (a->tag != XS_STRUCT_VAL || !a->st || !a->st->type_name) return NULL;
+    if (VAL_TAG(a) != XS_STRUCT_VAL || !a->st || !a->st->type_name) return NULL;
     /* look up the operator method from globals: stored by impl under the op name */
     Value *fn = map_get(vm->globals, op);
-    if (!fn || (fn->tag != XS_CLOSURE && fn->tag != XS_FUNC && fn->tag != XS_NATIVE))
+    if (!fn || (VAL_TAG(fn) != XS_CLOSURE && VAL_TAG(fn) != XS_FUNC && VAL_TAG(fn) != XS_NATIVE))
         return NULL;
     Value *args[2] = { a, b };
     return vm_invoke(vm, fn, args, 2);
 }
 
 static Value *vm_try_dunder(VM *vm, Value *obj, const char *dunder, Value *other) {
-    if (obj->tag != XS_MAP) return NULL;
+    if (VAL_TAG(obj) != XS_MAP) return NULL;
     Value *fn = map_get(obj->map, dunder);
     if (!fn) {
         Value *methods = map_get(obj->map, "__methods");
-        if (methods && methods->tag == XS_MAP)
+        if (methods && VAL_TAG(methods) == XS_MAP)
             fn = map_get(methods->map, dunder);
     }
-    if (!fn || (fn->tag != XS_CLOSURE && fn->tag != XS_NATIVE)) return NULL;
+    if (!fn || (VAL_TAG(fn) != XS_CLOSURE && VAL_TAG(fn) != XS_NATIVE)) return NULL;
     Value *args[2] = { obj, other };
     return vm_invoke(vm, fn, args, 2);
 }
@@ -1261,15 +1261,15 @@ static Value *vm_try_dunder(VM *vm, Value *obj, const char *dunder, Value *other
    Structs compiled with OP_MAKE_INST live as maps tagged with __type; the
    operator impl is registered on the class global's __methods. */
 static Value *vm_try_map_op(VM *vm, Value *a, const char *op, Value *b) {
-    if (a->tag != XS_MAP || !a->map) return NULL;
+    if (VAL_TAG(a) != XS_MAP || !a->map) return NULL;
     Value *type = map_get(a->map, "__type");
-    if (!type || type->tag != XS_STR || !type->s) return NULL;
+    if (!type || VAL_TAG(type) != XS_STR || !type->s) return NULL;
     Value *cls = map_get(vm->globals, type->s);
-    if (!cls || (cls->tag != XS_MAP && cls->tag != XS_MODULE) || !cls->map) return NULL;
+    if (!cls || (VAL_TAG(cls) != XS_MAP && VAL_TAG(cls) != XS_MODULE) || !cls->map) return NULL;
     Value *methods = map_get(cls->map, "__methods");
-    if (!methods || methods->tag != XS_MAP) return NULL;
+    if (!methods || VAL_TAG(methods) != XS_MAP) return NULL;
     Value *fn = map_get(methods->map, op);
-    if (!fn || (fn->tag != XS_CLOSURE && fn->tag != XS_FUNC && fn->tag != XS_NATIVE))
+    if (!fn || (VAL_TAG(fn) != XS_CLOSURE && VAL_TAG(fn) != XS_FUNC && VAL_TAG(fn) != XS_NATIVE))
         return NULL;
     Value *args[2] = { a, b };
     return vm_invoke(vm, fn, args, 2);
@@ -1283,7 +1283,7 @@ int vm_run(VM *vm, XSProto *proto) {
     top_cl->upvalues     = NULL;
     top_cl->refcount     = 1;
     Value *top_val       = xs_malloc(sizeof *top_val);
-    top_val->tag         = XS_CLOSURE;
+    top_val->tag = XS_CLOSURE;
     top_val->refcount    = 1;
     top_val->cl          = top_cl;
 
@@ -1393,15 +1393,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                overload set: a user `fn sum(...)` should shadow the
                built-in `sum`, not co-exist with it (otherwise the
                arity-pick would route some calls back to the builtin). */
-            if (v->tag == XS_CLOSURE || v->tag == XS_FUNC) {
+            if (VAL_TAG(v) == XS_CLOSURE || VAL_TAG(v) == XS_FUNC) {
                 Value *existing = map_get(vm->globals, name);
-                if (existing && existing->tag == XS_OVERLOAD) {
+                if (existing && VAL_TAG(existing) == XS_OVERLOAD) {
                     array_push(existing->overload, value_incref(v));
                     value_decref(v);
                     break;
                 }
-                if (existing && (existing->tag == XS_FUNC ||
-                                 existing->tag == XS_CLOSURE)) {
+                if (existing && (VAL_TAG(existing) == XS_FUNC ||
+                                 VAL_TAG(existing) == XS_CLOSURE)) {
                     Value *oset = xs_overload_new();
                     array_push(oset->overload, value_incref(existing));
                     array_push(oset->overload, value_incref(v));
@@ -1418,75 +1418,75 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_ADD: {
             Value *b = POP(), *a = POP(); Value *r;
-            if (a->tag == XS_INT && b->tag == XS_INT) {
-                r = xs_safe_add(a->i, b->i);
-            } else if ((a->tag == XS_INT || a->tag == XS_BIGINT) &&
-                       (b->tag == XS_INT || b->tag == XS_BIGINT)) {
+            if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
+                r = xs_safe_add(VAL_INT(a), VAL_INT(b));
+            } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_BIGINT) &&
+                       (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_BIGINT)) {
                 r = xs_numeric_add(a, b);
-            } else if (a->tag == XS_STR || b->tag == XS_STR) {
+            } else if (VAL_TAG(a) == XS_STR || VAL_TAG(b) == XS_STR) {
                 char *as = value_str(a), *bs = value_str(b);
                 size_t n = strlen(as) + strlen(bs) + 1;
                 char *buf = xs_malloc(n);
                 strcpy(buf, as); strcat(buf, bs);
                 free(as); free(bs);
                 r = xs_str(buf); free(buf);
-            } else if (a->tag == XS_ARRAY && b->tag == XS_ARRAY) {
+            } else if (VAL_TAG(a) == XS_ARRAY && VAL_TAG(b) == XS_ARRAY) {
                 r = xs_array_new();
                 for (int ai = 0; ai < a->arr->len; ai++) array_push(r->arr, a->arr->items[ai]);
                 for (int bi = 0; bi < b->arr->len; bi++) array_push(r->arr, b->arr->items[bi]);
-            } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__add__", b)) != NULL) {
-            } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "+", b)) != NULL) {
-            } else if (a->tag == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "+", b)) != NULL) {
-            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
-                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
-                double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__add__", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "+", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "+", b)) != NULL) {
+            } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
+                       (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
+                double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av + bv);
             } else {
                 Span s = {0};
                 xs_runtime_error(s, "type mismatch", NULL,
                     "cannot add values of tag %d and %d",
-                    (int)a->tag, (int)b->tag);
+                    (int)VAL_TAG(a), (int)VAL_TAG(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
         case OP_SUB: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (a->tag==XS_INT && b->tag==XS_INT) {
-                r = xs_safe_sub(a->i, b->i);
-            } else if ((a->tag==XS_INT||a->tag==XS_BIGINT) && (b->tag==XS_INT||b->tag==XS_BIGINT)) {
+            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+                r = xs_safe_sub(VAL_INT(a), VAL_INT(b));
+            } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 r = xs_numeric_sub(a, b);
-            } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__sub__", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__sub__", b)) != NULL) {
                 /* dunder */
-            } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "-", b)) != NULL) {
-            } else if (a->tag == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "-", b)) != NULL) {
-            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
-                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
-                double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "-", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "-", b)) != NULL) {
+            } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
+                       (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
+                double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av - bv);
             } else {
                 Span s = {0};
                 xs_runtime_error(s, "type mismatch", NULL,
                     "cannot subtract values of tag %d and %d",
-                    (int)a->tag, (int)b->tag);
+                    (int)VAL_TAG(a), (int)VAL_TAG(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
         case OP_MUL: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (a->tag==XS_INT && b->tag==XS_INT) {
-                r = xs_safe_mul(a->i, b->i);
-            } else if ((a->tag==XS_INT||a->tag==XS_BIGINT) && (b->tag==XS_INT||b->tag==XS_BIGINT)) {
+            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+                r = xs_safe_mul(VAL_INT(a), VAL_INT(b));
+            } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 r = xs_numeric_mul(a, b);
-            } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__mul__", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__mul__", b)) != NULL) {
                 /* dunder */
-            } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "*", b)) != NULL) {
-            } else if (a->tag == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "*", b)) != NULL) {
-            } else if (a->tag==XS_STR && b->tag==XS_INT) {
-                int64_t count = b->i;
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "*", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "*", b)) != NULL) {
+            } else if (VAL_TAG(a)==XS_STR && VAL_TAG(b)==XS_INT) {
+                int64_t count = VAL_INT(b);
                 if (count <= 0) { r = xs_str(""); }
                 else {
                     size_t slen = strlen(a->s);
@@ -1496,41 +1496,41 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     buf[slen * (size_t)count] = '\0';
                     r = xs_str(buf); free(buf);
                 }
-            } else if ((a->tag == XS_INT || a->tag == XS_FLOAT || a->tag == XS_BIGINT) &&
-                       (b->tag == XS_INT || b->tag == XS_FLOAT || b->tag == XS_BIGINT)) {
-                double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
+            } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
+                       (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
+                double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av * bv);
             } else {
                 Span s = {0};
                 xs_runtime_error(s, "type mismatch", NULL,
                     "cannot multiply values of tag %d and %d",
-                    (int)a->tag, (int)b->tag);
+                    (int)VAL_TAG(a), (int)VAL_TAG(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
         case OP_DIV: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (a->tag==XS_INT && b->tag==XS_INT) {
-                if (b->i == 0) {
+            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+                if (VAL_INT(b) == 0) {
                     Span s = {0};
                     xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
                     r = value_incref(XS_NULL_VAL);
-                } else r = xs_int(a->i / b->i);
-            } else if ((a->tag==XS_INT||a->tag==XS_BIGINT) && (b->tag==XS_INT||b->tag==XS_BIGINT)) {
+                } else r = xs_int(VAL_INT(a) / VAL_INT(b));
+            } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 r = xs_numeric_div(a, b);
-            } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__div__", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__div__", b)) != NULL) {
                 /* dunder */
-            } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "/", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "/", b)) != NULL) {
             } else {
-                double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
+                double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 if (bv == 0.0) {
                     Span s = {0};
                     xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
                     r = value_incref(XS_NULL_VAL);
                 } else {
-                    double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                    double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
                     r = xs_float(av / bv);
                 }
             }
@@ -1539,20 +1539,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_MOD: {
             Value *b=POP(), *a=POP();
             Value *r;
-            if (a->tag==XS_INT && b->tag==XS_INT) {
-                if (b->i == 0) {
+            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+                if (VAL_INT(b) == 0) {
                     Span s = {0};
                     xs_runtime_error(s, "modulo by zero", NULL, "cannot take modulo with zero divisor");
                     r = value_incref(XS_NULL_VAL);
                 } else {
                     /* Math modulo (sign of divisor), matches interp. */
-                    int64_t m = a->i % b->i;
-                    if (m != 0 && ((m ^ b->i) < 0)) m += b->i;
+                    int64_t m = VAL_INT(a) % VAL_INT(b);
+                    if (m != 0 && ((m ^ VAL_INT(b)) < 0)) m += VAL_INT(b);
                     r = xs_int(m);
                 }
-            } else if (a->tag == XS_MAP && (r = vm_try_dunder(vm, a, "__mod__", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__mod__", b)) != NULL) {
                 /* dunder */
-            } else if (a->tag == XS_MAP && (r = vm_try_map_op(vm, a, "%", b)) != NULL) {
+            } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "%", b)) != NULL) {
             } else {
                 r = xs_numeric_mod(a, b);
             }
@@ -1560,24 +1560,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_POW: {
             Value *b=POP(), *a=POP();
-            if (a->tag==XS_INT && b->tag==XS_INT && b->i >= 0) {
-                Value *r = xs_safe_pow(a->i, b->i);
+            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT && VAL_INT(b) >= 0) {
+                Value *r = xs_safe_pow(VAL_INT(a), VAL_INT(b));
                 value_decref(a); value_decref(b); PUSH(r);
-            } else if ((a->tag==XS_INT||a->tag==XS_BIGINT) && (b->tag==XS_INT||b->tag==XS_BIGINT)) {
+            } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 Value *r = xs_numeric_pow(a, b);
                 value_decref(a); value_decref(b); PUSH(r);
             } else {
-                double av = a->tag==XS_INT?(double)a->i:(a->tag==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                double bv = b->tag==XS_INT?(double)b->i:(b->tag==XS_BIGINT?bigint_to_double(b->bigint):b->f);
+                double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 value_decref(a); value_decref(b); PUSH(xs_float(pow(av,bv)));
             }
             break;
         }
         case OP_NEG: {
             Value *a = POP();
-            if (a->tag == XS_INT) {
-                PUSH(xs_safe_neg(a->i));
-            } else if (a->tag == XS_BIGINT) {
+            if (VAL_TAG(a) == XS_INT) {
+                PUSH(xs_safe_neg(VAL_INT(a)));
+            } else if (VAL_TAG(a) == XS_BIGINT) {
                 PUSH(xs_numeric_neg(a));
             } else {
                 PUSH(xs_float(-a->f));
@@ -1600,22 +1600,22 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         // --- comparisons
         case OP_EQ:  { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__eq__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__eq__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_equal(a,b))); value_decref(a);value_decref(b); } break; }
         case OP_NEQ: { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__ne__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ne__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(!value_equal(a,b))); value_decref(a);value_decref(b); } break; }
         case OP_LT:  { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__lt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__lt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)<0));  value_decref(a);value_decref(b); } break; }
         case OP_GT:  { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__gt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__gt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)>0));  value_decref(a);value_decref(b); } break; }
         case OP_LTE: { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__le__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__le__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)<=0)); value_decref(a);value_decref(b); } break; }
         case OP_GTE: { Value *b=POP(),*a=POP(); Value *r;
-                       if (a->tag==XS_MAP && (r=vm_try_dunder(vm,a,"__ge__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ge__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)>=0)); value_decref(a);value_decref(b); } break; }
 
         /* collections */
@@ -1645,11 +1645,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_INDEX_GET: {
             Value *idx = POP(), *col = POP(); Value *r;
-            if ((col->tag==XS_ARRAY||col->tag==XS_TUPLE) && idx->tag==XS_INT) {
-                int64_t i = idx->i;
+            if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_INT) {
+                int64_t i = VAL_INT(idx);
                 if (i < 0) i += col->arr->len;
                 r = (i>=0 && i<col->arr->len) ? value_incref(col->arr->items[i]) : value_incref(XS_NULL_VAL);
-            } else if ((col->tag==XS_ARRAY||col->tag==XS_TUPLE) && idx->tag==XS_RANGE && idx->range) {
+            } else if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_RANGE && idx->range) {
                 int64_t start = idx->range->start;
                 int64_t end = idx->range->end;
                 if (idx->range->inclusive) end++;
@@ -1661,19 +1661,19 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 for (int64_t j = start; j < end; j++)
                     array_push(arr->arr, value_incref(col->arr->items[j]));
                 r = arr;
-            } else if (col->tag==XS_MAP && idx->tag==XS_STR) {
+            } else if (VAL_TAG(col)==XS_MAP && VAL_TAG(idx)==XS_STR) {
                 Value *v = map_get(col->map, idx->s);
                 r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
-            } else if (col->tag==XS_RANGE && idx->tag==XS_INT && col->range) {
-                r = xs_int(col->range->start + idx->i);
-            } else if (col->tag==XS_STR && idx->tag==XS_INT) {
+            } else if (VAL_TAG(col)==XS_RANGE && VAL_TAG(idx)==XS_INT && col->range) {
+                r = xs_int(col->range->start + VAL_INT(idx));
+            } else if (VAL_TAG(col)==XS_STR && VAL_TAG(idx)==XS_INT) {
                 const char *s = col->s;
                 int64_t slen = (int64_t)strlen(s);
-                int64_t i = idx->i;
+                int64_t i = VAL_INT(idx);
                 if (i < 0) i += slen;
                 if (i >= 0 && i < slen) { char buf[2] = {s[i], 0}; r = xs_str(buf); }
                 else r = value_incref(XS_NULL_VAL);
-            } else if (col->tag==XS_STR && idx->tag==XS_RANGE && idx->range) {
+            } else if (VAL_TAG(col)==XS_STR && VAL_TAG(idx)==XS_RANGE && idx->range) {
                 const char *s = col->s;
                 int64_t slen = (int64_t)strlen(s);
                 int64_t start = idx->range->start;
@@ -1692,17 +1692,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     r = xs_str(buf);
                     free(buf);
                 }
-            } else if (col->tag==XS_NULL) {
+            } else if (VAL_TAG(col)==XS_NULL) {
                 Span s = {0};
                 xs_runtime_error(s, "null index", NULL,
                     "cannot index a null value");
                 r = value_incref(XS_NULL_VAL);
-            } else if (col->tag==XS_INT || col->tag==XS_FLOAT ||
-                       col->tag==XS_BOOL || col->tag==XS_BIGINT) {
+            } else if (VAL_TAG(col)==XS_INT || VAL_TAG(col)==XS_FLOAT ||
+                       VAL_TAG(col)==XS_BOOL || VAL_TAG(col)==XS_BIGINT) {
                 Span s = {0};
                 xs_runtime_error(s, "not indexable", NULL,
                     "cannot index a value of tag %d (only arrays, tuples, maps, strings, ranges)",
-                    (int)col->tag);
+                    (int)VAL_TAG(col));
                 r = value_incref(XS_NULL_VAL);
             } else {
                 /* Unknown collection/key combo: keep null fallback for
@@ -1713,13 +1713,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_INDEX_SET: {
             Value *val = POP(), *idx = POP(), *col = POP();
-            if ((col->tag==XS_ARRAY||col->tag==XS_TUPLE) && idx->tag==XS_INT) {
-                int64_t i = idx->i;
+            if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_INT) {
+                int64_t i = VAL_INT(idx);
                 if (i>=0 && i<col->arr->len) {
                     value_decref(col->arr->items[i]);
                     col->arr->items[i] = value_incref(val);
                 }
-            } else if (col->tag==XS_MAP && idx->tag==XS_STR) {
+            } else if (VAL_TAG(col)==XS_MAP && VAL_TAG(idx)==XS_STR) {
                 map_set(col->map, idx->s, val);
             }
             value_decref(val); value_decref(idx); value_decref(col); break;
@@ -1727,30 +1727,30 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_LOAD_FIELD: {
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *obj = POP(); Value *r = NULL;
-            if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+            if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 Value *v = map_get(obj->map, name);
                 if (v) {
                     r = value_incref(v);
                 } else {
                     Value *methods = map_get(obj->map, "__methods");
-                    if (methods && methods->tag == XS_MAP) {
+                    if (methods && VAL_TAG(methods) == XS_MAP) {
                         Value *mv = map_get(methods->map, name);
                         if (mv) r = value_incref(mv);
                     }
                     if (!r) {
                         Value *impl = map_get(obj->map, "__impl__");
-                        if (impl && impl->tag == XS_MAP) {
+                        if (impl && VAL_TAG(impl) == XS_MAP) {
                             Value *mv = map_get(impl->map, name);
                             if (mv) r = value_incref(mv);
                         }
                     }
                 }
-            } else if (obj->tag == XS_ENUM_VAL && obj->en) {
+            } else if (VAL_TAG(obj) == XS_ENUM_VAL && obj->en) {
                 if (strcmp(name, "variant") == 0 || strcmp(name, "_tag") == 0)
                     r = xs_str(obj->en->variant);
                 else if (strcmp(name, "type") == 0 || strcmp(name, "__type") == 0)
                     r = xs_str(obj->en->type_name);
-            } else if ((obj->tag == XS_TUPLE || obj->tag == XS_ARRAY) && name[0] >= '0' && name[0] <= '9') {
+            } else if ((VAL_TAG(obj) == XS_TUPLE || VAL_TAG(obj) == XS_ARRAY) && name[0] >= '0' && name[0] <= '9') {
                 int64_t idx2 = atoll(name);
                 if (idx2 >= 0 && idx2 < obj->arr->len)
                     r = value_incref(obj->arr->items[idx2]);
@@ -1761,7 +1761,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_STORE_FIELD: {
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *val = POP(), *obj = POP();
-            if (obj->tag == XS_MAP || obj->tag == XS_MODULE) map_set(obj->map, name, val);
+            if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) map_set(obj->map, name, val);
             value_decref(val); value_decref(obj); break;
         }
         case OP_MAKE_MAP: {
@@ -1771,7 +1771,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             for (int i = n*2-1; i >= 0; i--) tmp[i] = POP();
             for (int i = 0; i < n; i++) {
                 Value *k = tmp[i*2], *v = tmp[i*2+1];
-                if (k->tag == XS_STR) map_set(m->map, k->s, v);
+                if (VAL_TAG(k) == XS_STR) map_set(m->map, k->s, v);
                 value_decref(k); value_decref(v);
             }
             if (tmp != tmp_s) free(tmp);
@@ -1792,7 +1792,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
 
         case OP_MAKE_CLOSURE: {
-            int inner_idx = (int)PROTO->chunk.consts[INSTR_Bx(instr)]->i;
+            int inner_idx = (int)VAL_INT(PROTO->chunk.consts[INSTR_Bx(instr)]);
             XSProto *inner = PROTO->inner[inner_idx];
             int nuv = inner->n_upvalues;
             Upvalue **uvs = nuv ? xs_malloc((size_t)nuv * sizeof(Upvalue*)) : NULL;
@@ -1807,7 +1807,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             cl->proto    = inner; inner->refcount++;
             cl->upvalues = uvs;  cl->refcount = 1;
             Value *v     = xs_malloc(sizeof *v);
-            v->tag       = XS_CLOSURE; v->refcount = 1; v->cl = cl;
+            v->tag = XS_CLOSURE; v->refcount = 1; v->cl = cl;
             PUSH(v); break;
         }
 
@@ -1818,20 +1818,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                If multiple match, the one whose declared arity equals
                argc wins; otherwise fall back to the last candidate
                whose min_arity <= argc <= max_arity. Mirrors interp. */
-            if (callee->tag == XS_OVERLOAD && callee->overload) {
+            if (VAL_TAG(callee) == XS_OVERLOAD && callee->overload) {
                 XSArray *cs = callee->overload;
                 Value *best = NULL;
                 for (int oi = 0; oi < cs->len; oi++) {
                     Value *cand = cs->items[oi];
                     int min_a = 0, max_a = 0;
-                    if (cand->tag == XS_FUNC) {
+                    if (VAL_TAG(cand) == XS_FUNC) {
                         max_a = cand->fn->nparams;
                         min_a = max_a;
                         if (cand->fn->default_vals) {
                             for (int pi = 0; pi < max_a; pi++)
                                 if (cand->fn->default_vals[pi]) min_a--;
                         }
-                    } else if (cand->tag == XS_CLOSURE) {
+                    } else if (VAL_TAG(cand) == XS_CLOSURE) {
                         max_a = cand->cl->proto->arity;
                         min_a = max_a;
                     } else {
@@ -1850,13 +1850,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     callee = best;
                 }
             }
-            if (callee->tag == XS_NATIVE) {
+            if (VAL_TAG(callee) == XS_NATIVE) {
                 Value **args = vm->sp - argc;
                 Value *result = callee->native(NULL, args, argc);
                 for (int i = 0; i < argc; i++) value_decref(POP());
                 value_decref(POP()); /* callee */
                 PUSH(result ? result : value_incref(XS_NULL_VAL));
-            } else if (callee->tag == XS_CLOSURE) {
+            } else if (VAL_TAG(callee) == XS_CLOSURE) {
                 Value *saved = callee;
                 value_incref(saved);
                 for (int i = -argc-1; i < -1; i++) vm->sp[i] = vm->sp[i+1];
@@ -1868,16 +1868,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 value_decref(saved);
                 frame = FRAME;
-            } else if (callee->tag == XS_MAP || callee->tag == XS_MODULE) {
+            } else if (VAL_TAG(callee) == XS_MAP || VAL_TAG(callee) == XS_MODULE) {
                 Value *fields = map_get(callee->map, "__fields");
-                if (fields && fields->tag == XS_MAP) {
+                if (fields && VAL_TAG(fields) == XS_MAP) {
                     Value *inst = xs_map_new();
                     for (int j = 0; j < fields->map->cap; j++)
                         if (fields->map->keys[j])
                             map_set(inst->map, fields->map->keys[j],
                                     value_incref(fields->map->vals[j]));
                     Value *methods = map_get(callee->map, "__methods");
-                    if (methods && methods->tag == XS_MAP)
+                    if (methods && VAL_TAG(methods) == XS_MAP)
                         for (int j = 0; j < methods->map->cap; j++)
                             if (methods->map->keys[j])
                                 map_set(inst->map, methods->map->keys[j],
@@ -1887,12 +1887,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *bases = map_get(callee->map, "__bases");
                     if (bases) {
                         map_set(inst->map, "__bases", value_incref(bases));
-                        if (bases->tag == XS_ARRAY && bases->arr->len > 0) {
+                        if (VAL_TAG(bases) == XS_ARRAY && bases->arr->len > 0) {
                             Value *super_inst = xs_map_new();
                             Value *base_cls = bases->arr->items[0];
-                            if (base_cls->tag == XS_MAP) {
+                            if (VAL_TAG(base_cls) == XS_MAP) {
                                 Value *bm = map_get(base_cls->map, "__methods");
-                                if (bm && bm->tag == XS_MAP)
+                                if (bm && VAL_TAG(bm) == XS_MAP)
                                     for (int bj = 0; bj < bm->map->cap; bj++)
                                         if (bm->map->keys[bj])
                                             map_set(super_inst->map, bm->map->keys[bj],
@@ -1916,7 +1916,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         ctor_args[j] = value_incref(vm->sp[-argc + j]);
                     for (int j = 0; j < argc; j++) value_decref(POP());
                     value_decref(POP()); /* callee */
-                    if (init_fn && init_fn->tag == XS_NATIVE && argc > 0) {
+                    if (init_fn && VAL_TAG(init_fn) == XS_NATIVE && argc > 0) {
                         Value *init_call_args[257];
                         init_call_args[0] = inst;
                         for (int j = 0; j < argc; j++)
@@ -1926,7 +1926,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         for (int j = 0; j < argc; j++) value_decref(ctor_args[j]);
                         if (ctor_args != ca_s) free(ctor_args);
                         PUSH(inst);
-                    } else if (init_fn && init_fn->tag == XS_CLOSURE && argc > 0) {
+                    } else if (init_fn && VAL_TAG(init_fn) == XS_CLOSURE && argc > 0) {
                         PUSH(inst);
                         PUSH(value_incref(inst));
                         for (int j = 0; j < argc; j++) PUSH(ctor_args[j]);
@@ -1951,7 +1951,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     PUSH(value_incref(XS_NULL_VAL));
                 }
             } else {
-                fprintf(stderr, "call on non-callable (tag=%d)\n", callee->tag);
+                fprintf(stderr, "call on non-callable (tag=%d)\n", VAL_TAG(callee));
                 return 1;
             }
             break;
@@ -1965,7 +1965,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value **posslot = kwslot - nargs;
             Value *callee = posslot[-1];
             XSProto *target = NULL;
-            if (callee->tag == XS_CLOSURE) target = callee->cl->proto;
+            if (VAL_TAG(callee) == XS_CLOSURE) target = callee->cl->proto;
             if (target && target->param_names && target->n_params > 0) {
                 int total = target->n_params;
                 Value **merged = xs_malloc((size_t)total * sizeof(Value *));
@@ -1976,7 +1976,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 for (int i = 0; i < nkw; i++) {
                     Value *k = kwslot[i * 2];
                     Value *v = kwslot[i * 2 + 1];
-                    if (!k || k->tag != XS_STR) continue;
+                    if (!k || VAL_TAG(k) != XS_STR) continue;
                     for (int p = 0; p < total; p++) {
                         if (target->param_names[p] &&
                             strcmp(target->param_names[p], k->s) == 0) {
@@ -2011,13 +2011,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                    unknown): drop kwargs and call with positional only. */
                 for (int i = 0; i < nkw * 2; i++) value_decref(POP());
                 /* positional args are now at top; reuse OP_CALL logic */
-                if (callee->tag == XS_NATIVE) {
+                if (VAL_TAG(callee) == XS_NATIVE) {
                     Value **args = vm->sp - nargs;
                     Value *result = callee->native(NULL, args, nargs);
                     for (int i = 0; i < nargs; i++) value_decref(POP());
                     value_decref(POP());
                     PUSH(result ? result : value_incref(XS_NULL_VAL));
-                } else if (callee->tag == XS_CLOSURE) {
+                } else if (VAL_TAG(callee) == XS_CLOSURE) {
                     Value *saved = callee;
                     value_incref(saved);
                     for (int i = -nargs - 1; i < -1; i++) vm->sp[i] = vm->sp[i + 1];
@@ -2030,7 +2030,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     value_decref(saved);
                     frame = FRAME;
                 } else {
-                    fprintf(stderr, "call_kw on non-callable (tag=%d)\n", callee->tag);
+                    fprintf(stderr, "call_kw on non-callable (tag=%d)\n", VAL_TAG(callee));
                     return 1;
                 }
             }
@@ -2040,7 +2040,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_TAIL_CALL: {
             int argc   = (int)INSTR_C(instr);
             Value *callee = vm->sp[-argc - 1];
-            if (callee->tag == XS_NATIVE) {
+            if (VAL_TAG(callee) == XS_NATIVE) {
                 Value **args = vm->sp - argc;
                 Value *result = callee->native(NULL, args, argc);
                 for (int i = 0; i < argc; i++) value_decref(POP());
@@ -2054,7 +2054,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 PUSH(result ? result : value_incref(XS_NULL_VAL));
                 break;
             }
-            if (callee->tag != XS_CLOSURE) {
+            if (VAL_TAG(callee) != XS_CLOSURE) {
                 fprintf(stderr, "tail call on non-callable\n");
                 return 1;
             }
@@ -2130,7 +2130,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 value_decref(result);
                 if (!vm->main_called) {
                     Value *main_fn = map_get(vm->globals, "main");
-                    if (main_fn && main_fn->tag == XS_CLOSURE) {
+                    if (main_fn && VAL_TAG(main_fn) == XS_CLOSURE) {
                         vm->main_called = 1;
                         value_incref(main_fn);
                         if (call_frame_push(vm, main_fn, 0) == 0) {
@@ -2169,24 +2169,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_MAKE_RANGE: {
             int inclusive = (int)INSTR_A(instr);
             Value *end_v = POP(), *start_v = POP();
-            int64_t s = start_v->tag==XS_INT ? start_v->i : (int64_t)start_v->f;
-            int64_t e = end_v->tag==XS_INT   ? end_v->i   : (int64_t)end_v->f;
+            int64_t s = VAL_TAG(start_v)==XS_INT ? VAL_INT(start_v) : (int64_t)start_v->f;
+            int64_t e = VAL_TAG(end_v)==XS_INT   ? VAL_INT(end_v)   : (int64_t)end_v->f;
             Value *r = xs_range(s, e, inclusive);
             value_decref(start_v); value_decref(end_v); PUSH(r); break;
         }
 
         case OP_ITER_LEN: {
             Value *iter = POP(); Value *r;
-            if (iter->tag==XS_ARRAY||iter->tag==XS_TUPLE) r = xs_int(iter->arr->len);
-            else if (iter->tag==XS_STR) r = xs_int((int64_t)strlen(iter->s));
-            else if (iter->tag==XS_MAP && map_get(iter->map, "__type") &&
+            if (VAL_TAG(iter)==XS_ARRAY||VAL_TAG(iter)==XS_TUPLE) r = xs_int(iter->arr->len);
+            else if (VAL_TAG(iter)==XS_STR) r = xs_int((int64_t)strlen(iter->s));
+            else if (VAL_TAG(iter)==XS_MAP && map_get(iter->map, "__type") &&
                      map_get(iter->map, "__type")->tag == XS_STR &&
                      strcmp(map_get(iter->map, "__type")->s, "generator") == 0) {
                 Value *yields = map_get(iter->map, "_yields");
-                r = xs_int(yields && yields->tag == XS_ARRAY ? yields->arr->len : 0);
+                r = xs_int(yields && VAL_TAG(yields) == XS_ARRAY ? yields->arr->len : 0);
             }
-            else if (iter->tag==XS_MAP||iter->tag==XS_MODULE) r = xs_int(iter->map->len);
-            else if (iter->tag==XS_RANGE && iter->range) {
+            else if (VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) r = xs_int(iter->map->len);
+            else if (VAL_TAG(iter)==XS_RANGE && iter->range) {
                 int64_t span = iter->range->end - iter->range->start;
                 if (iter->range->inclusive) span += (span >= 0) ? 1 : -1;
                 int64_t step = iter->range->step ? iter->range->step : 1;
@@ -2200,24 +2200,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_ITER_GET: {
             int want_pairs = INSTR_A(instr);
             Value *idx = POP(), *iter = POP(); Value *r;
-            int64_t i = idx->tag==XS_INT ? idx->i : (int64_t)idx->f;
-            if (iter->tag==XS_ARRAY||iter->tag==XS_TUPLE) {
+            int64_t i = VAL_TAG(idx)==XS_INT ? VAL_INT(idx) : (int64_t)idx->f;
+            if (VAL_TAG(iter)==XS_ARRAY||VAL_TAG(iter)==XS_TUPLE) {
                 r = (i>=0&&i<iter->arr->len) ? value_incref(iter->arr->items[i]) : value_incref(XS_NULL_VAL);
-            } else if (iter->tag==XS_STR) {
+            } else if (VAL_TAG(iter)==XS_STR) {
                 const char *s = iter->s;
                 int64_t slen = (int64_t)strlen(s);
                 if (i>=0&&i<slen) { char buf[2]={s[i],0}; r=xs_str(buf); }
                 else r = value_incref(XS_NULL_VAL);
-            } else if (iter->tag==XS_MAP && iter->map &&
+            } else if (VAL_TAG(iter)==XS_MAP && iter->map &&
                        map_get(iter->map, "__type") &&
                        map_get(iter->map, "__type")->tag == XS_STR &&
                        strcmp(map_get(iter->map, "__type")->s, "generator") == 0) {
                 Value *yields = map_get(iter->map, "_yields");
-                if (yields && yields->tag == XS_ARRAY && i >= 0 && i < yields->arr->len)
+                if (yields && VAL_TAG(yields) == XS_ARRAY && i >= 0 && i < yields->arr->len)
                     r = value_incref(yields->arr->items[i]);
                 else
                     r = value_incref(XS_NULL_VAL);
-            } else if ((iter->tag==XS_MAP||iter->tag==XS_MODULE) && iter->map) {
+            } else if ((VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) && iter->map) {
                 int64_t ki = 0;
                 r = value_incref(XS_NULL_VAL);
                 for (int j = 0; j < iter->map->cap; j++) {
@@ -2238,7 +2238,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         ki++;
                     }
                 }
-            } else if (iter->tag==XS_RANGE && iter->range) {
+            } else if (VAL_TAG(iter)==XS_RANGE && iter->range) {
                 int64_t step = iter->range->step ? iter->range->step : 1;
                 r = xs_int(iter->range->start + i * step);
             } else r = value_incref(XS_NULL_VAL);
@@ -2263,14 +2263,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             uint32_t mc_hash = ic_method_hash(mc_name);
             Value *mc_cached_fn = NULL;
 
-            if (mc_obj->tag == XS_MAP || mc_obj->tag == XS_MODULE) {
+            if (VAL_TAG(mc_obj) == XS_MAP || VAL_TAG(mc_obj) == XS_MODULE) {
                 /* hot path: the cache already has the resolved callable. */
                 {
                     int64_t type_tag = (int64_t)(intptr_t)mc_obj->map;
                     Value *cached = ic_lookup(mc_site_id, type_tag, mc_hash);
-                    if (cached && (cached->tag == XS_CLOSURE ||
-                                   cached->tag == XS_NATIVE ||
-                                   cached->tag == XS_FUNC)) {
+                    if (cached && (VAL_TAG(cached) == XS_CLOSURE ||
+                                   VAL_TAG(cached) == XS_NATIVE ||
+                                   VAL_TAG(cached) == XS_FUNC)) {
                         mc_cached_fn = cached;
                         goto map_generic_method;
                     }
@@ -2280,21 +2280,21 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                    size/len that must not be shadowed by the map method. */
                 {
                     Value *user_fn = map_get(mc_obj->map, mc_name);
-                    if (user_fn && (user_fn->tag == XS_NATIVE ||
-                                    user_fn->tag == XS_CLOSURE ||
-                                    user_fn->tag == XS_FUNC)) {
+                    if (user_fn && (VAL_TAG(user_fn) == XS_NATIVE ||
+                                    VAL_TAG(user_fn) == XS_CLOSURE ||
+                                    VAL_TAG(user_fn) == XS_FUNC)) {
                         goto map_generic_method;
                     }
                 }
                 Value *_gen_type = map_get(mc_obj->map, "__type");
-                if (_gen_type && _gen_type->tag == XS_STR &&
+                if (_gen_type && VAL_TAG(_gen_type) == XS_STR &&
                     strcmp(_gen_type->s, "generator") == 0 &&
                     strcmp(mc_name, "next") == 0) {
                     Value *yields = map_get(mc_obj->map, "_yields");
                     Value *idx_v  = map_get(mc_obj->map, "_index");
-                    int idx = idx_v && idx_v->tag == XS_INT ? (int)idx_v->i : 0;
+                    int idx = idx_v && VAL_TAG(idx_v) == XS_INT ? (int)VAL_INT(idx_v) : 0;
                     mc_result = xs_map_new();
-                    if (yields && yields->tag == XS_ARRAY && idx < yields->arr->len) {
+                    if (yields && VAL_TAG(yields) == XS_ARRAY && idx < yields->arr->len) {
                         map_set(mc_result->map, "value", value_incref(yields->arr->items[idx]));
                         Value *dv = value_incref(XS_FALSE_VAL);
                         map_set(mc_result->map, "done", dv); value_decref(dv);
@@ -2362,7 +2362,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     mc_result = out;
                 } else if (strcmp(mc_name,"merge")==0 && mc_argc>=1 &&
-                           (mc_args[0]->tag==XS_MAP || mc_args[0]->tag==XS_MODULE)) {
+                           (VAL_TAG(mc_args[0])==XS_MAP || VAL_TAG(mc_args[0])==XS_MODULE)) {
                     Value *out = xs_map_new();
                     for (int j = 0; j < mc_obj->map->cap; j++)
                         if (mc_obj->map->keys[j])
@@ -2375,27 +2375,27 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result = out;
                 } else if (strcmp(mc_name,"len")==0||strcmp(mc_name,"size")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
-                    if (ch_type && ch_type->tag == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
                         Value *buf = map_get(mc_obj->map, "_buf");
-                        mc_result = xs_int(buf && buf->tag == XS_ARRAY ? buf->arr->len : 0);
+                        mc_result = xs_int(buf && VAL_TAG(buf) == XS_ARRAY ? buf->arr->len : 0);
                     } else
                     mc_result=xs_int(mc_obj->map->len);
                 } else if (strcmp(mc_name,"has")==0||strcmp(mc_name,"contains_key")==0) {
-                    mc_result=(mc_argc>=1&&mc_args[0]->tag==XS_STR&&map_get(mc_obj->map,mc_args[0]->s))
+                    mc_result=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR&&map_get(mc_obj->map,mc_args[0]->s))
                         ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
-                } else if (strcmp(mc_name,"get")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"get")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     Value *v=map_get(mc_obj->map,mc_args[0]->s);
                     mc_result=v?value_incref(v):(mc_argc>=2?value_incref(mc_args[1]):value_incref(XS_NULL_VAL));
-                } else if (strcmp(mc_name,"set")==0&&mc_argc>=2&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"set")==0&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR) {
                     /* check if this is a plugin global.set: delegate to native */
                     Value *set_fn = map_get(mc_obj->map, "set");
-                    if (set_fn && set_fn->tag == XS_NATIVE) {
+                    if (set_fn && VAL_TAG(set_fn) == XS_NATIVE) {
                         goto map_generic_method;
                     }
                     map_set(mc_obj->map,mc_args[0]->s,mc_args[1]);
                     mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"delete")==0||strcmp(mc_name,"remove")==0) {
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                         Value *nv = value_incref(XS_NULL_VAL);
                         map_set(mc_obj->map,mc_args[0]->s,nv);
                         value_decref(nv);
@@ -2403,17 +2403,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"send")==0 && mc_argc>=1) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
-                    if (ch_type && ch_type->tag == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
                         Value *buf = map_get(mc_obj->map, "_buf");
-                        if (buf && buf->tag == XS_ARRAY) array_push(buf->arr, value_incref(mc_args[0]));
+                        if (buf && VAL_TAG(buf) == XS_ARRAY) array_push(buf->arr, value_incref(mc_args[0]));
                         mc_result = value_incref(XS_NULL_VAL);
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"recv")==0 || strcmp(mc_name,"try_recv")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
-                    if (ch_type && ch_type->tag == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
                         Value *buf = map_get(mc_obj->map, "_buf");
                         int nonblocking = (mc_name[0] == 't');
-                        if (buf && buf->tag == XS_ARRAY && buf->arr->len > 0) {
+                        if (buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len > 0) {
                             mc_result = value_incref(buf->arr->items[0]);
                             value_decref(buf->arr->items[0]);
                             for (int j = 1; j < buf->arr->len; j++) buf->arr->items[j-1] = buf->arr->items[j];
@@ -2462,22 +2462,22 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"is_empty")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
-                    if (ch_type && ch_type->tag == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
                         Value *buf = map_get(mc_obj->map, "_buf");
-                        mc_result = xs_bool(buf && buf->tag == XS_ARRAY && buf->arr->len == 0);
+                        mc_result = xs_bool(buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len == 0);
                     } else {
                         mc_result = xs_bool(mc_obj->map->len == 0);
                     }
                 } else if (strcmp(mc_name,"is_full")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
-                    if (ch_type && ch_type->tag == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
                         Value *buf = map_get(mc_obj->map, "_buf");
                         Value *cap = map_get(mc_obj->map, "_cap");
-                        int64_t c2 = (cap && cap->tag == XS_INT) ? cap->i : 0;
-                        int full = (c2 > 0 && buf && buf->tag == XS_ARRAY && buf->arr->len >= (int)c2);
+                        int64_t c2 = (cap && VAL_TAG(cap) == XS_INT) ? VAL_INT(cap) : 0;
+                        int full = (c2 > 0 && buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len >= (int)c2);
                         mc_result = xs_bool(full);
                     } else goto map_generic_method;
-                } else if (strcmp(mc_name,"merge")==0&&mc_argc>=1&&mc_args[0]->tag==XS_MAP) {
+                } else if (strcmp(mc_name,"merge")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_MAP) {
                     for(int j=0;j<mc_args[0]->map->cap;j++){
                         if(mc_args[0]->map->keys[j])
                             map_set(mc_obj->map,mc_args[0]->map->keys[j],value_incref(mc_args[0]->map->vals[j]));
@@ -2502,16 +2502,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"has_key")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"has_key")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     mc_result=map_get(mc_obj->map,mc_args[0]->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
-                } else if (strcmp(mc_name,"intersection")==0&&mc_argc>=1&&mc_args[0]->tag==XS_MAP) {
+                } else if (strcmp(mc_name,"intersection")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_MAP) {
                     Value *m=xs_map_new();
                     for(int j=0;j<mc_obj->map->cap;j++){
                         if(mc_obj->map->keys[j]&&map_get(mc_args[0]->map,mc_obj->map->keys[j]))
                             map_set(m->map,mc_obj->map->keys[j],value_incref(mc_obj->map->vals[j]));
                     }
                     mc_result=m;
-                } else if (strcmp(mc_name,"union")==0&&mc_argc>=1&&mc_args[0]->tag==XS_MAP) {
+                } else if (strcmp(mc_name,"union")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_MAP) {
                     Value *m=xs_map_new();
                     for(int j=0;j<mc_obj->map->cap;j++){
                         if(mc_obj->map->keys[j])
@@ -2522,7 +2522,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             map_set(m->map,mc_args[0]->map->keys[j],value_incref(mc_args[0]->map->vals[j]));
                     }
                     mc_result=m;
-                } else if (strcmp(mc_name,"difference")==0&&mc_argc>=1&&mc_args[0]->tag==XS_MAP) {
+                } else if (strcmp(mc_name,"difference")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_MAP) {
                     Value *m=xs_map_new();
                     for(int j=0;j<mc_obj->map->cap;j++){
                         if(mc_obj->map->keys[j]&&!map_get(mc_args[0]->map,mc_obj->map->keys[j]))
@@ -2530,7 +2530,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     mc_result=m;
                 } else if (strcmp(mc_name,"most_common")==0) {
-                    int64_t n2=(mc_argc>=1&&mc_args[0]->tag==XS_INT)?mc_args[0]->i:mc_obj->map->len;
+                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):mc_obj->map->len;
                     /* collect entries, sort by value descending, return top n */
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->map->cap;j++){
@@ -2554,10 +2554,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=arr;
                 } else if (strcmp(mc_name,"elapsed")==0) {
                     Value *start_v = map_get(mc_obj->map, "_start");
-                    if (start_v && (start_v->tag == XS_FLOAT || start_v->tag == XS_INT)) {
+                    if (start_v && (VAL_TAG(start_v) == XS_FLOAT || VAL_TAG(start_v) == XS_INT)) {
                         struct timespec _ts; clock_gettime(CLOCK_REALTIME, &_ts);
                         double now = (double)_ts.tv_sec + (double)_ts.tv_nsec/1e9;
-                        double start = start_v->tag == XS_FLOAT ? start_v->f : (double)start_v->i;
+                        double start = VAL_TAG(start_v) == XS_FLOAT ? start_v->f : (double)VAL_INT(start_v);
                         mc_result = xs_float(now - start);
                     } else mc_result = value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"to_map")==0) {
@@ -2565,11 +2565,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"unwrap")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
                     Value *val_v = map_get(mc_obj->map, "_val");
-                    if (tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s, "Err")==0) {
+                    if (tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s, "Err")==0) {
                         char *es = val_v ? value_str(val_v) : xs_strdup("Err");
                         fprintf(stderr, "unwrap called on Err: %s\n", es); free(es);
                         mc_result = value_incref(XS_NULL_VAL);
-                    } else if (tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s, "None")==0) {
+                    } else if (tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s, "None")==0) {
                         fprintf(stderr, "unwrap called on None\n");
                         mc_result = value_incref(XS_NULL_VAL);
                     } else {
@@ -2578,30 +2578,30 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"unwrap_or")==0&&mc_argc>=1) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
                     Value *val_v = map_get(mc_obj->map, "_val");
-                    int is_err = tag_v && tag_v->tag == XS_STR &&
+                    int is_err = tag_v && VAL_TAG(tag_v) == XS_STR &&
                         (strcmp(tag_v->s,"Err")==0 || strcmp(tag_v->s,"None")==0);
                     mc_result = is_err ? value_incref(mc_args[0]) : (val_v ? value_incref(val_v) : value_incref(XS_NULL_VAL));
                 } else if (strcmp(mc_name,"is_ok")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    mc_result = xs_bool(tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Ok")==0);
+                    mc_result = xs_bool(tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Ok")==0);
                 } else if (strcmp(mc_name,"is_err")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    mc_result = xs_bool(tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Err")==0);
+                    mc_result = xs_bool(tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Err")==0);
                 } else if (strcmp(mc_name,"is_some")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    mc_result = xs_bool(tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Some")==0);
+                    mc_result = xs_bool(tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Some")==0);
                 } else if (strcmp(mc_name,"is_none")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    mc_result = xs_bool(tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"None")==0);
+                    mc_result = xs_bool(tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"None")==0);
                 } else if (strcmp(mc_name,"ok")==0) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
                     Value *val_v = map_get(mc_obj->map, "_val");
-                    if (tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Ok")==0)
+                    if (tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Ok")==0)
                         mc_result = val_v ? value_incref(val_v) : value_incref(XS_NULL_VAL);
                     else mc_result = value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"or_else")==0&&mc_argc>=1) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    if (tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Err")==0) {
+                    if (tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Err")==0) {
                         Value *val_v = map_get(mc_obj->map, "_val");
                         Value *arg = val_v ? val_v : XS_NULL_VAL;
                         mc_result = vm_invoke(vm, mc_args[0], &arg, 1);
@@ -2610,7 +2610,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     } else mc_result = value_incref(mc_obj);
                 } else if (strcmp(mc_name,"map_err")==0&&mc_argc>=1) {
                     Value *tag_v = map_get(mc_obj->map, "_tag");
-                    if (tag_v && tag_v->tag == XS_STR && strcmp(tag_v->s,"Err")==0) {
+                    if (tag_v && VAL_TAG(tag_v) == XS_STR && strcmp(tag_v->s,"Err")==0) {
                         Value *val_v = map_get(mc_obj->map, "_val");
                         Value *arg = val_v ? val_v : XS_NULL_VAL;
                         Value *new_err = vm_invoke(vm, mc_args[0], &arg, 1);
@@ -2621,9 +2621,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if (new_err) { map_set(m->map, "_val", new_err); value_decref(new_err); }
                         mc_result = m;
                     } else mc_result = value_incref(mc_obj);
-                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     Value *type_name = map_get(mc_obj->map, "__type");
-                    int match = type_name && type_name->tag == XS_STR && strcmp(type_name->s, mc_args[0]->s)==0;
+                    int match = type_name && VAL_TAG(type_name) == XS_STR && strcmp(type_name->s, mc_args[0]->s)==0;
                     mc_result = xs_bool(match);
                 } else if (strcmp(mc_name,"subscribe")==0||strcmp(mc_name,"reset")==0||
                            strcmp(mc_name,"peek")==0||strcmp(mc_name,"step")==0||
@@ -2634,48 +2634,48 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     if (!fn) fn = map_get(mc_obj->map, mc_name);
                     if (!fn) {
                         Value *methods = map_get(mc_obj->map, "__methods");
-                        if (methods && methods->tag == XS_MAP)
+                        if (methods && VAL_TAG(methods) == XS_MAP)
                             fn = map_get(methods->map, mc_name);
                     }
                     if (!fn) {
                         Value *impl = map_get(mc_obj->map, "__impl__");
-                        if (impl && impl->tag == XS_MAP)
+                        if (impl && VAL_TAG(impl) == XS_MAP)
                             fn = map_get(impl->map, mc_name);
                     }
                     /* look up methods on the type (for struct impl) */
                     if (!fn) {
                         Value *type_name = map_get(mc_obj->map, "__type");
-                        if (type_name && type_name->tag == XS_STR) {
+                        if (type_name && VAL_TAG(type_name) == XS_STR) {
                             Value *type_val = map_get(vm->globals, type_name->s);
-                            if (type_val && type_val->tag == XS_MAP) {
+                            if (type_val && VAL_TAG(type_val) == XS_MAP) {
                                 Value *tm = map_get(type_val->map, "__methods");
-                                if (tm && tm->tag == XS_MAP)
+                                if (tm && VAL_TAG(tm) == XS_MAP)
                                     fn = map_get(tm->map, mc_name);
                                 if (!fn) {
                                     Value *ti = map_get(type_val->map, "__impl__");
-                                    if (ti && ti->tag == XS_MAP)
+                                    if (ti && VAL_TAG(ti) == XS_MAP)
                                         fn = map_get(ti->map, mc_name);
                                 }
                             }
                         }
                     }
-                    if (fn && (fn->tag == XS_CLOSURE || fn->tag == XS_NATIVE)) {
+                    if (fn && (VAL_TAG(fn) == XS_CLOSURE || VAL_TAG(fn) == XS_NATIVE)) {
                         /* populate the inline cache so the next call with
                            the same map pointer + method name hits fast. */
                         ic_update(mc_site_id,
                                   (int64_t)(intptr_t)mc_obj->map,
                                   mc_hash, fn);
-                        int is_module_call = (mc_obj->tag == XS_MODULE) ||
-                            (mc_obj->tag == XS_MAP && !map_get(mc_obj->map, "__type") &&
+                        int is_module_call = (VAL_TAG(mc_obj) == XS_MODULE) ||
+                            (VAL_TAG(mc_obj) == XS_MAP && !map_get(mc_obj->map, "__type") &&
                              !map_get(mc_obj->map, "__methods") && !map_get(mc_obj->map, "__fields"));
                         /* Check if first param is 'self' for struct/class methods */
                         int needs_self = 0;
-                        if (fn->tag == XS_CLOSURE) {
+                        if (VAL_TAG(fn) == XS_CLOSURE) {
                             int fn_arity = fn->cl->proto->arity;
                             if (fn_arity < 0) fn_arity = -(fn_arity + 1);
                             needs_self = (fn_arity == mc_argc + 1);
                         }
-                        if (fn->tag == XS_CLOSURE && needs_self && !is_module_call) {
+                        if (VAL_TAG(fn) == XS_CLOSURE && needs_self && !is_module_call) {
                             /* super proxy: replace self with __self */
                             Value *self_ref = map_get(mc_obj->map, "__self");
                             if (self_ref) {
@@ -2690,7 +2690,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             }
                             value_decref(fn_val); frame = FRAME;
                             mc_called = 1;
-                        } else if (fn->tag == XS_NATIVE) {
+                        } else if (VAL_TAG(fn) == XS_NATIVE) {
                             if (is_module_call) {
                                 /* module call: don't pass module as self */
                                 Value *r2 = fn->native(NULL, mc_args, mc_argc);
@@ -2725,7 +2725,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }}
             }
 
-            else if (mc_obj->tag == XS_SIGNAL && mc_obj->signal) {
+            else if (VAL_TAG(mc_obj) == XS_SIGNAL && mc_obj->signal) {
                 XSSignal *sig = mc_obj->signal;
                 if (strcmp(mc_name,"get")==0 || strcmp(mc_name,"value")==0) {
                     if (sig->compute) {
@@ -2770,7 +2770,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
             }
 
-            else if (mc_obj->tag == XS_STR) {
+            else if (VAL_TAG(mc_obj) == XS_STR) {
                 const char *s = mc_obj->s;
                 int slen = (int)strlen(s);
                 if (strcmp(mc_name,"len")==0||strcmp(mc_name,"size")==0||strcmp(mc_name,"length")==0)
@@ -2795,22 +2795,22 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     memcpy(r,p2,n2); r[n2]='\0'; mc_result=xs_str(r); free(r);
                     }
                 } else if (strcmp(mc_name,"contains")==0||strcmp(mc_name,"includes")==0) {
-                    mc_result = (mc_argc>=1&&mc_args[0]->tag==XS_STR&&strstr(s,mc_args[0]->s))
+                    mc_result = (mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR&&strstr(s,mc_args[0]->s))
                         ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
                 } else if (strcmp(mc_name,"starts_with")==0) {
-                    if (mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                    if (mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                         size_t pl=strlen(mc_args[0]->s);
                         mc_result=strncmp(s,mc_args[0]->s,pl)==0
                             ? value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
                     } else mc_result=value_incref(XS_FALSE_VAL);
                 } else if (strcmp(mc_name,"ends_with")==0) {
-                    if (mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                    if (mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                         size_t pl=strlen(mc_args[0]->s);
                         mc_result=(size_t)slen>=pl&&strcmp(s+slen-(int)pl,mc_args[0]->s)==0
                             ? value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
                     } else mc_result=value_incref(XS_FALSE_VAL);
                 } else if (strcmp(mc_name,"split")==0) {
-                    const char *sep=(mc_argc>=1&&mc_args[0]->tag==XS_STR)?mc_args[0]->s:" ";
+                    const char *sep=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR)?mc_args[0]->s:" ";
                     Value *arr=xs_array_new(); size_t seplen=strlen(sep); const char *p3=s;
                     if (seplen==0) {
                         for(int j=0;j<slen;j++){char b[2]={s[j],0};Value*cv=xs_str(b);array_push(arr->arr,cv);value_decref(cv);}
@@ -2837,7 +2837,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         j += n;
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"replace")==0&&mc_argc>=2&&mc_args[0]->tag==XS_STR&&mc_args[1]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"replace")==0&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR&&VAL_TAG(mc_args[1])==XS_STR) {
                     const char *from=mc_args[0]->s,*to=mc_args[1]->s;
                     size_t fl=strlen(from),tl=strlen(to);
                     size_t cap=strlen(s)*2+64; char *buf=xs_malloc(cap); size_t wpos=0;
@@ -2859,13 +2859,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=xs_float(atof(s));
                 else if (strcmp(mc_name,"index_of")==0) {
                     mc_result=xs_int(-1);
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         const char *fnd=strstr(s,mc_args[0]->s);
                         if(fnd){value_decref(mc_result);mc_result=xs_int((int64_t)(fnd-s));}
                     }
                 } else if (strcmp(mc_name,"last_index_of")==0) {
                     mc_result=xs_int(-1);
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         size_t sl2=strlen(mc_args[0]->s);
                         if(sl2>0){
                             for(int j=slen-(int)sl2;j>=0;j--){
@@ -2873,16 +2873,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             }
                         }
                     }
-                } else if (strcmp(mc_name,"repeat")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<0) n2=0;
+                } else if (strcmp(mc_name,"repeat")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<0) n2=0;
                     size_t rlen=(size_t)slen*(size_t)n2;
                     char *buf=xs_malloc(rlen+1); size_t wpos=0;
                     for(int64_t j=0;j<n2;j++){memcpy(buf+wpos,s,(size_t)slen);wpos+=(size_t)slen;}
                     buf[wpos]='\0'; mc_result=xs_str(buf); free(buf);
                 } else if (strcmp(mc_name,"slice")==0) {
                     int64_t st2=0, en2=(int64_t)slen;
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_INT) st2=mc_args[0]->i;
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_INT) en2=mc_args[1]->i;
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) st2=VAL_INT(mc_args[0]);
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_INT) en2=VAL_INT(mc_args[1]);
                     if(st2<0) st2+=(int64_t)slen;
                     if(en2<0) en2+=(int64_t)slen;
                     if(st2<0) st2=0;
@@ -2901,13 +2901,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     if(r[0]) r[0]=(char)toupper((unsigned char)r[0]);
                     for(int j=1;r[j];j++) r[j]=(char)tolower((unsigned char)r[j]);
                     mc_result=xs_str(r); free(r);
-                } else if (strcmp(mc_name,"count")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"count")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     int cnt=0; size_t sl2=strlen(mc_args[0]->s);
                     if(sl2>0){const char *p3=s;while((p3=strstr(p3,mc_args[0]->s))!=NULL){cnt++;p3+=sl2;}}
                     mc_result=xs_int(cnt);
-                } else if (strcmp(mc_name,"pad_left")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; char ch=' ';
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                } else if (strcmp(mc_name,"pad_left")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); char ch=' ';
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -2916,9 +2916,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         memcpy(buf+pad,s,(size_t)slen); buf[n2]='\0';
                         mc_result=xs_str(buf); free(buf);
                     }
-                } else if (strcmp(mc_name,"pad_right")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; char ch=' ';
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                } else if (strcmp(mc_name,"pad_right")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); char ch=' ';
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -2932,7 +2932,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     r[slen]='\0'; mc_result=xs_str(r); free(r);
                 } else if (strcmp(mc_name,"join")==0&&mc_argc>=1) {
                     /* "sep".join(arr) */
-                    if(mc_args[0]->tag==XS_ARRAY||mc_args[0]->tag==XS_TUPLE){
+                    if(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE){
                         size_t cap=256; char *buf=xs_malloc(cap); size_t wpos=0;
                         for(int j=0;j<mc_args[0]->arr->len;j++){
                             char *sv=value_str(mc_args[0]->arr->items[j]); size_t svl=strlen(sv);
@@ -2957,9 +2957,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         else{r[j]=(char)tolower((unsigned char)r[j]);}
                     }
                     mc_result=xs_str(r); free(r);
-                } else if (strcmp(mc_name,"center")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; char ch=' ';
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                } else if (strcmp(mc_name,"center")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); char ch=' ';
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         int64_t total_pad=n2-(int64_t)slen;
@@ -2970,8 +2970,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         for(int64_t j=0;j<rpad;j++) buf[lpad+(int64_t)slen+j]=ch;
                         buf[n2]='\0'; mc_result=xs_str(buf); free(buf);
                     }
-                } else if (strcmp(mc_name,"char_at")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t idx=mc_args[0]->i;
+                } else if (strcmp(mc_name,"char_at")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t idx=VAL_INT(mc_args[0]);
                     if(idx<0) idx+=slen;
                     if(idx>=0&&idx<(int64_t)slen){char b[2]={s[idx],0};mc_result=xs_str(b);}
                     else mc_result=xs_str("");
@@ -3008,18 +3008,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"is_lower")==0) {
                     int ok=(slen>0); for(int j=0;j<slen;j++) if(isalpha((unsigned char)s[j])&&!islower((unsigned char)s[j])){ok=0;break;}
                     mc_result=ok?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
-                } else if (strcmp(mc_name,"remove_prefix")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"remove_prefix")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     size_t pl=strlen(mc_args[0]->s);
                     if(pl>0&&strncmp(s,mc_args[0]->s,pl)==0) mc_result=xs_str(s+pl);
                     else mc_result=xs_str(s);
-                } else if (strcmp(mc_name,"remove_suffix")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"remove_suffix")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     size_t pl=strlen(mc_args[0]->s);
                     if(pl>0&&(size_t)slen>=pl&&strcmp(s+slen-pl,mc_args[0]->s)==0){
                         char *r=xs_malloc(slen-pl+1); memcpy(r,s,slen-pl); r[slen-pl]='\0';
                         mc_result=xs_str(r); free(r);
                     } else mc_result=xs_str(s);
-                } else if (strcmp(mc_name,"truncate")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<0) n2=0;
+                } else if (strcmp(mc_name,"truncate")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<0) n2=0;
                     if((int64_t)slen<=n2) mc_result=xs_str(s);
                     else{
                         size_t tlen=(size_t)(n2>3?n2-3:n2);
@@ -3031,8 +3031,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 } else if (strcmp(mc_name,"substr")==0||strcmp(mc_name,"substring")==0) {
                     int64_t st2=0, en2=(int64_t)slen;
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_INT) st2=mc_args[0]->i;
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_INT) en2=mc_args[1]->i;
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) st2=VAL_INT(mc_args[0]);
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_INT) en2=VAL_INT(mc_args[1]);
                     if(st2<0) st2+=(int64_t)slen;
                     if(en2<0) en2+=(int64_t)slen;
                     if(st2<0) st2=0;
@@ -3045,20 +3045,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"to_str")==0||strcmp(mc_name,"to_string")==0) {
                     mc_result=value_incref(mc_obj);
                 } else if (strcmp(mc_name,"startswith")==0) {
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         size_t pl=strlen(mc_args[0]->s);
                         mc_result=strncmp(s,mc_args[0]->s,pl)==0
                             ?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
                     } else mc_result=value_incref(XS_FALSE_VAL);
                 } else if (strcmp(mc_name,"endswith")==0) {
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         size_t pl=strlen(mc_args[0]->s);
                         mc_result=(size_t)slen>=pl&&strcmp(s+slen-pl,mc_args[0]->s)==0
                             ?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
                     } else mc_result=value_incref(XS_FALSE_VAL);
                 } else if (strcmp(mc_name,"rfind")==0) {
                     mc_result=xs_int(-1);
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         size_t sl2=strlen(mc_args[0]->s);
                         if(sl2>0){
                             for(int j=slen-(int)sl2;j>=0;j--){
@@ -3066,8 +3066,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             }
                         }
                     }
-                } else if (strcmp(mc_name,"split_at")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t idx=mc_args[0]->i;
+                } else if (strcmp(mc_name,"split_at")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t idx=VAL_INT(mc_args[0]);
                     if(idx<0) idx+=slen;
                     if(idx<0) idx=0;
                     if(idx>(int64_t)slen) idx=(int64_t)slen;
@@ -3087,9 +3087,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"length")==0) {
                     mc_result=xs_int(slen);
                 } else if (strcmp(mc_name,"lpad")==0||strcmp(mc_name,"pad_start")==0) {
-                    int64_t n2=(mc_argc>=1&&mc_args[0]->tag==XS_INT)?mc_args[0]->i:(int64_t)slen;
+                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):(int64_t)slen;
                     char ch=' ';
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -3099,9 +3099,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         mc_result=xs_str(buf); free(buf);
                     }
                 } else if (strcmp(mc_name,"rpad")==0||strcmp(mc_name,"pad_end")==0) {
-                    int64_t n2=(mc_argc>=1&&mc_args[0]->tag==XS_INT)?mc_args[0]->i:(int64_t)slen;
+                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):(int64_t)slen;
                     char ch=' ';
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -3115,7 +3115,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     r[slen]='\0'; mc_result=xs_str(r); free(r);
                 } else if (strcmp(mc_name,"find")==0) {
                     mc_result=xs_int(-1);
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_STR){
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR){
                         const char *fnd=strstr(s,mc_args[0]->s);
                         if(fnd){value_decref(mc_result);mc_result=xs_int((int64_t)(fnd-s));}
                     }
@@ -3135,14 +3135,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                         while(wpos+svl+1>cap){cap*=2;buf=xs_realloc(buf,cap);}
                                         memcpy(buf+wpos,sv,svl); wpos+=svl; free(sv); ai++;
                                         p2+=2; continue;
-                                    } else if((spec=='d'||spec=='i')&&mc_args[ai]->tag==XS_INT){
-                                        snprintf(tmp,sizeof(tmp),"%lld",(long long)mc_args[ai]->i); ai++;
-                                    } else if(spec=='f'&&mc_args[ai]->tag==XS_FLOAT){
+                                    } else if((spec=='d'||spec=='i')&&VAL_TAG(mc_args[ai])==XS_INT){
+                                        snprintf(tmp,sizeof(tmp),"%lld",(long long)VAL_INT(mc_args[ai])); ai++;
+                                    } else if(spec=='f'&&VAL_TAG(mc_args[ai])==XS_FLOAT){
                                         snprintf(tmp,sizeof(tmp),"%g",mc_args[ai]->f); ai++;
-                                    } else if((spec=='d'||spec=='i')&&mc_args[ai]->tag==XS_FLOAT){
+                                    } else if((spec=='d'||spec=='i')&&VAL_TAG(mc_args[ai])==XS_FLOAT){
                                         snprintf(tmp,sizeof(tmp),"%lld",(long long)mc_args[ai]->f); ai++;
-                                    } else if(spec=='f'&&mc_args[ai]->tag==XS_INT){
-                                        snprintf(tmp,sizeof(tmp),"%g",(double)mc_args[ai]->i); ai++;
+                                    } else if(spec=='f'&&VAL_TAG(mc_args[ai])==XS_INT){
+                                        snprintf(tmp,sizeof(tmp),"%g",(double)VAL_INT(mc_args[ai])); ai++;
                                     }
                                 }
                                 size_t tl=strlen(tmp);
@@ -3161,16 +3161,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(mc_name,"as_str")==0)
                     mc_result=value_incref(mc_obj);
                 else if (strcmp(mc_name,"parse")==0) {
-                    int base=(mc_argc>=1&&mc_args[0]->tag==XS_INT)?(int)mc_args[0]->i:10;
+                    int base=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?(int)VAL_INT(mc_args[0]):10;
                     mc_result=xs_int((int64_t)strtoll(s,NULL,base));
                 } else if (strcmp(mc_name,"from_chars")==0) {
                     /* join chars into string: just return self if called on a string */
                     mc_result=value_incref(mc_obj);
-                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     mc_result=xs_bool(strcmp(mc_args[0]->s,"str")==0||strcmp(mc_args[0]->s,"String")==0);
                 } else mc_result=value_incref(XS_NULL_VAL);
             }
-            else if (mc_obj->tag==XS_ARRAY||mc_obj->tag==XS_TUPLE) {
+            else if (VAL_TAG(mc_obj)==XS_ARRAY||VAL_TAG(mc_obj)==XS_TUPLE) {
                 if (strcmp(mc_name,"len")==0||strcmp(mc_name,"size")==0)
                     mc_result=xs_int(mc_obj->arr->len);
                 else if (strcmp(mc_name,"push")==0||strcmp(mc_name,"append")==0) {
@@ -3189,7 +3189,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=value_incref(XS_FALSE_VAL);
                     if(mc_argc>=1){for(int j=0;j<mc_obj->arr->len;j++){if(value_equal(mc_obj->arr->items[j],mc_args[0])){value_decref(mc_result);mc_result=value_incref(XS_TRUE_VAL);break;}}}
                 } else if (strcmp(mc_name,"join")==0) {
-                    const char *sep=(mc_argc>=1&&mc_args[0]->tag==XS_STR)?mc_args[0]->s:"";
+                    const char *sep=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR)?mc_args[0]->s:"";
                     size_t cap=256; char *buf=xs_malloc(cap); size_t wpos=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
                         char *sv=value_str(mc_obj->arr->items[j]); size_t svl=strlen(sv);
@@ -3220,16 +3220,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         mc_obj->arr->items[0]=value_incref(mc_args[j]);
                     }
                     mc_result=xs_int(mc_obj->arr->len);
-                } else if (strcmp(mc_name,"insert")==0&&mc_argc>=2&&mc_args[0]->tag==XS_INT) {
-                    int64_t pos=mc_args[0]->i;
+                } else if (strcmp(mc_name,"insert")==0&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t pos=VAL_INT(mc_args[0]);
                     if(pos<0) pos=0;
                     if(pos>mc_obj->arr->len) pos=mc_obj->arr->len;
                     array_push(mc_obj->arr, value_incref(XS_NULL_VAL));
                     for(int k=mc_obj->arr->len-1;k>(int)pos;k--) mc_obj->arr->items[k]=mc_obj->arr->items[k-1];
                     mc_obj->arr->items[(int)pos]=value_incref(mc_args[1]);
                     mc_result=value_incref(XS_NULL_VAL);
-                } else if (strcmp(mc_name,"remove")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t pos=mc_args[0]->i;
+                } else if (strcmp(mc_name,"remove")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t pos=VAL_INT(mc_args[0]);
                     if(pos>=0&&pos<mc_obj->arr->len){
                         mc_result=value_incref(mc_obj->arr->items[pos]);
                         value_decref(mc_obj->arr->items[pos]);
@@ -3238,8 +3238,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     } else mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"slice")==0) {
                     int64_t start=0, end=mc_obj->arr->len;
-                    if(mc_argc>=1&&mc_args[0]->tag==XS_INT) start=mc_args[0]->i;
-                    if(mc_argc>=2&&mc_args[1]->tag==XS_INT) end=mc_args[1]->i;
+                    if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) start=VAL_INT(mc_args[0]);
+                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_INT) end=VAL_INT(mc_args[1]);
                     if(start<0) start+=mc_obj->arr->len;
                     if(end<0) end+=mc_obj->arr->len;
                     if(start<0) start=0;
@@ -3251,7 +3251,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     for(int a2=0;a2<mc_argc;a2++){
-                        if(mc_args[a2]->tag==XS_ARRAY) for(int j=0;j<mc_args[a2]->arr->len;j++) array_push(arr->arr,value_incref(mc_args[a2]->arr->items[j]));
+                        if(VAL_TAG(mc_args[a2])==XS_ARRAY) for(int j=0;j<mc_args[a2]->arr->len;j++) array_push(arr->arr,value_incref(mc_args[a2]->arr->items[j]));
                     }
                     mc_result=arr;
                 } else if (strcmp(mc_name,"sort")==0) {
@@ -3299,7 +3299,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *fn=(mc_argc>=1)?mc_args[0]:NULL;
                     int start_j=(mc_argc>=2)?0:1;
                     if(mc_argc<2&&mc_obj->arr->len>0){value_decref(acc);acc=value_incref(mc_obj->arr->items[0]);}
-                    if(fn&&(fn->tag==XS_NATIVE||fn->tag==XS_CLOSURE)){
+                    if(fn&&(VAL_TAG(fn)==XS_NATIVE||VAL_TAG(fn)==XS_CLOSURE)){
                         for(int j=start_j;j<mc_obj->arr->len;j++){
                             Value *pair[2]={acc,mc_obj->arr->items[j]};
                             Value *r=vm_invoke(vm,fn,pair,2);
@@ -3335,8 +3335,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(mc_name,"sum")==0) {
                     int64_t si=0; double sf=0; int is_float=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
-                        if(mc_obj->arr->items[j]->tag==XS_INT) si+=mc_obj->arr->items[j]->i;
-                        else if(mc_obj->arr->items[j]->tag==XS_FLOAT){sf+=mc_obj->arr->items[j]->f;is_float=1;}
+                        if(VAL_TAG(mc_obj->arr->items[j])==XS_INT) si+=VAL_INT(mc_obj->arr->items[j]);
+                        else if(VAL_TAG(mc_obj->arr->items[j])==XS_FLOAT){sf+=mc_obj->arr->items[j]->f;is_float=1;}
                     }
                     mc_result=is_float?xs_float(sf+(double)si):xs_int(si);
                 } else if (strcmp(mc_name,"min")==0) {
@@ -3357,7 +3357,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"flat")==0||strcmp(mc_name,"flatten")==0) {
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;j++){
-                        if(mc_obj->arr->items[j]->tag==XS_ARRAY){
+                        if(VAL_TAG(mc_obj->arr->items[j])==XS_ARRAY){
                             for(int k=0;k<mc_obj->arr->items[j]->arr->len;k++)
                                 array_push(arr->arr,value_incref(mc_obj->arr->items[j]->arr->items[k]));
                         } else array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
@@ -3382,14 +3382,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         frame=FRAME;
                     }
                     mc_result=value_incref(XS_NULL_VAL);
-                } else if (strcmp(mc_name,"take")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<0) n2=0;
+                } else if (strcmp(mc_name,"take")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<0) n2=0;
                     if(n2>mc_obj->arr->len) n2=mc_obj->arr->len;
                     Value *arr=xs_array_new();
                     for(int64_t j=0;j<n2;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     mc_result=arr;
-                } else if (strcmp(mc_name,"drop")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<0) n2=0;
+                } else if (strcmp(mc_name,"drop")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<0) n2=0;
                     if(n2>mc_obj->arr->len) n2=mc_obj->arr->len;
                     Value *arr=xs_array_new();
                     for(int64_t j=n2;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
@@ -3420,7 +3420,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;j++){
                         Value *r=vm_invoke(vm,mc_args[0],&mc_obj->arr->items[j],1);
-                        if(r&&(r->tag==XS_ARRAY||r->tag==XS_TUPLE)){
+                        if(r&&(VAL_TAG(r)==XS_ARRAY||VAL_TAG(r)==XS_TUPLE)){
                             for(int k=0;k<r->arr->len;k++) array_push(arr->arr,value_incref(r->arr->items[k]));
                             value_decref(r);
                         } else if(r) { array_push(arr->arr,r); }
@@ -3428,7 +3428,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     frame=FRAME;
                     mc_result=arr;
-                } else if (strcmp(mc_name,"zip")==0&&mc_argc>=1&&(mc_args[0]->tag==XS_ARRAY||mc_args[0]->tag==XS_TUPLE)) {
+                } else if (strcmp(mc_name,"zip")==0&&mc_argc>=1&&(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE)) {
                     Value *arr=xs_array_new();
                     int n2=mc_obj->arr->len<mc_args[0]->arr->len?mc_obj->arr->len:mc_args[0]->arr->len;
                     for(int j=0;j<n2;j++){
@@ -3438,7 +3438,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         array_push(arr->arr,pair);
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"zip_with")==0&&mc_argc>=2&&(mc_args[0]->tag==XS_ARRAY||mc_args[0]->tag==XS_TUPLE)) {
+                } else if (strcmp(mc_name,"zip_with")==0&&mc_argc>=2&&(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE)) {
                     Value *arr=xs_array_new();
                     int n2=mc_obj->arr->len<mc_args[0]->arr->len?mc_obj->arr->len:mc_args[0]->arr->len;
                     for(int j=0;j<n2;j++){
@@ -3533,8 +3533,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"window")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; Value *arr=xs_array_new();
+                } else if (strcmp(mc_name,"window")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); Value *arr=xs_array_new();
                     if(n2>0){
                         for(int j=0;j<=mc_obj->arr->len-(int)n2;j++){
                             Value *win=xs_array_new();
@@ -3543,8 +3543,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"chunk")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<1) n2=1;
+                } else if (strcmp(mc_name,"chunk")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<1) n2=1;
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;){
                         Value *ch=xs_array_new();
@@ -3552,18 +3552,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         array_push(arr->arr,ch);
                     }
                     mc_result=arr;
-                } else if (strcmp(mc_name,"rotate")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
+                } else if (strcmp(mc_name,"rotate")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
                     int alen=mc_obj->arr->len;
                     Value *arr=xs_array_new();
                     if(alen>0){
-                        int64_t n2=mc_args[0]->i%alen;
+                        int64_t n2=VAL_INT(mc_args[0])%alen;
                         if(n2<0) n2+=alen;
                         for(int j=(int)n2;j<alen;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                         for(int j=0;j<(int)n2;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     }
                     mc_result=arr;
                 } else if (strcmp(mc_name,"sample")==0) {
-                    int64_t n2=(mc_argc>=1&&mc_args[0]->tag==XS_INT)?mc_args[0]->i:1;
+                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):1;
                     if(n2<0) n2=0;
                     if(n2>mc_obj->arr->len) n2=mc_obj->arr->len;
                     Value *arr=xs_array_new();
@@ -3572,8 +3572,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"product")==0) {
                     int64_t pi=1; double pf=1.0; int is_float=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
-                        if(mc_obj->arr->items[j]->tag==XS_INT) pi*=mc_obj->arr->items[j]->i;
-                        else if(mc_obj->arr->items[j]->tag==XS_FLOAT){pf*=mc_obj->arr->items[j]->f;is_float=1;}
+                        if(VAL_TAG(mc_obj->arr->items[j])==XS_INT) pi*=VAL_INT(mc_obj->arr->items[j]);
+                        else if(VAL_TAG(mc_obj->arr->items[j])==XS_FLOAT){pf*=mc_obj->arr->items[j]->f;is_float=1;}
                     }
                     mc_result=is_float?xs_float(pf*(double)pi):xs_int(pi);
                 } else if (strcmp(mc_name,"frequencies")==0) {
@@ -3581,7 +3581,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     for(int j=0;j<mc_obj->arr->len;j++){
                         char *ks=value_str(mc_obj->arr->items[j]);
                         Value *cur=map_get(m->map,ks);
-                        int64_t cnt=cur&&cur->tag==XS_INT?cur->i:0;
+                        int64_t cnt=cur&&VAL_TAG(cur)==XS_INT?VAL_INT(cur):0;
                         Value *nv=xs_int(cnt+1); map_set(m->map,ks,nv); value_decref(nv);
                         free(ks);
                     }
@@ -3635,7 +3635,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         for(int j=1;j<mc_obj->arr->len;j++) mc_obj->arr->items[j-1]=mc_obj->arr->items[j];
                         mc_obj->arr->len--;
                     } else mc_result=value_incref(XS_NULL_VAL);
-                } else if (strcmp(mc_name,"extend")==0&&mc_argc>=1&&(mc_args[0]->tag==XS_ARRAY||mc_args[0]->tag==XS_TUPLE)) {
+                } else if (strcmp(mc_name,"extend")==0&&mc_argc>=1&&(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE)) {
                     for(int j=0;j<mc_args[0]->arr->len;j++) array_push(mc_obj->arr,value_incref(mc_args[0]->arr->items[j]));
                     mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"shuffle")==0) {
@@ -3645,8 +3645,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *tmp=mc_obj->arr->items[j]; mc_obj->arr->items[j]=mc_obj->arr->items[k]; mc_obj->arr->items[k]=tmp;
                     }
                     mc_result=value_incref(mc_obj);
-                } else if (strcmp(mc_name,"skip")==0&&mc_argc>=1&&mc_args[0]->tag==XS_INT) {
-                    int64_t n2=mc_args[0]->i; if(n2<0) n2=0;
+                } else if (strcmp(mc_name,"skip")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t n2=VAL_INT(mc_args[0]); if(n2<0) n2=0;
                     if(n2>mc_obj->arr->len) n2=mc_obj->arr->len;
                     Value *arr=xs_array_new();
                     for(int64_t j=n2;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
@@ -3656,16 +3656,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"total")==0) {
                     int64_t si=0; double sf=0; int is_float=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
-                        if(mc_obj->arr->items[j]->tag==XS_INT) si+=mc_obj->arr->items[j]->i;
-                        else if(mc_obj->arr->items[j]->tag==XS_FLOAT){sf+=mc_obj->arr->items[j]->f;is_float=1;}
+                        if(VAL_TAG(mc_obj->arr->items[j])==XS_INT) si+=VAL_INT(mc_obj->arr->items[j]);
+                        else if(VAL_TAG(mc_obj->arr->items[j])==XS_FLOAT){sf+=mc_obj->arr->items[j]->f;is_float=1;}
                     }
                     mc_result=is_float?xs_float(sf+(double)si):xs_int(si);
                 } else if (strcmp(mc_name,"sum_by")==0&&mc_argc>=1) {
                     int64_t si=0; double sf=0; int is_float=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
                         Value *r=vm_invoke(vm,mc_args[0],&mc_obj->arr->items[j],1);
-                        if(r&&r->tag==XS_INT) si+=r->i;
-                        else if(r&&r->tag==XS_FLOAT){sf+=r->f;is_float=1;}
+                        if(r&&VAL_TAG(r)==XS_INT) si+=VAL_INT(r);
+                        else if(r&&VAL_TAG(r)==XS_FLOAT){sf+=r->f;is_float=1;}
                         value_decref(r);
                     }
                     frame=FRAME;
@@ -3674,48 +3674,48 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     /* join array of chars into a string */
                     size_t cap=256; char *buf=xs_malloc(cap); size_t wpos=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
-                        if(mc_obj->arr->items[j]->tag==XS_STR){
+                        if(VAL_TAG(mc_obj->arr->items[j])==XS_STR){
                             size_t cl=strlen(mc_obj->arr->items[j]->s);
                             while(wpos+cl+1>cap){cap*=2;buf=xs_realloc(buf,cap);}
                             memcpy(buf+wpos,mc_obj->arr->items[j]->s,cl); wpos+=cl;
                         }
                     }
                     buf[wpos]='\0'; mc_result=xs_str(buf); free(buf);
-                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     mc_result=xs_bool(strcmp(mc_args[0]->s,"array")==0||strcmp(mc_args[0]->s,"Array")==0||strcmp(mc_args[0]->s,"List")==0);
                 } else mc_result=value_incref(XS_NULL_VAL);
             }
-            else if (mc_obj->tag==XS_INT||mc_obj->tag==XS_FLOAT||mc_obj->tag==XS_BIGINT) {
-                double num_f=(mc_obj->tag==XS_FLOAT)?mc_obj->f:(mc_obj->tag==XS_BIGINT?bigint_to_double(mc_obj->bigint):(double)mc_obj->i);
-                int64_t num_i=(mc_obj->tag==XS_INT)?mc_obj->i:(mc_obj->tag==XS_BIGINT?(int64_t)bigint_to_double(mc_obj->bigint):(int64_t)mc_obj->f);
+            else if (VAL_TAG(mc_obj)==XS_INT||VAL_TAG(mc_obj)==XS_FLOAT||VAL_TAG(mc_obj)==XS_BIGINT) {
+                double num_f=(VAL_TAG(mc_obj)==XS_FLOAT)?mc_obj->f:(VAL_TAG(mc_obj)==XS_BIGINT?bigint_to_double(mc_obj->bigint):(double)VAL_INT(mc_obj));
+                int64_t num_i=(VAL_TAG(mc_obj)==XS_INT)?VAL_INT(mc_obj):(VAL_TAG(mc_obj)==XS_BIGINT?(int64_t)bigint_to_double(mc_obj->bigint):(int64_t)mc_obj->f);
                 if (strcmp(mc_name,"is_even")==0) {
-                    if (mc_obj->tag==XS_INT) mc_result=xs_bool(mc_obj->i%2==0);
-                    else if (mc_obj->tag==XS_BIGINT)
+                    if (VAL_TAG(mc_obj)==XS_INT) mc_result=xs_bool(VAL_INT(mc_obj)%2==0);
+                    else if (VAL_TAG(mc_obj)==XS_BIGINT)
                         mc_result=xs_bool((mc_obj->bigint->len==0) || (mc_obj->bigint->limbs[0]%2==0));
                     else mc_result=value_incref(XS_FALSE_VAL);
                 }
                 else if (strcmp(mc_name,"is_odd")==0) {
-                    if (mc_obj->tag==XS_INT) mc_result=xs_bool(mc_obj->i%2!=0);
-                    else if (mc_obj->tag==XS_BIGINT)
+                    if (VAL_TAG(mc_obj)==XS_INT) mc_result=xs_bool(VAL_INT(mc_obj)%2!=0);
+                    else if (VAL_TAG(mc_obj)==XS_BIGINT)
                         mc_result=xs_bool((mc_obj->bigint->len>0) && (mc_obj->bigint->limbs[0]%2!=0));
                     else mc_result=value_incref(XS_FALSE_VAL);
                 }
                 else if (strcmp(mc_name,"is_nan")==0)
-                    mc_result=mc_obj->tag==XS_FLOAT?xs_bool(isnan(mc_obj->f)):value_incref(XS_FALSE_VAL);
+                    mc_result=VAL_TAG(mc_obj)==XS_FLOAT?xs_bool(isnan(mc_obj->f)):value_incref(XS_FALSE_VAL);
                 else if (strcmp(mc_name,"is_inf")==0)
-                    mc_result=mc_obj->tag==XS_FLOAT?xs_bool(isinf(mc_obj->f)):value_incref(XS_FALSE_VAL);
+                    mc_result=VAL_TAG(mc_obj)==XS_FLOAT?xs_bool(isinf(mc_obj->f)):value_incref(XS_FALSE_VAL);
                 else if (strcmp(mc_name,"abs")==0) {
-                    if(mc_obj->tag==XS_INT) mc_result=xs_int(mc_obj->i<0?-mc_obj->i:mc_obj->i);
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj)<0?-VAL_INT(mc_obj):VAL_INT(mc_obj));
                     else mc_result=xs_float(fabs(mc_obj->f));
                 } else if (strcmp(mc_name,"sign")==0) {
-                    if(mc_obj->tag==XS_INT) mc_result=xs_int(mc_obj->i>0?1:(mc_obj->i<0?-1:0));
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj)>0?1:(VAL_INT(mc_obj)<0?-1:0));
                     else mc_result=xs_int(mc_obj->f>0.0?1:(mc_obj->f<0.0?-1:0));
                 } else if (strcmp(mc_name,"clamp")==0&&mc_argc>=2) {
-                    double lo=(mc_args[0]->tag==XS_FLOAT)?mc_args[0]->f:(double)mc_args[0]->i;
-                    double hi=(mc_args[1]->tag==XS_FLOAT)?mc_args[1]->f:(double)mc_args[1]->i;
-                    if(mc_obj->tag==XS_INT){
+                    double lo=(VAL_TAG(mc_args[0])==XS_FLOAT)?mc_args[0]->f:(double)VAL_INT(mc_args[0]);
+                    double hi=(VAL_TAG(mc_args[1])==XS_FLOAT)?mc_args[1]->f:(double)VAL_INT(mc_args[1]);
+                    if(VAL_TAG(mc_obj)==XS_INT){
                         int64_t loi=(int64_t)lo,hii=(int64_t)hi;
-                        int64_t v=mc_obj->i<loi?loi:(mc_obj->i>hii?hii:mc_obj->i);
+                        int64_t v=VAL_INT(mc_obj)<loi?loi:(VAL_INT(mc_obj)>hii?hii:VAL_INT(mc_obj));
                         mc_result=xs_int(v);
                     } else {
                         double v=num_f<lo?lo:(num_f>hi?hi:num_f);
@@ -3723,14 +3723,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 } else if (strcmp(mc_name,"to_str")==0||strcmp(mc_name,"to_string")==0) {
                     char buf[64];
-                    if(mc_obj->tag==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)mc_obj->i);
+                    if(VAL_TAG(mc_obj)==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)VAL_INT(mc_obj));
                     else snprintf(buf,sizeof(buf),"%g",mc_obj->f);
                     mc_result=xs_str(buf);
                 } else if (strcmp(mc_name,"to_char")==0) {
                     char buf[2]={(char)(num_i&0xFF),0};
                     mc_result=xs_str(buf);
                 } else if (strcmp(mc_name,"digits")==0) {
-                    int64_t n2=mc_obj->tag==XS_INT?mc_obj->i:(int64_t)mc_obj->f;
+                    int64_t n2=VAL_TAG(mc_obj)==XS_INT?VAL_INT(mc_obj):(int64_t)mc_obj->f;
                     if(n2<0) n2=-n2;
                     Value *arr=xs_array_new();
                     if(n2==0){ array_push(arr->arr,xs_int(0)); }
@@ -3753,14 +3753,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         while(v2>0){buf[--pos]=(char)('0'+(v2&1));v2>>=1;}
                         mc_result=xs_str(buf+pos);
                     }
-                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
-                    int match=(mc_obj->tag==XS_INT&&(strcmp(mc_args[0]->s,"int")==0||strcmp(mc_args[0]->s,"Int")==0))||
-                              (mc_obj->tag==XS_FLOAT&&(strcmp(mc_args[0]->s,"float")==0||strcmp(mc_args[0]->s,"Float")==0));
+                } else if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
+                    int match=(VAL_TAG(mc_obj)==XS_INT&&(strcmp(mc_args[0]->s,"int")==0||strcmp(mc_args[0]->s,"Int")==0))||
+                              (VAL_TAG(mc_obj)==XS_FLOAT&&(strcmp(mc_args[0]->s,"float")==0||strcmp(mc_args[0]->s,"Float")==0));
                     mc_result=xs_bool(match);
                 } else mc_result=value_incref(XS_NULL_VAL);
                 (void)num_f; (void)num_i;
             }
-            else if (mc_obj->tag == XS_RANGE && mc_obj->range) {
+            else if (VAL_TAG(mc_obj) == XS_RANGE && mc_obj->range) {
                 XSRange *rr = mc_obj->range;
                 int64_t len = rr->inclusive ? (rr->end - rr->start + 1)
                                             : (rr->end - rr->start);
@@ -3773,8 +3773,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result = xs_int(rr->end);
                 else if (strcmp(mc_name,"is_empty")==0)
                     mc_result = xs_bool(len == 0);
-                else if (strcmp(mc_name,"contains")==0 && mc_argc>=1 && mc_args[0]->tag==XS_INT) {
-                    int64_t v = mc_args[0]->i;
+                else if (strcmp(mc_name,"contains")==0 && mc_argc>=1 && VAL_TAG(mc_args[0])==XS_INT) {
+                    int64_t v = VAL_INT(mc_args[0]);
                     int ok = rr->inclusive
                         ? (v >= rr->start && v <= rr->end)
                         : (v >= rr->start && v <  rr->end);
@@ -3792,12 +3792,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 else mc_result = value_incref(XS_NULL_VAL);
             }
-            else if (mc_obj->tag == XS_REGEX && mc_obj->s) {
+            else if (VAL_TAG(mc_obj) == XS_REGEX && mc_obj->s) {
                 /* Regex methods: .test/.is_match, .match/.find, .replace,
                    .source/.pattern. Mirrors interp.c. */
                 const char *pat = mc_obj->s;
                 if ((strcmp(mc_name,"test")==0 || strcmp(mc_name,"is_match")==0)
-                        && mc_argc>=1 && mc_args[0]->tag==XS_STR) {
+                        && mc_argc>=1 && VAL_TAG(mc_args[0])==XS_STR) {
                     regex_t re;
                     if (regcomp(&re, pat, REG_EXTENDED | REG_NOSUB) == 0) {
                         int ok = (regexec(&re, mc_args[0]->s, 0, NULL, 0) == 0);
@@ -3807,7 +3807,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         mc_result = value_incref(XS_FALSE_VAL);
                     }
                 } else if ((strcmp(mc_name,"match")==0 || strcmp(mc_name,"find")==0)
-                        && mc_argc>=1 && mc_args[0]->tag==XS_STR) {
+                        && mc_argc>=1 && VAL_TAG(mc_args[0])==XS_STR) {
                     regex_t re;
                     if (regcomp(&re, pat, REG_EXTENDED) == 0) {
                         regmatch_t m[1];
@@ -3822,7 +3822,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         mc_result = value_incref(XS_NULL_VAL);
                     }
                 } else if (strcmp(mc_name,"replace")==0 && mc_argc>=2
-                        && mc_args[0]->tag==XS_STR && mc_args[1]->tag==XS_STR) {
+                        && VAL_TAG(mc_args[0])==XS_STR && VAL_TAG(mc_args[1])==XS_STR) {
                     regex_t re;
                     if (regcomp(&re, pat, REG_EXTENDED) == 0) {
                         regmatch_t m[1];
@@ -3852,30 +3852,30 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
             else {
                 /* generic methods for any remaining types */
-                if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&mc_args[0]->tag==XS_STR) {
+                if (strcmp(mc_name,"is_a")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
                     const char *tn = mc_args[0]->s;
                     int match = 0;
-                    if (mc_obj->tag==XS_STR && (strcmp(tn,"str")==0||strcmp(tn,"String")==0)) match=1;
-                    else if (mc_obj->tag==XS_INT && (strcmp(tn,"int")==0||strcmp(tn,"Int")==0)) match=1;
-                    else if (mc_obj->tag==XS_FLOAT && (strcmp(tn,"float")==0||strcmp(tn,"Float")==0)) match=1;
-                    else if ((mc_obj->tag==XS_ARRAY||mc_obj->tag==XS_TUPLE) && (strcmp(tn,"array")==0||strcmp(tn,"Array")==0||strcmp(tn,"List")==0)) match=1;
-                    else if (mc_obj->tag==XS_BOOL && (strcmp(tn,"bool")==0||strcmp(tn,"Bool")==0)) match=1;
+                    if (VAL_TAG(mc_obj)==XS_STR && (strcmp(tn,"str")==0||strcmp(tn,"String")==0)) match=1;
+                    else if (VAL_TAG(mc_obj)==XS_INT && (strcmp(tn,"int")==0||strcmp(tn,"Int")==0)) match=1;
+                    else if (VAL_TAG(mc_obj)==XS_FLOAT && (strcmp(tn,"float")==0||strcmp(tn,"Float")==0)) match=1;
+                    else if ((VAL_TAG(mc_obj)==XS_ARRAY||VAL_TAG(mc_obj)==XS_TUPLE) && (strcmp(tn,"array")==0||strcmp(tn,"Array")==0||strcmp(tn,"List")==0)) match=1;
+                    else if (VAL_TAG(mc_obj)==XS_BOOL && (strcmp(tn,"bool")==0||strcmp(tn,"Bool")==0)) match=1;
                     mc_result = xs_bool(match);
                 } else {
                 /* check plugin methods */
                 Value *pmethods = map_get(vm->globals, "__plugin_methods");
-                if (pmethods && pmethods->tag == XS_MAP) {
+                if (pmethods && VAL_TAG(pmethods) == XS_MAP) {
                     const char *type_name = NULL;
-                    if (mc_obj->tag == XS_STR) type_name = "str";
-                    else if (mc_obj->tag == XS_INT) type_name = "int";
-                    else if (mc_obj->tag == XS_FLOAT) type_name = "float";
-                    else if (mc_obj->tag == XS_ARRAY) type_name = "array";
-                    else if (mc_obj->tag == XS_BOOL) type_name = "bool";
+                    if (VAL_TAG(mc_obj) == XS_STR) type_name = "str";
+                    else if (VAL_TAG(mc_obj) == XS_INT) type_name = "int";
+                    else if (VAL_TAG(mc_obj) == XS_FLOAT) type_name = "float";
+                    else if (VAL_TAG(mc_obj) == XS_ARRAY) type_name = "array";
+                    else if (VAL_TAG(mc_obj) == XS_BOOL) type_name = "bool";
                     if (type_name) {
                         Value *tm = map_get(pmethods->map, type_name);
-                        if (tm && tm->tag == XS_MAP) {
+                        if (tm && VAL_TAG(tm) == XS_MAP) {
                             Value *pfn = map_get(tm->map, mc_name);
-                            if (pfn && (pfn->tag == XS_CLOSURE || pfn->tag == XS_NATIVE)) {
+                            if (pfn && (VAL_TAG(pfn) == XS_CLOSURE || VAL_TAG(pfn) == XS_NATIVE)) {
                                 /* call plugin method with self as first arg */
                                 Value *pargs[17];
                                 pargs[0] = mc_obj;
@@ -3893,20 +3893,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
 
             /* check plugin methods if result is null */
-            if (!mc_called && mc_result && mc_result->tag == XS_NULL) {
+            if (!mc_called && mc_result && VAL_TAG(mc_result) == XS_NULL) {
                 Value *pmethods = map_get(vm->globals, "__plugin_methods");
-                if (pmethods && pmethods->tag == XS_MAP) {
+                if (pmethods && VAL_TAG(pmethods) == XS_MAP) {
                     const char *ptype = NULL;
-                    if (mc_obj->tag == XS_STR) ptype = "str";
-                    else if (mc_obj->tag == XS_INT) ptype = "int";
-                    else if (mc_obj->tag == XS_FLOAT) ptype = "float";
-                    else if (mc_obj->tag == XS_ARRAY) ptype = "array";
-                    else if (mc_obj->tag == XS_BOOL) ptype = "bool";
+                    if (VAL_TAG(mc_obj) == XS_STR) ptype = "str";
+                    else if (VAL_TAG(mc_obj) == XS_INT) ptype = "int";
+                    else if (VAL_TAG(mc_obj) == XS_FLOAT) ptype = "float";
+                    else if (VAL_TAG(mc_obj) == XS_ARRAY) ptype = "array";
+                    else if (VAL_TAG(mc_obj) == XS_BOOL) ptype = "bool";
                     if (ptype) {
                         Value *tm = map_get(pmethods->map, ptype);
-                        if (tm && tm->tag == XS_MAP) {
+                        if (tm && VAL_TAG(tm) == XS_MAP) {
                             Value *pfn = map_get(tm->map, mc_name);
-                            if (pfn && (pfn->tag == XS_CLOSURE || pfn->tag == XS_NATIVE)) {
+                            if (pfn && (VAL_TAG(pfn) == XS_CLOSURE || VAL_TAG(pfn) == XS_NATIVE)) {
                                 Value *pargs[17];
                                 pargs[0] = mc_obj;
                                 int ptotal = 1 + mc_argc;
@@ -3936,12 +3936,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
 
         /* bitwise */
-        case OP_BAND: { Value *b=POP(),*a=POP(); PUSH(xs_int(a->i & b->i)); value_decref(a);value_decref(b); break; }
-        case OP_BOR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(a->i | b->i)); value_decref(a);value_decref(b); break; }
-        case OP_BXOR: { Value *b=POP(),*a=POP(); PUSH(xs_int(a->i ^ b->i)); value_decref(a);value_decref(b); break; }
-        case OP_BNOT: { Value *a=POP(); PUSH(xs_int(~a->i)); value_decref(a); break; }
-        case OP_SHL:  { Value *b=POP(),*a=POP(); PUSH(xs_int(a->i << (b->i & 63))); value_decref(a);value_decref(b); break; }
-        case OP_SHR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(a->i >> (b->i & 63))); value_decref(a);value_decref(b); break; }
+        case OP_BAND: { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) & VAL_INT(b))); value_decref(a);value_decref(b); break; }
+        case OP_BOR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) | VAL_INT(b))); value_decref(a);value_decref(b); break; }
+        case OP_BXOR: { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) ^ VAL_INT(b))); value_decref(a);value_decref(b); break; }
+        case OP_BNOT: { Value *a=POP(); PUSH(xs_int(~VAL_INT(a))); value_decref(a); break; }
+        case OP_SHL:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) << (VAL_INT(b) & 63))); value_decref(a);value_decref(b); break; }
+        case OP_SHR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) >> (VAL_INT(b) & 63))); value_decref(a);value_decref(b); break; }
 
         case OP_TRY_BEGIN: {
             if (frame->try_depth < VM_TRY_STACK_MAX) {
@@ -4016,7 +4016,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             if (vm->tracer) {
                 uint16_t name_idx = INSTR_Bx(instr);
                 Value *name_val = PROTO->chunk.consts[name_idx];
-                const char *var_name = (name_val && name_val->tag == XS_STR) ? name_val->s : "?";
+                const char *var_name = (name_val && VAL_TAG(name_val) == XS_STR) ? name_val->s : "?";
                 Value *val = (vm->sp > vm->stack) ? PEEK(0) : NULL;
                 tracer_record_store(vm->tracer, var_name, val);
             }
@@ -4029,7 +4029,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 Value *top = (vm->sp > vm->stack) ? PEEK(0) : NULL;
                 const char *buf = NULL;
                 int buf_len = 0;
-                if (top && top->tag == XS_STR && top->s) {
+                if (top && VAL_TAG(top) == XS_STR && top->s) {
                     buf = top->s;
                     buf_len = (int)strlen(top->s);
                 }
@@ -4058,7 +4058,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         /* spread */
         case OP_SPREAD: {
             Value *arr = POP();
-            if (arr->tag == XS_ARRAY) {
+            if (VAL_TAG(arr) == XS_ARRAY) {
                 for (int si = 0; si < arr->arr->len; si++) {
                     value_incref(arr->arr->items[si]);
                     PUSH(arr->arr->items[si]);
@@ -4154,17 +4154,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         // --- async/generators
         case OP_AWAIT: {
             Value *task = POP();
-            if (task->tag == XS_MAP) {
+            if (VAL_TAG(task) == XS_MAP) {
                 Value *tid_val = map_get(task->map, "_task_id");
-                if (tid_val && tid_val->tag == XS_INT) {
-                    int tid = (int)tid_val->i;
+                if (tid_val && VAL_TAG(tid_val) == XS_INT) {
+                    int tid = (int)VAL_INT(tid_val);
                     for (int t = 0; t <= tid && t < vm->n_tasks; t++) {
                         if (vm->tasks[t].done) continue;
                         Value *tfn = vm->tasks[t].fn;
                         Value *tres = NULL;
-                        if (tfn->tag == XS_NATIVE) {
+                        if (VAL_TAG(tfn) == XS_NATIVE) {
                             tres = tfn->native(NULL, NULL, 0);
-                        } else if (tfn->tag == XS_CLOSURE) {
+                        } else if (VAL_TAG(tfn) == XS_CLOSURE) {
                             tres = vm_invoke(vm, tfn, NULL, 0);
                         }
                         vm->tasks[t].result = tres ? tres : value_incref(XS_NULL_VAL);
@@ -4181,20 +4181,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     value_decref(task);
                 } else {
                     Value *status = map_get(task->map, "_status");
-                    if (status && status->tag == XS_STR && strcmp(status->s, "done") == 0) {
+                    if (status && VAL_TAG(status) == XS_STR && strcmp(status->s, "done") == 0) {
                         Value *await_result = map_get(task->map, "_result");
                         PUSH(await_result ? value_incref(await_result) : value_incref(XS_NULL_VAL));
                         value_decref(task);
-                    } else if (status && status->tag == XS_STR && strcmp(status->s, "pending") == 0) {
+                    } else if (status && VAL_TAG(status) == XS_STR && strcmp(status->s, "pending") == 0) {
                         Value *task_fn = map_get(task->map, "_fn");
-                        if (task_fn && task_fn->tag == XS_NATIVE) {
+                        if (task_fn && VAL_TAG(task_fn) == XS_NATIVE) {
                             Value *await_result = task_fn->native(NULL, NULL, 0);
                             { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
                             map_set(task->map, "_result", await_result ? await_result : value_incref(XS_NULL_VAL));
                             PUSH(await_result ? await_result : value_incref(XS_NULL_VAL));
                             if (await_result) value_decref(await_result);
                             value_decref(task);
-                        } else if (task_fn && task_fn->tag == XS_CLOSURE) {
+                        } else if (task_fn && VAL_TAG(task_fn) == XS_CLOSURE) {
                             int cl_arity = task_fn->cl->proto->arity;
                             if (cl_arity < 0) cl_arity = -(cl_arity + 1);
                             if (cl_arity == 0) {
@@ -4229,7 +4229,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                     }
                 }
-            } else if (task->tag == XS_NATIVE) {
+            } else if (VAL_TAG(task) == XS_NATIVE) {
                 Value *await_result = task->native(NULL, NULL, 0);
                 value_decref(task);
                 PUSH(await_result ? await_result : value_incref(XS_NULL_VAL));
@@ -4261,25 +4261,25 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_SPAWN: {
             Value *fn = POP();
             Value *task = xs_map_new();
-            if (fn->tag == XS_NATIVE || fn->tag == XS_CLOSURE) {
+            if (VAL_TAG(fn) == XS_NATIVE || VAL_TAG(fn) == XS_CLOSURE) {
                 /* immediately execute spawn blocks */
-                if (fn->tag == XS_CLOSURE) {
+                if (VAL_TAG(fn) == XS_CLOSURE) {
                     int cl_arity = fn->cl->proto->arity;
                     if (cl_arity < 0) cl_arity = -(cl_arity + 1);
                     if (cl_arity == 0) {
                         Value *result = vm_invoke(vm, fn, NULL, 0);
                         frame = FRAME;
                         /* check if result is an actor: unwrap as actor instance */
-                        if (result && result->tag == XS_MAP && map_get(result->map, "__actor_name")) {
+                        if (result && VAL_TAG(result) == XS_MAP && map_get(result->map, "__actor_name")) {
                             Value *actor_inst = xs_map_new();
                             Value *state = map_get(result->map, "__state");
-                            if (state && state->tag == XS_MAP)
+                            if (state && VAL_TAG(state) == XS_MAP)
                                 for (int aj = 0; aj < state->map->cap; aj++)
                                     if (state->map->keys[aj])
                                         map_set(actor_inst->map, state->map->keys[aj],
                                                 value_incref(state->map->vals[aj]));
                             Value *methods = map_get(result->map, "__methods");
-                            if (methods && methods->tag == XS_MAP)
+                            if (methods && VAL_TAG(methods) == XS_MAP)
                                 map_set(actor_inst->map, "__methods", value_incref(methods));
                             Value *aname = map_get(result->map, "__actor_name");
                             if (aname) map_set(actor_inst->map, "__type", value_incref(aname));
@@ -4296,7 +4296,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
                         map_set(task->map, "_result", value_incref(XS_NULL_VAL));
                     }
-                } else if (fn->tag == XS_NATIVE) {
+                } else if (VAL_TAG(fn) == XS_NATIVE) {
                     Value *result = fn->native(NULL, NULL, 0);
                     { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
                     map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
@@ -4304,7 +4304,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 if (1) { /* immediate execution done above, skip old deferred path */
                 } else {
-                    if (fn->tag == XS_NATIVE) {
+                    if (VAL_TAG(fn) == XS_NATIVE) {
                         Value *result = fn->native(NULL, NULL, 0);
                         { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
                         map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
@@ -4331,19 +4331,19 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                     }
                 }
-            } else if (fn->tag == XS_MAP && map_get(fn->map, "__actor_name")) {
+            } else if (VAL_TAG(fn) == XS_MAP && map_get(fn->map, "__actor_name")) {
                 /* spawn an actor: create instance with state + methods merged */
                 value_decref(task);
                 Value *actor_inst = xs_map_new();
                 Value *state = map_get(fn->map, "__state");
-                if (state && state->tag == XS_MAP) {
+                if (state && VAL_TAG(state) == XS_MAP) {
                     for (int j = 0; j < state->map->cap; j++)
                         if (state->map->keys[j])
                             map_set(actor_inst->map, state->map->keys[j],
                                     value_incref(state->map->vals[j]));
                 }
                 Value *methods = map_get(fn->map, "__methods");
-                if (methods && methods->tag == XS_MAP) {
+                if (methods && VAL_TAG(methods) == XS_MAP) {
                     map_set(actor_inst->map, "__methods", value_incref(methods));
                 }
                 Value *aname = map_get(fn->map, "__actor_name");
@@ -4373,7 +4373,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             for (int i = ntmp-1; i >= 0; i--) tmp[i] = POP();
             for (int i = 0; i < nfields; i++) {
                 Value *k = tmp[i*2], *v = tmp[i*2+1];
-                if (k->tag == XS_STR) map_set(fields->map, k->s, v);
+                if (VAL_TAG(k) == XS_STR) map_set(fields->map, k->s, v);
                 value_decref(k); value_decref(v);
             }
             if (tmp != tmp_s) free(tmp);
@@ -4392,12 +4392,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                define. */
             Value *trait_val = POP();
             Value *class_val = POP();
-            if ((class_val->tag == XS_MAP || class_val->tag == XS_MODULE) &&
-                (trait_val->tag == XS_MAP || trait_val->tag == XS_MODULE)) {
+            if ((VAL_TAG(class_val) == XS_MAP || VAL_TAG(class_val) == XS_MODULE) &&
+                (VAL_TAG(trait_val) == XS_MAP || VAL_TAG(trait_val) == XS_MODULE)) {
                 Value *methods = map_get(class_val->map, "__methods");
                 Value *defaults = map_get(trait_val->map, "__defaults");
-                if (methods && methods->tag == XS_MAP &&
-                    defaults && defaults->tag == XS_MAP) {
+                if (methods && VAL_TAG(methods) == XS_MAP &&
+                    defaults && VAL_TAG(defaults) == XS_MAP) {
                     XSMap *dm = defaults->map;
                     for (int j = 0; j < dm->cap; j++) {
                         if (!dm->keys[j]) continue;
@@ -4415,11 +4415,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *closure = POP();
             Value *name_val = POP();
             Value *type_val = POP();
-            if (type_val->tag == XS_MAP || type_val->tag == XS_MODULE) {
+            if (VAL_TAG(type_val) == XS_MAP || VAL_TAG(type_val) == XS_MODULE) {
                 Value *methods = map_get(type_val->map, "__methods");
-                if (methods && methods->tag == XS_MAP && name_val->tag == XS_STR) {
+                if (methods && VAL_TAG(methods) == XS_MAP && VAL_TAG(name_val) == XS_STR) {
                     map_set(methods->map, name_val->s, closure);
-                } else if (name_val->tag == XS_STR) {
+                } else if (VAL_TAG(name_val) == XS_STR) {
                     Value *impl = map_get(type_val->map, "__impl__");
                     if (!impl) {
                         impl = xs_map_new();
@@ -4427,7 +4427,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         value_decref(impl);
                         impl = map_get(type_val->map, "__impl__");
                     }
-                    if (impl && impl->tag == XS_MAP)
+                    if (impl && VAL_TAG(impl) == XS_MAP)
                         map_set(impl->map, name_val->s, closure);
                 }
             }
@@ -4459,11 +4459,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *msg = POP();
             Value *actor_val = POP();
             Value *result = value_incref(XS_NULL_VAL);
-            if (actor_val->tag == XS_MAP) {
+            if (VAL_TAG(actor_val) == XS_MAP) {
                 Value *methods = map_get(actor_val->map, "__methods");
-                if (methods && methods->tag == XS_MAP) {
+                if (methods && VAL_TAG(methods) == XS_MAP) {
                     Value *handle_fn = map_get(methods->map, "handle");
-                    if (handle_fn && handle_fn->tag == XS_CLOSURE) {
+                    if (handle_fn && VAL_TAG(handle_fn) == XS_CLOSURE) {
                         /* call handle(self, msg) via vm_invoke */
                         Value *args2[2] = { actor_val, msg };
                         value_decref(result);
@@ -4472,17 +4472,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if (!result) result = value_incref(XS_NULL_VAL);
                     }
                 }
-            } else if (actor_val->tag == XS_ACTOR && actor_val->actor) {
+            } else if (VAL_TAG(actor_val) == XS_ACTOR && actor_val->actor) {
                 XSActor *act = actor_val->actor;
                 if (act->handle_fn) {
                     if (act->methods) {
                         Value *hfn = map_get(act->methods, "handle");
-                        if (hfn && hfn->tag == XS_NATIVE) {
+                        if (hfn && VAL_TAG(hfn) == XS_NATIVE) {
                             Value *hargs[1] = { msg };
                             Value *hr = hfn->native(NULL, hargs, 1);
                             value_decref(result);
                             result = hr ? hr : value_incref(XS_NULL_VAL);
-                        } else if (hfn && hfn->tag == XS_CLOSURE) {
+                        } else if (hfn && VAL_TAG(hfn) == XS_CLOSURE) {
                             value_decref(result);
                             value_incref(hfn);
                             PUSH(value_incref(msg));
@@ -4507,8 +4507,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_FLOOR_DIV: {
             Value *b = POP(), *a = POP();
-            double av = a->tag==XS_INT ? (double)a->i : a->f;
-            double bv = b->tag==XS_INT ? (double)b->i : b->f;
+            double av = VAL_TAG(a)==XS_INT ? (double)VAL_INT(a) : a->f;
+            double bv = VAL_TAG(b)==XS_INT ? (double)VAL_INT(b) : b->f;
             Value *r;
             if (bv == 0.0) { r = value_incref(XS_NULL_VAL); }
             else r = xs_int((int64_t)floor(av / bv));
@@ -4532,7 +4532,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             for (int i = ne - 1; i >= 0; i--) tmp_e[i] = POP();
             for (int i = 0; i < nvariants; i++) {
                 Value *k = tmp_e[i * 2], *v = tmp_e[i * 2 + 1];
-                if (k->tag == XS_STR) map_set(enum_map->map, k->s, v);
+                if (VAL_TAG(k) == XS_STR) map_set(enum_map->map, k->s, v);
                 value_decref(k); value_decref(v);
             }
             if (tmp_e != te_s) free(tmp_e);
@@ -4549,9 +4549,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             for (int i = nargs - 1; i >= 0; i--) inst_args[i] = POP();
             Value *cls_val = POP();
             Value *inst = xs_map_new();
-            if (cls_val->tag == XS_MAP || cls_val->tag == XS_MODULE) {
+            if (VAL_TAG(cls_val) == XS_MAP || VAL_TAG(cls_val) == XS_MODULE) {
                 Value *fields = map_get(cls_val->map, "__fields");
-                if (fields && fields->tag == XS_MAP) {
+                if (fields && VAL_TAG(fields) == XS_MAP) {
                     for (int j = 0; j < fields->map->cap; j++) {
                         if (fields->map->keys[j])
                             map_set(inst->map, fields->map->keys[j],
@@ -4559,7 +4559,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 }
                 Value *methods = map_get(cls_val->map, "__methods");
-                if (methods && methods->tag == XS_MAP) {
+                if (methods && VAL_TAG(methods) == XS_MAP) {
                     for (int j = 0; j < methods->map->cap; j++) {
                         if (methods->map->keys[j])
                             map_set(inst->map, methods->map->keys[j],
@@ -4570,7 +4570,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             { Value *nv = xs_str(cls_name); map_set(inst->map, "__type", nv); value_decref(nv); }
             {
                 Value *mi_init = map_get(inst->map, "init");
-                if (mi_init && mi_init->tag == XS_NATIVE && nargs > 0) {
+                if (mi_init && VAL_TAG(mi_init) == XS_NATIVE && nargs > 0) {
                     Value *mi_call_args[257];
                     mi_call_args[0] = inst;
                     for (int i = 0; i < nargs; i++)
@@ -4581,7 +4581,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     if (inst_args != ia_s) free(inst_args);
                     value_decref(cls_val);
                     PUSH(inst);
-                } else if (mi_init && mi_init->tag == XS_CLOSURE && nargs > 0) {
+                } else if (mi_init && VAL_TAG(mi_init) == XS_CLOSURE && nargs > 0) {
                     value_decref(cls_val);
                     PUSH(inst);
                     PUSH(value_incref(inst));
@@ -4609,11 +4609,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_INHERIT: {
             Value *base = POP();
             Value *child = POP();
-            if ((base->tag == XS_MAP || base->tag == XS_MODULE) &&
-                (child->tag == XS_MAP || child->tag == XS_MODULE)) {
+            if ((VAL_TAG(base) == XS_MAP || VAL_TAG(base) == XS_MODULE) &&
+                (VAL_TAG(child) == XS_MAP || VAL_TAG(child) == XS_MODULE)) {
                 Value *base_fields = map_get(base->map, "__fields");
                 Value *child_fields = map_get(child->map, "__fields");
-                if (base_fields && base_fields->tag == XS_MAP && child_fields && child_fields->tag == XS_MAP) {
+                if (base_fields && VAL_TAG(base_fields) == XS_MAP && child_fields && VAL_TAG(child_fields) == XS_MAP) {
                     for (int j = 0; j < base_fields->map->cap; j++) {
                         if (base_fields->map->keys[j] &&
                             !map_get(child_fields->map, base_fields->map->keys[j]))
@@ -4623,7 +4623,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 Value *base_methods = map_get(base->map, "__methods");
                 Value *child_methods = map_get(child->map, "__methods");
-                if (base_methods && base_methods->tag == XS_MAP && child_methods && child_methods->tag == XS_MAP) {
+                if (base_methods && VAL_TAG(base_methods) == XS_MAP && child_methods && VAL_TAG(child_methods) == XS_MAP) {
                     for (int j = 0; j < base_methods->map->cap; j++) {
                         if (base_methods->map->keys[j] &&
                             !map_get(child_methods->map, base_methods->map->keys[j]))
@@ -4665,7 +4665,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             const char *item_name = PROTO->chunk.consts[INSTR_A(instr)]->s;
             const char *mod_name  = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *mod = map_get(vm->globals, mod_name);
-            if (mod && (mod->tag == XS_MAP || mod->tag == XS_MODULE)) {
+            if (mod && (VAL_TAG(mod) == XS_MAP || VAL_TAG(mod) == XS_MODULE)) {
                 Value *item = map_get(mod->map, item_name);
                 PUSH(item ? value_incref(item) : value_incref(XS_NULL_VAL));
             } else {
@@ -4686,7 +4686,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *state = xs_map_new();
             for (int i = 0; i < nstate; i++) {
                 Value *k = state_tmp[i * 2], *v = state_tmp[i * 2 + 1];
-                if (k->tag == XS_STR) map_set(state->map, k->s, v);
+                if (VAL_TAG(k) == XS_STR) map_set(state->map, k->s, v);
                 value_decref(k); value_decref(v);
             }
             if (state_tmp != st_s) free(state_tmp);
@@ -4701,10 +4701,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_OPT_CHAIN: {
             const char *field_name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *obj = POP();
-            if (obj->tag == XS_NULL) {
+            if (VAL_TAG(obj) == XS_NULL) {
                 value_decref(obj);
                 PUSH(value_incref(XS_NULL_VAL));
-            } else if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+            } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 Value *val = map_get(obj->map, field_name);
                 PUSH(val ? value_incref(val) : value_incref(XS_NULL_VAL));
                 value_decref(obj);
@@ -4717,7 +4717,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_NULL_COALESCE: {
             Value *b = POP(), *a = POP();
-            if (a->tag == XS_NULL) {
+            if (VAL_TAG(a) == XS_NULL) {
                 value_decref(a);
                 PUSH(b);
             } else {
@@ -4729,9 +4729,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_TRY_OP: {
             Value *val = POP();
-            if (val->tag == XS_MAP) {
+            if (VAL_TAG(val) == XS_MAP) {
                 Value *tag_val = map_get(val->map, "_tag");
-                if (tag_val && tag_val->tag == XS_STR && strcmp(tag_val->s, "Err") == 0) {
+                if (tag_val && VAL_TAG(tag_val) == XS_STR && strcmp(tag_val->s, "Err") == 0) {
                     upvalue_close_all(&vm->open_upvalues, frame->base);
                     while (vm->sp > frame->base) value_decref(POP());
                     value_decref(frame->closure_val);
@@ -4757,13 +4757,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_PIPE: {
             Value *fn = POP();
             Value *arg = POP();
-            if (fn->tag == XS_NATIVE) {
+            if (VAL_TAG(fn) == XS_NATIVE) {
                 Value *args[1] = { arg };
                 Value *result = fn->native(NULL, args, 1);
                 value_decref(arg);
                 value_decref(fn);
                 PUSH(result ? result : value_incref(XS_NULL_VAL));
-            } else if (fn->tag == XS_CLOSURE) {
+            } else if (VAL_TAG(fn) == XS_CLOSURE) {
                 PUSH(arg);
                 value_incref(fn);
                 if (call_frame_push(vm, fn, 1)) {
@@ -4785,16 +4785,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_IN: {
             Value *right = POP(), *left = POP();
             int found = 0;
-            if (right->tag == XS_ARRAY) {
+            if (VAL_TAG(right) == XS_ARRAY) {
                 for (int j = 0; j < right->arr->len; j++)
                     if (value_equal(left, right->arr->items[j])) { found = 1; break; }
-            } else if (right->tag == XS_MAP || right->tag == XS_MODULE) {
-                if (left->tag == XS_STR) found = map_has(right->map, left->s);
-            } else if (right->tag == XS_STR && left->tag == XS_STR) {
+            } else if (VAL_TAG(right) == XS_MAP || VAL_TAG(right) == XS_MODULE) {
+                if (VAL_TAG(left) == XS_STR) found = map_has(right->map, left->s);
+            } else if (VAL_TAG(right) == XS_STR && VAL_TAG(left) == XS_STR) {
                 found = strstr(right->s, left->s) != NULL;
-            } else if (right->tag == XS_RANGE) {
-                if (left->tag == XS_INT) {
-                    int64_t v = left->i;
+            } else if (VAL_TAG(right) == XS_RANGE) {
+                if (VAL_TAG(left) == XS_INT) {
+                    int64_t v = VAL_INT(left);
                     found = v >= right->range->start &&
                             (right->range->inclusive ? v <= right->range->end : v < right->range->end);
                 }
@@ -4806,32 +4806,32 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_IS: {
             Value *right = POP(), *left = POP();
             int match = 0;
-            if (right->tag == XS_STR) {
+            if (VAL_TAG(right) == XS_STR) {
                 const char *t = right->s;
-                if      (strcmp(t, "int") == 0 || strcmp(t, "i64") == 0) match = (left->tag == XS_INT);
-                else if (strcmp(t, "float") == 0 || strcmp(t, "f64") == 0) match = (left->tag == XS_FLOAT);
-                else if (strcmp(t, "str") == 0 || strcmp(t, "string") == 0) match = (left->tag == XS_STR);
-                else if (strcmp(t, "bool") == 0) match = (left->tag == XS_BOOL);
-                else if (strcmp(t, "array") == 0) match = (left->tag == XS_ARRAY);
-                else if (strcmp(t, "map") == 0) match = (left->tag == XS_MAP);
-                else if (strcmp(t, "null") == 0) match = (left->tag == XS_NULL);
-                else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (left->tag == XS_FUNC || left->tag == XS_NATIVE || left->tag == XS_CLOSURE);
-                else if (strcmp(t, "tuple") == 0) match = (left->tag == XS_TUPLE);
+                if      (strcmp(t, "int") == 0 || strcmp(t, "i64") == 0) match = (VAL_TAG(left) == XS_INT);
+                else if (strcmp(t, "float") == 0 || strcmp(t, "f64") == 0) match = (VAL_TAG(left) == XS_FLOAT);
+                else if (strcmp(t, "str") == 0 || strcmp(t, "string") == 0) match = (VAL_TAG(left) == XS_STR);
+                else if (strcmp(t, "bool") == 0) match = (VAL_TAG(left) == XS_BOOL);
+                else if (strcmp(t, "array") == 0) match = (VAL_TAG(left) == XS_ARRAY);
+                else if (strcmp(t, "map") == 0) match = (VAL_TAG(left) == XS_MAP);
+                else if (strcmp(t, "null") == 0) match = (VAL_TAG(left) == XS_NULL);
+                else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (VAL_TAG(left) == XS_FUNC || VAL_TAG(left) == XS_NATIVE || VAL_TAG(left) == XS_CLOSURE);
+                else if (strcmp(t, "tuple") == 0) match = (VAL_TAG(left) == XS_TUPLE);
                 /* shape predicates used by the match-pattern compiler.
                    Slice patterns ([a, b]) only match arrays; tuple
                    patterns ((a, b)) only match tuples. Without this
                    strictness `match (1,2) { [a,b] => ... }` would
                    spuriously fire on a tuple subject. */
                 else if (strcmp(t, "<array-like>") == 0)
-                    match = (left->tag == XS_ARRAY);
+                    match = (VAL_TAG(left) == XS_ARRAY);
                 else if (strcmp(t, "<tuple-like>") == 0)
-                    match = (left->tag == XS_TUPLE);
+                    match = (VAL_TAG(left) == XS_TUPLE);
                 else if (strcmp(t, "<map-like>") == 0)
-                    match = (left->tag == XS_MAP || left->tag == XS_MODULE ||
-                             left->tag == XS_STRUCT_VAL || left->tag == XS_INST);
-                else if (left->tag == XS_STRUCT_VAL && left->st) match = (strcmp(left->st->type_name, t) == 0);
-                else if (left->tag == XS_ENUM_VAL && left->en) match = (strcmp(left->en->type_name, t) == 0);
-                else if (left->tag == XS_INST && left->inst && left->inst->class_) match = (strcmp(left->inst->class_->name, t) == 0);
+                    match = (VAL_TAG(left) == XS_MAP || VAL_TAG(left) == XS_MODULE ||
+                             VAL_TAG(left) == XS_STRUCT_VAL || VAL_TAG(left) == XS_INST);
+                else if (VAL_TAG(left) == XS_STRUCT_VAL && left->st) match = (strcmp(left->st->type_name, t) == 0);
+                else if (VAL_TAG(left) == XS_ENUM_VAL && left->en) match = (strcmp(left->en->type_name, t) == 0);
+                else if (VAL_TAG(left) == XS_INST && left->inst && left->inst->class_) match = (strcmp(left->inst->class_->name, t) == 0);
             }
             value_decref(left); value_decref(right);
             PUSH(xs_bool(match));
@@ -4840,7 +4840,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_MAP_MERGE: {
             Value *src = POP(), *dst = POP();
-            if (dst->tag == XS_MAP && src->tag == XS_MAP) {
+            if (VAL_TAG(dst) == XS_MAP && VAL_TAG(src) == XS_MAP) {
                 int nk = 0;
                 char **keys = map_keys(src->map, &nk);
                 for (int i = 0; i < nk; i++) {
@@ -4931,7 +4931,7 @@ int vm_return_fast(VM *vm) {
    to surface it on the next step. */
 int vm_call_closure_fast(VM *vm, int argc) {
     Value *callee = vm->sp[-argc - 1];
-    if (callee->tag != XS_CLOSURE) return 1;
+    if (VAL_TAG(callee) != XS_CLOSURE) return 1;
     XSClosure *cl = callee->cl;
     XSProto *proto = cl->proto;
     if (proto->arity < 0) return 1;          /* signed-encoded variadic */
@@ -4984,7 +4984,7 @@ int vm_run_with(VM *vm, XSProto *proto, int (*entry)(VM *)) {
     top_cl->upvalues = NULL;
     top_cl->refcount = 1;
     Value *top_val = xs_malloc(sizeof *top_val);
-    top_val->tag      = XS_CLOSURE;
+    top_val->tag = XS_CLOSURE;
     top_val->refcount = 1;
     top_val->cl       = top_cl;
 

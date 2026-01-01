@@ -675,7 +675,7 @@ static void cmd_load(Interp *interp, const char *filename) {
 
     if (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC) {
         Value *err = interp->cf.value;
-        if (err && err->tag == XS_STR) {
+        if (err && VAL_TAG(err) == XS_STR) {
             fprintf(stderr, "%serror: %s%s\n", g_theme->error, err->s, ANSI_RESET);
         } else if (err) {
             char *s = value_repr(err);
@@ -720,14 +720,14 @@ static void cmd_time(Interp *interp, const char *expr_str) {
 
     if (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC) {
         Value *err = interp->cf.value;
-        if (err && err->tag == XS_STR) {
+        if (err && VAL_TAG(err) == XS_STR) {
             fprintf(stderr, "%serror: %s%s\n", g_theme->error, err->s, ANSI_RESET);
         }
         if (interp->cf.value) { value_decref(interp->cf.value); interp->cf.value = NULL; }
         interp->cf.signal = 0;
     } else {
         Value *result = interp->cf.value;
-        if (result && result->tag != XS_NULL) {
+        if (result && VAL_TAG(result) != XS_NULL) {
             char *s = value_repr(result);
             if (s) {
                 printf("%s=> %s%s", g_theme->result, s, ANSI_RESET);
@@ -745,7 +745,7 @@ static void print_ast_node(Node *n, int indent) {
     if (!n) { printf("%*s(null)\n", indent * 2, ""); return; }
 
     const char *tag_name = "unknown";
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:    tag_name = "LitInt"; break;
     case NODE_LIT_BIGINT: tag_name = "LitBigInt"; break;
     case NODE_LIT_FLOAT:  tag_name = "LitFloat"; break;
@@ -793,7 +793,7 @@ static void print_ast_node(Node *n, int indent) {
 
     printf("%*s%s%s%s", indent * 2, "", g_theme->keyword, tag_name, ANSI_RESET);
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
         printf(" %s%lld%s", g_theme->number, (long long)n->lit_int.ival, ANSI_RESET);
         break;
@@ -831,7 +831,7 @@ static void print_ast_node(Node *n, int indent) {
     }
     printf("\n");
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_BINOP:
         print_ast_node(n->binop.left, indent + 1);
         print_ast_node(n->binop.right, indent + 1);
@@ -1091,12 +1091,12 @@ static int handle_command(const char *line, Interp **interp_ptr, History *hist) 
             if (tprog) node_free(tprog);
         } else {
             Node *target = tprog;
-            if (tprog->tag == NODE_PROGRAM && tprog->program.stmts.len > 0) {
+            if (VAL_TAG(tprog) == NODE_PROGRAM && tprog->program.stmts.len > 0) {
                 target = tprog->program.stmts.items[0];
-                if (target->tag == NODE_EXPR_STMT) target = target->expr_stmt.expr;
+                if (VAL_TAG(target) == NODE_EXPR_STMT) target = target->expr_stmt.expr;
             }
             const char *type_name = "unknown";
-            switch (target->tag) {
+            switch (VAL_TAG(target)) {
                 case NODE_LIT_INT:    type_name = "Int"; break;
                 case NODE_LIT_BIGINT: type_name = "Int"; break;
                 case NODE_LIT_FLOAT:  type_name = "Float"; break;
@@ -1111,7 +1111,7 @@ static int handle_command(const char *line, Interp **interp_ptr, History *hist) 
                 case NODE_IDENT: {
                     Value *v = env_get((*interp_ptr)->globals, target->ident.name);
                     if (v) {
-                        switch (v->tag) {
+                        switch (VAL_TAG(v)) {
                             case XS_INT:   type_name = "Int"; break;
                             case XS_FLOAT: type_name = "Float"; break;
                             case XS_STR:   type_name = "String"; break;
@@ -1140,16 +1140,16 @@ static int handle_command(const char *line, Interp **interp_ptr, History *hist) 
         if (!v) {
             printf("%sno documentation found for '%s'%s\n",
                    g_theme->timing, name, ANSI_RESET);
-        } else if (v->tag == XS_FUNC) {
+        } else if (VAL_TAG(v) == XS_FUNC) {
             printf("%sfunction%s '%s%s%s' (%d params)\n",
                    g_theme->keyword, ANSI_RESET,
                    g_theme->builtin, name, ANSI_RESET,
                    v->fn->nparams);
-        } else if (v->tag == XS_NATIVE) {
+        } else if (VAL_TAG(v) == XS_NATIVE) {
             printf("%sbuiltin function%s '%s%s%s'\n",
                    g_theme->keyword, ANSI_RESET,
                    g_theme->builtin, name, ANSI_RESET);
-        } else if (v->tag == XS_MAP || v->tag == XS_MODULE) {
+        } else if (VAL_TAG(v) == XS_MAP || VAL_TAG(v) == XS_MODULE) {
             printf("%smodule%s with %d entries\n",
                    g_theme->keyword, ANSI_RESET,
                    v->map ? v->map->len : 0);
@@ -1277,7 +1277,7 @@ int repl_run(void) {
 
         if (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC) {
             Value *err = interp->cf.value;
-            if (err && err->tag == XS_STR) {
+            if (err && VAL_TAG(err) == XS_STR) {
                 fprintf(stderr, "%serror: %s%s\n",
                         g_theme->error, err->s, ANSI_RESET);
             } else if (err) {
@@ -1298,7 +1298,7 @@ int repl_run(void) {
             interp->cf.signal = 0;
         } else if (interp->cf.signal == CF_RETURN) {
             Value *result = interp->cf.value;
-            if (result && result->tag != XS_NULL) {
+            if (result && VAL_TAG(result) != XS_NULL) {
                 char *s = value_repr(result);
                 if (s) {
                     printf("%s=> %s%s", g_theme->result, s, ANSI_RESET);
@@ -1313,7 +1313,7 @@ int repl_run(void) {
             }
             interp->cf.signal = 0;
         } else {
-            if (interp->cf.value && interp->cf.value->tag != XS_NULL) {
+            if (interp->cf.value && VAL_TAG(interp->cf.value) != XS_NULL) {
                 char *s = value_repr(interp->cf.value);
                 if (s) {
                     printf("%s=> %s%s", g_theme->result, s, ANSI_RESET);

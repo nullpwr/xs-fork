@@ -183,6 +183,35 @@ struct Value {
     };
 };
 
+/* Small-int tagging (SMI). Real Value pointers are malloc-aligned so
+   bit 0 is always 0. Bit 0 = 1 marks an immediate 63-bit signed int
+   with payload in bits 1..63 (arithmetic shift right by 1 recovers
+   the int). The helpers below accept any pointer type -- for non-SMI
+   pointers (Value, Node, anything malloc'd) the low bit is always 0
+   so xs_is_smi is false and the macros behave identically to direct
+   field access. This lets VAL_TAG(v) stand in for VAL_TAG(v) even when v
+   isn't a Value: for a Node*, xs_is_smi returns false and we fall
+   through to (v)->tag, same as before. */
+#define XS_SMI_TAG       0x1
+#define XS_SMI_MAX  ((int64_t)0x3FFFFFFFFFFFFFFFLL)
+#define XS_SMI_MIN  ((int64_t)0xC000000000000000LL)
+
+static inline int xs_is_smi(const void *v) {
+    return ((uintptr_t)v) & XS_SMI_TAG;
+}
+static inline int64_t xs_smi_to_int(const void *v) {
+    return ((int64_t)(uintptr_t)v) >> 1;
+}
+static inline Value *xs_int_to_smi(int64_t i) {
+    return (Value *)(uintptr_t)(((uint64_t)i << 1) | XS_SMI_TAG);
+}
+static inline int xs_fits_smi(int64_t i) {
+    return i >= XS_SMI_MIN && i <= XS_SMI_MAX;
+}
+#define VAL_TAG(v)     (xs_is_smi(v) ? XS_INT : (v)->tag)
+#define VAL_IS_INT(v)  (xs_is_smi(v) || (v)->tag == XS_INT)
+#define VAL_INT(v)     (xs_is_smi(v) ? xs_smi_to_int(v) : (v)->i)
+
 /* control-flow signals */
 #define CF_RETURN   1
 #define CF_BREAK    2

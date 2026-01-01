@@ -913,7 +913,7 @@ static CkType *check_field(CkContext *ctx, Node *n) {
     /* struct field lookup via symtab */
     if (obj->kind == CK_STRUCT && obj->struct_.name && ctx->symtab) {
         Symbol *sym = sym_lookup(ctx->symtab, obj->struct_.name);
-        if (sym && sym->decl && sym->decl->tag == NODE_STRUCT_DECL) {
+        if (sym && sym->decl && VAL_TAG(sym->decl) == NODE_STRUCT_DECL) {
             NodePairList *fl = &sym->decl->struct_decl.fields;
             TypeExpr **ft = sym->decl->struct_decl.field_types;
             int nft = sym->decl->struct_decl.n_field_types;
@@ -993,7 +993,7 @@ static CkType *check_method_call(CkContext *ctx, Node *n) {
 CkType *ck_check_expr(CkContext *ctx, Node *expr) {
     if (!expr) return ck_any();
 
-    switch (expr->tag) {
+    switch (VAL_TAG(expr)) {
     case NODE_LIT_INT:    return ck_int();
     case NODE_LIT_BIGINT: return ck_int();
     case NODE_LIT_FLOAT:  return ck_float();
@@ -1025,7 +1025,7 @@ CkType *ck_check_expr(CkContext *ctx, Node *expr) {
         CkType *kt = ck_any(), *vt = ck_any();
         for (int i = 0; i < expr->lit_map.keys.len; i++) {
             Node *k = expr->lit_map.keys.items[i];
-            if (k && k->tag != NODE_SPREAD && i < expr->lit_map.vals.len) {
+            if (k && VAL_TAG(k) != NODE_SPREAD && i < expr->lit_map.vals.len) {
                 kt = ck_check_expr(ctx, k);
                 if (expr->lit_map.vals.items[i])
                     vt = ck_check_expr(ctx, expr->lit_map.vals.items[i]);
@@ -1075,7 +1075,7 @@ CkType *ck_check_expr(CkContext *ctx, Node *expr) {
         if (obj->kind == CK_ARRAY) return obj->array.elem;
         if (obj->kind == CK_MAP) return obj->map.val;
         if (obj->kind == CK_TUPLE && expr->index.index &&
-            expr->index.index->tag == NODE_LIT_INT) {
+            VAL_TAG(expr->index.index) == NODE_LIT_INT) {
             int64_t idx = expr->index.index->lit_int.ival;
             if (idx >= 0 && idx < obj->tuple.nelems)
                 return obj->tuple.elems[idx];
@@ -1105,7 +1105,7 @@ CkType *ck_check_expr(CkContext *ctx, Node *expr) {
             return ck_check_expr(ctx, expr->block.expr);
         if (expr->block.stmts.len > 0) {
             Node *last = expr->block.stmts.items[expr->block.stmts.len - 1];
-            if (last && last->tag == NODE_EXPR_STMT)
+            if (last && VAL_TAG(last) == NODE_EXPR_STMT)
                 return ck_check_expr(ctx, last->expr_stmt.expr);
         }
         return ck_null();
@@ -1235,7 +1235,7 @@ static CkType *ck_ret_current(void) {
 void ck_check_stmt(CkContext *ctx, Node *stmt) {
     if (!stmt) return;
 
-    switch (stmt->tag) {
+    switch (VAL_TAG(stmt)) {
     case NODE_LET: case NODE_VAR: {
         CkType *init_ty = ck_any();
         if (stmt->let.value)
@@ -1427,7 +1427,7 @@ void ck_check_stmt(CkContext *ctx, Node *stmt) {
  * ---------------------------------------------------------------- */
 
 void ck_check_fn(CkContext *ctx, Node *fn_decl) {
-    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return;
+    if (!fn_decl || VAL_TAG(fn_decl) != NODE_FN_DECL) return;
 
     CkTypeEnv *fn_env = ck_env_new(ctx->env);
     CkTypeEnv *old = ctx->env;
@@ -1661,11 +1661,11 @@ void ck_check_program(Node *program, SymTab *st, SemaCtx *sema, int strict) {
     ck_ret_depth = 0;
 
     /* first pass: register all top-level declarations */
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++) {
             Node *s = program->program.stmts.items[i];
             if (!s) continue;
-            if (s->tag == NODE_FN_DECL && s->fn_decl.name) {
+            if (VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name) {
                 /* pre-register function type */
                 int np = s->fn_decl.params.len;
                 CkType **pts = xs_malloc(sizeof(CkType *) * (np > 0 ? np : 1));
@@ -1679,20 +1679,20 @@ void ck_check_program(Node *program, SymTab *st, SemaCtx *sema, int strict) {
                             ck_function(pts, np, ret));
                 free(pts);
             }
-            if (s->tag == NODE_STRUCT_DECL && s->struct_decl.name)
+            if (VAL_TAG(s) == NODE_STRUCT_DECL && s->struct_decl.name)
                 ck_env_bind(ctx->env, s->struct_decl.name,
                             ck_struct(s->struct_decl.name, NULL, NULL, 0));
-            if (s->tag == NODE_ENUM_DECL && s->enum_decl.name)
+            if (VAL_TAG(s) == NODE_ENUM_DECL && s->enum_decl.name)
                 ck_env_bind(ctx->env, s->enum_decl.name,
                             ck_enum(s->enum_decl.name));
-            if (s->tag == NODE_TRAIT_DECL && s->trait_decl.name)
+            if (VAL_TAG(s) == NODE_TRAIT_DECL && s->trait_decl.name)
                 ck_env_bind(ctx->env, s->trait_decl.name,
                             ck_trait(s->trait_decl.name));
         }
     }
 
     /* second pass: check all statements */
-    if (program->tag == NODE_PROGRAM) {
+    if (VAL_TAG(program) == NODE_PROGRAM) {
         for (int i = 0; i < program->program.stmts.len; i++)
             ck_check_stmt(ctx, program->program.stmts.items[i]);
     } else {
@@ -2069,7 +2069,7 @@ static int ck_solve_ext_constraints(CkContext *ctx, CkExtConstraintSet *ecs,
 static CkType *ck_check_pattern(CkContext *ctx, Node *pattern, CkType *subject) {
     if (!pattern) return ck_any();
 
-    switch (pattern->tag) {
+    switch (VAL_TAG(pattern)) {
     case NODE_PAT_WILD:
         return subject ? subject : ck_any();
 
@@ -2182,7 +2182,7 @@ static CkType *ck_check_pattern(CkContext *ctx, Node *pattern, CkType *subject) 
  * ---------------------------------------------------------------- */
 
 static void ck_check_impl(CkContext *ctx, Node *impl, TraitRegistry *traits) {
-    if (!impl || impl->tag != NODE_IMPL_DECL) return;
+    if (!impl || VAL_TAG(impl) != NODE_IMPL_DECL) return;
 
     const char *type_name = impl->impl_decl.type_name;
     const char *trait_name = impl->impl_decl.trait_name;
@@ -2205,7 +2205,7 @@ static void ck_check_impl(CkContext *ctx, Node *impl, TraitRegistry *traits) {
 
     for (int i = 0; i < impl->impl_decl.members.len; i++) {
         Node *member = impl->impl_decl.members.items[i];
-        if (member && member->tag == NODE_FN_DECL)
+        if (member && VAL_TAG(member) == NODE_FN_DECL)
             ck_check_fn(ctx, member);
     }
 
@@ -2284,8 +2284,8 @@ static CkType *ck_promote_numeric(CkType *a, CkType *b) {
 static int ck_match_has_wildcard(Node *match_expr) {
     for (int i = 0; i < match_expr->match.arms.len; i++) {
         Node *pat = match_expr->match.arms.items[i].pattern;
-        if (pat && pat->tag == NODE_PAT_WILD) return 1;
-        if (pat && pat->tag == NODE_PAT_IDENT) return 1;
+        if (pat && VAL_TAG(pat) == NODE_PAT_WILD) return 1;
+        if (pat && VAL_TAG(pat) == NODE_PAT_IDENT) return 1;
     }
     return 0;
 }
@@ -2298,14 +2298,14 @@ static void ck_check_match_exhaustive(CkContext *ctx, Node *match_expr) {
 
     if (st->kind == CK_ENUM && st->enum_.name && ctx->symtab) {
         Symbol *sym = sym_lookup(ctx->symtab, st->enum_.name);
-        if (sym && sym->decl && sym->decl->tag == NODE_ENUM_DECL) {
+        if (sym && sym->decl && VAL_TAG(sym->decl) == NODE_ENUM_DECL) {
             int nvariants = sym->decl->enum_decl.variants.len;
             int ncovered = 0;
             for (int v = 0; v < nvariants; v++) {
                 const char *vname = sym->decl->enum_decl.variants.items[v].name;
                 for (int a = 0; a < match_expr->match.arms.len; a++) {
                     Node *pat = match_expr->match.arms.items[a].pattern;
-                    if (pat && pat->tag == NODE_PAT_ENUM && pat->pat_enum.path &&
+                    if (pat && VAL_TAG(pat) == NODE_PAT_ENUM && pat->pat_enum.path &&
                         strcmp(pat->pat_enum.path, vname) == 0) {
                         ncovered++;
                         break;
@@ -2322,7 +2322,7 @@ static void ck_check_match_exhaustive(CkContext *ctx, Node *match_expr) {
         int has_true = 0, has_false = 0;
         for (int a = 0; a < match_expr->match.arms.len; a++) {
             Node *pat = match_expr->match.arms.items[a].pattern;
-            if (pat && pat->tag == NODE_PAT_LIT && pat->pat_lit.tag == 3) {
+            if (pat && VAL_TAG(pat) == NODE_PAT_LIT && pat->pat_lit.tag == 3) {
                 if (pat->pat_lit.bval) has_true = 1;
                 else has_false = 1;
             }
@@ -2344,7 +2344,7 @@ static void ck_check_match_exhaustive(CkContext *ctx, Node *match_expr) {
 static void ck_check_generic_bounds(CkContext *ctx, Node *fn_decl,
                                     CkType **arg_types, int nargs,
                                     TraitRegistry *traits) {
-    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return;
+    if (!fn_decl || VAL_TAG(fn_decl) != NODE_FN_DECL) return;
     if (fn_decl->fn_decl.n_type_params <= 0) return;
 
     for (int i = 0; i < fn_decl->fn_decl.n_type_params; i++) {
@@ -2472,7 +2472,7 @@ static void usage_report(UsageTracker *ut, CkContext *ctx) {
 static int ck_all_paths_return(Node *body) {
     if (!body) return 0;
 
-    switch (body->tag) {
+    switch (VAL_TAG(body)) {
     case NODE_RETURN:
         return 1;
     case NODE_BLOCK: {
@@ -2480,15 +2480,15 @@ static int ck_all_paths_return(Node *body) {
         for (int i = body->block.stmts.len - 1; i >= 0; i--) {
             Node *s = body->block.stmts.items[i];
             if (!s) continue;
-            if (s->tag == NODE_RETURN) return 1;
-            if (s->tag == NODE_IF) {
+            if (VAL_TAG(s) == NODE_RETURN) return 1;
+            if (VAL_TAG(s) == NODE_IF) {
                 int then_ret = s->if_expr.then
                              ? ck_all_paths_return(s->if_expr.then) : 0;
                 int else_ret = s->if_expr.else_branch
                              ? ck_all_paths_return(s->if_expr.else_branch) : 0;
                 if (then_ret && else_ret) return 1;
             }
-            if (s->tag == NODE_MATCH) {
+            if (VAL_TAG(s) == NODE_MATCH) {
                 int all_arms = 1;
                 for (int j = 0; j < s->match.arms.len; j++) {
                     if (!ck_all_paths_return(s->match.arms.items[j].body)) {
@@ -2498,8 +2498,8 @@ static int ck_all_paths_return(Node *body) {
                 }
                 if (all_arms && s->match.arms.len > 0) return 1;
             }
-            if (s->tag == NODE_THROW) return 1;
-            if (s->tag == NODE_EXPR_STMT && i == body->block.stmts.len - 1)
+            if (VAL_TAG(s) == NODE_THROW) return 1;
+            if (VAL_TAG(s) == NODE_EXPR_STMT && i == body->block.stmts.len - 1)
                 return 1;
             break;
         }
@@ -2529,7 +2529,7 @@ static int ck_all_paths_return(Node *body) {
 }
 
 static void ck_check_return_paths(CkContext *ctx, Node *fn_decl) {
-    if (!fn_decl || fn_decl->tag != NODE_FN_DECL) return;
+    if (!fn_decl || VAL_TAG(fn_decl) != NODE_FN_DECL) return;
     if (!fn_decl->fn_decl.ret_type) return; /* no declared return type */
     if (!fn_decl->fn_decl.body) return;
     if (!ctx->strict) return;
@@ -2564,7 +2564,7 @@ static int ck_is_recursive_struct(CkContext *ctx, const char *name,
     /* look up field_type_name to see if it transitively contains name */
     if (ctx->symtab) {
         Symbol *sym = sym_lookup(ctx->symtab, field_type_name);
-        if (sym && sym->decl && sym->decl->tag == NODE_STRUCT_DECL) {
+        if (sym && sym->decl && VAL_TAG(sym->decl) == NODE_STRUCT_DECL) {
             Node *sd = sym->decl;
             for (int i = 0; i < sd->struct_decl.fields.len; i++) {
                 TypeExpr *ft = (sd->struct_decl.field_types &&
@@ -2581,11 +2581,11 @@ static int ck_is_recursive_struct(CkContext *ctx, const char *name,
 }
 
 static void ck_check_recursive_types(CkContext *ctx, Node *program) {
-    if (!program || program->tag != NODE_PROGRAM) return;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
 
     for (int i = 0; i < program->program.stmts.len; i++) {
         Node *s = program->program.stmts.items[i];
-        if (!s || s->tag != NODE_STRUCT_DECL || !s->struct_decl.name) continue;
+        if (!s || VAL_TAG(s) != NODE_STRUCT_DECL || !s->struct_decl.name) continue;
 
         for (int j = 0; j < s->struct_decl.fields.len; j++) {
             TypeExpr *ft = (s->struct_decl.field_types &&

@@ -1037,7 +1037,7 @@ static Node *parse_primary(Parser *p) {
                     Node *pn = elems.items[i];
                     Param pm = {0};
                     pm.span = pn->span;
-                    if (pn->tag == NODE_IDENT) {
+                    if (VAL_TAG(pn) == NODE_IDENT) {
                         pm.name    = xs_strdup(pn->ident.name);
                         pm.pattern = pn; /* owns it */
                         elems.items[i] = NULL;
@@ -1068,7 +1068,7 @@ static Node *parse_primary(Parser *p) {
             if (first) {
                 Param pm = {0};
                 pm.span = first->span;
-                if (first->tag == NODE_IDENT) {
+                if (VAL_TAG(first) == NODE_IDENT) {
                     pm.name = xs_strdup(first->ident.name);
                     pm.pattern = first; first = NULL;
                 } else {
@@ -1113,7 +1113,7 @@ static Node *parse_primary(Parser *p) {
             Node *n = node_new(NODE_LIT_ARRAY, span);
             n->lit_array.elems = nodelist_new();
             n->lit_array.repeat_val = first;
-            n->lit_array.repeat_cnt = (cnt_expr && cnt_expr->tag == NODE_LIT_INT)
+            n->lit_array.repeat_cnt = (cnt_expr && VAL_TAG(cnt_expr) == NODE_LIT_INT)
                                        ? cnt_expr->lit_int.ival : 0;
             if (cnt_expr) node_free(cnt_expr);
             return n;
@@ -1796,9 +1796,9 @@ static Node *parse_expr(Parser *p, int min_prec) {
 
         /* - on a new line after call/block → new statement */
         if (tok->kind == TK_MINUS && tok->span.line > left->span.end_line &&
-            (left->tag == NODE_CALL || left->tag == NODE_METHOD_CALL ||
-             left->tag == NODE_BLOCK || left->tag == NODE_IF ||
-             left->tag == NODE_MATCH || left->tag == NODE_WHILE))
+            (VAL_TAG(left) == NODE_CALL || VAL_TAG(left) == NODE_METHOD_CALL ||
+             VAL_TAG(left) == NODE_BLOCK || VAL_TAG(left) == NODE_IF ||
+             VAL_TAG(left) == NODE_MATCH || VAL_TAG(left) == NODE_WHILE))
             break;
 
         /* Special lookahead: 'not in' is a compound infix operator */
@@ -1823,7 +1823,7 @@ static Node *parse_expr(Parser *p, int min_prec) {
         /* Pipe: a |> f(b) → f(a, b) */
         if (tok->kind == TK_PIPE_ARROW) {
             Node *right = parse_expr(p, prec);
-            if (right && right->tag == NODE_CALL) {
+            if (right && VAL_TAG(right) == NODE_CALL) {
                 NodeList new_args = nodelist_new();
                 nodelist_push(&new_args, left);
                 for (int i = 0; i < right->call.args.len; i++)
@@ -2092,7 +2092,7 @@ static Node *parse_block(Parser *p) {
         }
         Node *stmt = parse_stmt(p);
         if (!stmt) continue;
-            if (stmt->tag == NODE_EXPR_STMT && !stmt->expr_stmt.has_semicolon &&
+            if (VAL_TAG(stmt) == NODE_EXPR_STMT && !stmt->expr_stmt.has_semicolon &&
             pp_check(p, TK_RBRACE)) {
             trailing = stmt->expr_stmt.expr;
             stmt->expr_stmt.expr = NULL;
@@ -2787,7 +2787,7 @@ static ParamList parse_params(Parser *p) {
             pm.pattern  = pat;
             pm.variadic = variadic;
             /* Extract name from PatIdent */
-            if (pat->tag == NODE_PAT_IDENT)
+            if (VAL_TAG(pat) == NODE_PAT_IDENT)
                 pm.name = xs_strdup(pat->pat_ident.name);
             /* Optional type annotation */
             if (pp_match(p, TK_COLON)) {
@@ -4140,7 +4140,7 @@ static Node *parse_stmt(Parser *p) {
             } else {
                 val = parse_expr(p, 0);
                 /* trailing block for let x = call(args) { block } */
-                if (val && val->tag == NODE_CALL && pp_check(p, TK_LBRACE)) {
+                if (val && VAL_TAG(val) == NODE_CALL && pp_check(p, TK_LBRACE)) {
                     Node *block = parse_block(p);
                     Node *lambda = node_new(NODE_LAMBDA, block->span);
                     lambda->lambda.params = paramlist_new();
@@ -4153,7 +4153,7 @@ static Node *parse_stmt(Parser *p) {
         if (!pp_match(p, TK_SEMICOLON)) pp_match(p, TK_NEWLINE);
         Node *n = node_new(NODE_LET, span);
         n->let.pattern  = pat;
-        n->let.name     = (pat->tag == NODE_PAT_IDENT) ?
+        n->let.name     = (VAL_TAG(pat) == NODE_PAT_IDENT) ?
                            xs_strdup(pat->pat_ident.name) : NULL;
         n->let.value    = val;
         n->let.mutable  = mutable;
@@ -4183,7 +4183,7 @@ static Node *parse_stmt(Parser *p) {
         if (!pp_match(p, TK_SEMICOLON)) pp_match(p, TK_NEWLINE);
         Node *n = node_new(NODE_VAR, span);
         n->let.pattern  = pat;
-        n->let.name     = (pat->tag == NODE_PAT_IDENT) ?
+        n->let.name     = (VAL_TAG(pat) == NODE_PAT_IDENT) ?
                            xs_strdup(pat->pat_ident.name) : NULL;
         n->let.value    = val;
         n->let.mutable  = 1;
@@ -4518,9 +4518,9 @@ static Node *parse_stmt(Parser *p) {
             else if (pp_peek(p,0)->kind == TK_WHILE) loop_node = parse_while(p);
             else                                  loop_node = parse_loop_expr(p);
             if (loop_node) {
-                if (loop_node->tag == NODE_FOR)   loop_node->for_loop.label = label;
-                else if (loop_node->tag == NODE_WHILE) loop_node->while_loop.label = label;
-                else if (loop_node->tag == NODE_LOOP)  loop_node->loop.label = label;
+                if (VAL_TAG(loop_node) == NODE_FOR)   loop_node->for_loop.label = label;
+                else if (VAL_TAG(loop_node) == NODE_WHILE) loop_node->while_loop.label = label;
+                else if (VAL_TAG(loop_node) == NODE_LOOP)  loop_node->loop.label = label;
                 else free(label);
             } else free(label);
             return loop_node;
@@ -4594,7 +4594,7 @@ static Node *parse_stmt(Parser *p) {
     Node *expr = parse_expr(p, 0);
     /* Trailing block: call(args) { block } -> call(args, || { block })
        Only at statement level to avoid conflicts with for/if/while */
-    if (expr->tag == NODE_CALL && pp_check(p, TK_LBRACE)) {
+    if (VAL_TAG(expr) == NODE_CALL && pp_check(p, TK_LBRACE)) {
         Node *block = parse_block(p);
         Node *lambda = node_new(NODE_LAMBDA, block->span);
         lambda->lambda.params = paramlist_new();
@@ -4604,8 +4604,8 @@ static Node *parse_stmt(Parser *p) {
     }
     int has_semi = (pp_match(p, TK_SEMICOLON) != NULL);
     /* Return/Break/Continue/Throw are their own stmt types */
-    if (expr->tag == NODE_RETURN || expr->tag == NODE_BREAK ||
-        expr->tag == NODE_CONTINUE || expr->tag == NODE_THROW)
+    if (VAL_TAG(expr) == NODE_RETURN || VAL_TAG(expr) == NODE_BREAK ||
+        VAL_TAG(expr) == NODE_CONTINUE || VAL_TAG(expr) == NODE_THROW)
         return expr;
     Node *n = node_new(NODE_EXPR_STMT, span);
     n->expr_stmt.expr = expr;

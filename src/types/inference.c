@@ -1032,7 +1032,7 @@ static RType resolve_type_ann(TypeExpr *ann) {
 static void bind_pattern_mono(CGen *cg, Node *pat, RType t) {
     if (!pat) return;
 
-    switch (pat->tag) {
+    switch (VAL_TAG(pat)) {
     case NODE_PAT_IDENT:
         hmenv_define_mono(cg->env, pat->pat_ident.name, t);
         break;
@@ -1328,7 +1328,7 @@ static RType infer_method_call(CGen *cg, Node *expr) {
     if (!obj_r.is_var && obj_r.type && obj_r.type->kind == TY_NAMED &&
         obj_r.type->named.name && method) {
         Node *fn = ireg_get(&cg->impl_reg, obj_r.type->named.name, method);
-        if (fn && fn->tag == NODE_FN_DECL) {
+        if (fn && VAL_TAG(fn) == NODE_FN_DECL) {
             /* Use the fn decl's return type annotation if available */
             if (fn->fn_decl.ret_type) {
                 RType ret = resolve_type_ann(fn->fn_decl.ret_type);
@@ -1359,7 +1359,7 @@ static RType infer_field(CGen *cg, Node *expr) {
     if (!obj_r.is_var && obj_r.type && obj_r.type->kind == TY_NAMED &&
         obj_r.type->named.name && expr->field.name) {
         Node *decl = sreg_get(&cg->struct_reg, obj_r.type->named.name);
-        if (decl && decl->tag == NODE_STRUCT_DECL) {
+        if (decl && VAL_TAG(decl) == NODE_STRUCT_DECL) {
             NodePairList *fl = &decl->struct_decl.fields;
             for (int i = 0; i < fl->len; i++) {
                 if (fl->items[i].key &&
@@ -1409,7 +1409,7 @@ static RType infer_if(CGen *cg, Node *expr) {
     /* Infer then branch */
     RType then_t;
     if (expr->if_expr.then) {
-        if (expr->if_expr.then->tag == NODE_BLOCK)
+        if (VAL_TAG(expr->if_expr.then) == NODE_BLOCK)
             then_t = cgen_infer_block(cg, expr->if_expr.then);
         else
             then_t = cgen_infer_expr(cg, expr->if_expr.then);
@@ -1422,7 +1422,7 @@ static RType infer_if(CGen *cg, Node *expr) {
         cgen_infer_expr(cg, expr->if_expr.elif_conds.items[i]);
         if (i < expr->if_expr.elif_thens.len) {
             Node *elif_body = expr->if_expr.elif_thens.items[i];
-            if (elif_body->tag == NODE_BLOCK)
+            if (VAL_TAG(elif_body) == NODE_BLOCK)
                 cgen_infer_block(cg, elif_body);
             else
                 cgen_infer_expr(cg, elif_body);
@@ -1432,7 +1432,7 @@ static RType infer_if(CGen *cg, Node *expr) {
     /* Infer else branch */
     if (expr->if_expr.else_branch) {
         RType else_t;
-        if (expr->if_expr.else_branch->tag == NODE_BLOCK)
+        if (VAL_TAG(expr->if_expr.else_branch) == NODE_BLOCK)
             else_t = cgen_infer_block(cg, expr->if_expr.else_branch);
         else
             else_t = cgen_infer_expr(cg, expr->if_expr.else_branch);
@@ -1492,7 +1492,7 @@ static RType infer_match(CGen *cg, Node *expr) {
         /* Infer body */
         RType arm_t;
         if (arm->body) {
-            if (arm->body->tag == NODE_BLOCK)
+            if (VAL_TAG(arm->body) == NODE_BLOCK)
                 arm_t = cgen_infer_block(cg, arm->body);
             else
                 arm_t = cgen_infer_expr(cg, arm->body);
@@ -1516,13 +1516,13 @@ static RType cgen_infer_block(CGen *cg, Node *block) {
     HMEnv *saved = cg->env;
     cg->env = child_env;
 
-    if (block->tag == NODE_BLOCK) {
+    if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++)
             cgen_infer_stmt(cg, block->block.stmts.items[i]);
     }
 
     RType result = rt_type(ty_unit());
-    if (block->tag == NODE_BLOCK && block->block.expr)
+    if (VAL_TAG(block) == NODE_BLOCK && block->block.expr)
         result = cgen_infer_expr(cg, block->block.expr);
 
     cg->env = saved;
@@ -1565,7 +1565,7 @@ static RType infer_lambda(CGen *cg, Node *expr) {
     /* Infer body */
     RType body_t;
     if (expr->lambda.body) {
-        if (expr->lambda.body->tag == NODE_BLOCK)
+        if (VAL_TAG(expr->lambda.body) == NODE_BLOCK)
             body_t = cgen_infer_block(cg, expr->lambda.body);
         else
             body_t = cgen_infer_expr(cg, expr->lambda.body);
@@ -1591,7 +1591,7 @@ static RType cgen_infer_expr(CGen *cg, Node *expr) {
 
     RType result;
 
-    switch (expr->tag) {
+    switch (VAL_TAG(expr)) {
     /* Literals */
     case NODE_LIT_INT:
     case NODE_LIT_BIGINT:
@@ -1792,7 +1792,7 @@ static RType cgen_infer_expr(CGen *cg, Node *expr) {
             MatchArm *arm = &expr->try_.catch_arms.items[i];
             if (arm->body) {
                 RType arm_t;
-                if (arm->body->tag == NODE_BLOCK)
+                if (VAL_TAG(arm->body) == NODE_BLOCK)
                     arm_t = cgen_infer_block(cg, arm->body);
                 else
                     arm_t = cgen_infer_expr(cg, arm->body);
@@ -1955,7 +1955,7 @@ static void infer_let_stmt(CGen *cg, Node *stmt) {
 
     /* Bind: generalize if RHS is a lambda, otherwise monomorphic */
     PolyType poly;
-    if (stmt->let.value && stmt->let.value->tag == NODE_LAMBDA) {
+    if (stmt->let.value && VAL_TAG(stmt->let.value) == NODE_LAMBDA) {
         poly = generalize(ann_t, cg->env);
     } else {
         poly = poly_mono(ann_t);
@@ -2008,7 +2008,7 @@ static void infer_fn_decl(CGen *cg, Node *stmt) {
     /* Infer body */
     if (stmt->fn_decl.body) {
         RType body_t;
-        if (stmt->fn_decl.body->tag == NODE_BLOCK)
+        if (VAL_TAG(stmt->fn_decl.body) == NODE_BLOCK)
             body_t = cgen_infer_block(cg, stmt->fn_decl.body);
         else
             body_t = cgen_infer_expr(cg, stmt->fn_decl.body);
@@ -2061,7 +2061,7 @@ static void infer_impl_decl(CGen *cg, Node *stmt) {
 
     for (int i = 0; i < stmt->impl_decl.members.len; i++) {
         Node *m = stmt->impl_decl.members.items[i];
-        if (m && m->tag == NODE_FN_DECL) {
+        if (m && VAL_TAG(m) == NODE_FN_DECL) {
             infer_fn_decl(cg, m);
             /* Register method in the impl registry */
             if (stmt->impl_decl.type_name && m->fn_decl.name)
@@ -2087,7 +2087,7 @@ static void infer_class_decl(CGen *cg, Node *stmt) {
 
     for (int i = 0; i < stmt->class_decl.members.len; i++) {
         Node *m = stmt->class_decl.members.items[i];
-        if (m && m->tag == NODE_FN_DECL)
+        if (m && VAL_TAG(m) == NODE_FN_DECL)
             infer_fn_decl(cg, m);
     }
 
@@ -2107,7 +2107,7 @@ static void infer_effect_decl(CGen *cg, Node *stmt) {
                           rt_type(ty_named(stmt->effect_decl.name, NULL, 0)));
     for (int i = 0; i < stmt->effect_decl.ops.len; i++) {
         Node *op = stmt->effect_decl.ops.items[i];
-        if (op && op->tag == NODE_FN_DECL)
+        if (op && VAL_TAG(op) == NODE_FN_DECL)
             infer_fn_decl(cg, op);
     }
 }
@@ -2115,7 +2115,7 @@ static void infer_effect_decl(CGen *cg, Node *stmt) {
 static void cgen_infer_stmt(CGen *cg, Node *stmt) {
     if (!stmt) return;
 
-    switch (stmt->tag) {
+    switch (VAL_TAG(stmt)) {
     case NODE_LET:
     case NODE_VAR:
         infer_let_stmt(cg, stmt);
@@ -2272,7 +2272,7 @@ static void seed_builtins(HMEnv *env) {
 
 InferResult *infer_types(Node *program) {
     InferResult *result = result_new();
-    if (!program || program->tag != NODE_PROGRAM) return result;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return result;
 
     /* Build base environment */
     HMEnv *base_env = hmenv_new(NULL);
@@ -2390,7 +2390,7 @@ static int is_arithmetic(const char *op) {
 XsType *infer_expr(InferCtx *ctx, Node *expr) {
     if (!ctx || !expr) return NULL;
 
-    switch (expr->tag) {
+    switch (VAL_TAG(expr)) {
     case NODE_LIT_INT:    return ty_i64();
     case NODE_LIT_BIGINT: return ty_i64();
     case NODE_LIT_FLOAT:  return ty_f64();
@@ -2444,7 +2444,7 @@ XsType *infer_expr(InferCtx *ctx, Node *expr) {
     case NODE_CALL:  return NULL;
     case NODE_IF: {
         if (expr->if_expr.then) {
-            if (expr->if_expr.then->tag == NODE_BLOCK && expr->if_expr.then->block.expr)
+            if (VAL_TAG(expr->if_expr.then) == NODE_BLOCK && expr->if_expr.then->block.expr)
                 return infer_expr(ctx, expr->if_expr.then->block.expr);
             return infer_expr(ctx, expr->if_expr.then);
         }
@@ -2519,7 +2519,7 @@ int infer_check(InferCtx *ctx, Node *expr, XsType *expected) {
     XsType *actual = infer_expr(ctx, expr);
     if (!actual) return 0;
     int result = ty_equal(actual, expected);
-    if (expr->tag == NODE_LET || expr->tag == NODE_VAR) {
+    if (VAL_TAG(expr) == NODE_LET || VAL_TAG(expr) == NODE_VAR) {
         if (expr->let.name) {
             XsType *val_type = NULL;
             if (expr->let.value)

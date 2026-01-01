@@ -280,17 +280,17 @@ int mp_pack_value(MsgPackBuf *buf, Value *v, int depth) {
     if (depth > MP_MAX_DEPTH) return -1;
     if (!v) { mp_pack_nil(buf); return 0; }
 
-    switch (v->tag) {
+    switch (VAL_TAG(v)) {
     case XS_NULL:
         mp_pack_nil(buf);
         break;
 
     case XS_BOOL:
-        mp_pack_bool(buf, v->i != 0);
+        mp_pack_bool(buf, VAL_INT(v) != 0);
         break;
 
     case XS_INT:
-        mp_pack_int(buf, v->i);
+        mp_pack_int(buf, VAL_INT(v));
         break;
 
     case XS_FLOAT:
@@ -303,7 +303,7 @@ int mp_pack_value(MsgPackBuf *buf, Value *v, int depth) {
         break;
     }
     case XS_CHAR: {
-        char cs[2] = { (char)v->i, 0 };
+        char cs[2] = { (char)VAL_INT(v), 0 };
         mp_pack_str(buf, cs, 1);
         break;
     }
@@ -397,14 +397,14 @@ int mp_pack_value(MsgPackBuf *buf, Value *v, int depth) {
         int ser_count = 0;
         for (int ki = 0; ki < nk; ki++) {
             Value *val = map_get(v->map, ks[ki]);
-            if (val && (val->tag == XS_FUNC || val->tag == XS_NATIVE))
+            if (val && (VAL_TAG(val) == XS_FUNC || VAL_TAG(val) == XS_NATIVE))
                 continue;
             ser_count++;
         }
         mp_pack_map_header(buf, (uint32_t)ser_count);
         for (int ki = 0; ki < nk; ki++) {
             Value *val = map_get(v->map, ks[ki]);
-            if (val && (val->tag == XS_FUNC || val->tag == XS_NATIVE)) {
+            if (val && (VAL_TAG(val) == XS_FUNC || VAL_TAG(val) == XS_NATIVE)) {
                 free(ks[ki]);
                 continue;
             }
@@ -636,10 +636,10 @@ static Value *mp_unpack_ext_raw(MsgPackReader *r, uint32_t len) {
         Value *end_v = mp_unpack_value(&sub);
         Value *step_v = mp_unpack_value(&sub);
         Value *inc_v = mp_unpack_value(&sub);
-        int64_t s = (start_v && start_v->tag == XS_INT) ? start_v->i : 0;
-        int64_t e = (end_v && end_v->tag == XS_INT) ? end_v->i : 0;
-        int64_t st = (step_v && step_v->tag == XS_INT) ? step_v->i : 1;
-        int inc = (inc_v && inc_v->tag == XS_INT) ? (int)inc_v->i : 0;
+        int64_t s = (start_v && VAL_TAG(start_v) == XS_INT) ? VAL_INT(start_v) : 0;
+        int64_t e = (end_v && VAL_TAG(end_v) == XS_INT) ? VAL_INT(end_v) : 0;
+        int64_t st = (step_v && VAL_TAG(step_v) == XS_INT) ? VAL_INT(step_v) : 1;
+        int inc = (inc_v && VAL_TAG(inc_v) == XS_INT) ? (int)VAL_INT(inc_v) : 0;
         r->pos += len;
         Value *range = xs_range_step(s, e, inc, st);
         return range;
@@ -651,7 +651,7 @@ static Value *mp_unpack_ext_raw(MsgPackReader *r, uint32_t len) {
         /* the inner data is an array; unpack as tuple */
         Value *inner = mp_unpack_value(&sub);
         r->pos += len;
-        if (inner && inner->tag == XS_ARRAY) {
+        if (inner && VAL_TAG(inner) == XS_ARRAY) {
             Value *tup = xs_tuple_new();
             for (int i = 0; i < inner->arr->len; i++)
                 array_push(tup->arr, inner->arr->items[i]);
@@ -878,14 +878,14 @@ Value *mp_encode(Value *v) {
 }
 
 Value *mp_decode(Value *bytes) {
-    if (!bytes || bytes->tag != XS_ARRAY || !bytes->arr)
+    if (!bytes || VAL_TAG(bytes) != XS_ARRAY || !bytes->arr)
         return xs_null();
 
     size_t len = (size_t)bytes->arr->len;
     uint8_t *data = xs_malloc(len);
     for (size_t i = 0; i < len; i++) {
         Value *b = bytes->arr->items[i];
-        data[i] = (b && b->tag == XS_INT) ? (uint8_t)b->i : 0;
+        data[i] = (b && VAL_TAG(b) == XS_INT) ? (uint8_t)VAL_INT(b) : 0;
     }
 
     MsgPackReader reader;
@@ -898,7 +898,7 @@ Value *mp_decode(Value *bytes) {
 }
 
 Value *mp_encode_stream(Value *values) {
-    if (!values || values->tag != XS_ARRAY || !values->arr)
+    if (!values || VAL_TAG(values) != XS_ARRAY || !values->arr)
         return xs_null();
 
     MsgPackBuf buf;
@@ -919,14 +919,14 @@ Value *mp_encode_stream(Value *values) {
 }
 
 Value *mp_decode_stream(Value *bytes) {
-    if (!bytes || bytes->tag != XS_ARRAY || !bytes->arr)
+    if (!bytes || VAL_TAG(bytes) != XS_ARRAY || !bytes->arr)
         return xs_null();
 
     size_t len = (size_t)bytes->arr->len;
     uint8_t *data = xs_malloc(len);
     for (size_t i = 0; i < len; i++) {
         Value *b = bytes->arr->items[i];
-        data[i] = (b && b->tag == XS_INT) ? (uint8_t)b->i : 0;
+        data[i] = (b && VAL_TAG(b) == XS_INT) ? (uint8_t)VAL_INT(b) : 0;
     }
 
     MsgPackReader reader;
@@ -1022,7 +1022,7 @@ static Value *native_mp_decode_stream(Interp *interp, Value **args, int argc) {
 static Value *native_mp_benchmark(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_null();
-    int iters = (argc >= 2 && args[1]->tag == XS_INT) ? (int)args[1]->i : 1000;
+    int iters = (argc >= 2 && VAL_TAG(args[1]) == XS_INT) ? (int)VAL_INT(args[1]) : 1000;
     return mp_benchmark(args[0], iters);
 }
 
@@ -1050,10 +1050,10 @@ static Value *native_mp_roundtrip(Interp *interp, Value **args, int argc) {
 /* pack/unpack individual types for testing */
 static Value *native_mp_pack_int(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_INT) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_INT) return xs_null();
     MsgPackBuf buf;
     mp_buf_init(&buf);
-    mp_pack_int(&buf, args[0]->i);
+    mp_pack_int(&buf, VAL_INT(args[0]));
     Value *result = xs_array_new();
     for (size_t i = 0; i < buf.len; i++)
         array_push(result->arr, xs_int(buf.data[i]));
@@ -1064,8 +1064,8 @@ static Value *native_mp_pack_int(Interp *interp, Value **args, int argc) {
 static Value *native_mp_pack_float(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_null();
-    double val = args[0]->tag == XS_FLOAT ? args[0]->f
-               : args[0]->tag == XS_INT ? (double)args[0]->i : 0.0;
+    double val = VAL_TAG(args[0]) == XS_FLOAT ? args[0]->f
+               : VAL_TAG(args[0]) == XS_INT ? (double)VAL_INT(args[0]) : 0.0;
     MsgPackBuf buf;
     mp_buf_init(&buf);
     mp_pack_float(&buf, val);
@@ -1078,7 +1078,7 @@ static Value *native_mp_pack_float(Interp *interp, Value **args, int argc) {
 
 static Value *native_mp_pack_str(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 1 || args[0]->tag != XS_STR) return xs_null();
+    if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return xs_null();
     MsgPackBuf buf;
     mp_buf_init(&buf);
     mp_pack_str(&buf, args[0]->s, (uint32_t)strlen(args[0]->s));

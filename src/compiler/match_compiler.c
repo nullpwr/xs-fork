@@ -194,27 +194,27 @@ static void matrix_free(PatMatrix *m) {
 
 static int pat_is_wild(Node *p) {
     if (!p) return 1;
-    return p->tag == NODE_PAT_WILD;
+    return VAL_TAG(p) == NODE_PAT_WILD;
 }
 
 static int pat_is_var(Node *p) {
     if (!p) return 0;
-    return p->tag == NODE_PAT_IDENT;
+    return VAL_TAG(p) == NODE_PAT_IDENT;
 }
 
 static int pat_is_or(Node *p) {
     if (!p) return 0;
-    return p->tag == NODE_PAT_OR;
+    return VAL_TAG(p) == NODE_PAT_OR;
 }
 
 static int pat_is_guard(Node *p) {
     if (!p) return 0;
-    return p->tag == NODE_PAT_GUARD;
+    return VAL_TAG(p) == NODE_PAT_GUARD;
 }
 
 static int pat_is_capture(Node *p) {
     if (!p) return 0;
-    return p->tag == NODE_PAT_CAPTURE;
+    return VAL_TAG(p) == NODE_PAT_CAPTURE;
 }
 
 static Constructor pat_head_ctor(Node *p) {
@@ -224,7 +224,7 @@ static Constructor pat_head_ctor(Node *p) {
         return pat_head_ctor(p->pat_capture.pattern);
     if (pat_is_guard(p))
         return pat_head_ctor(p->pat_guard.pattern);
-    switch (p->tag) {
+    switch (VAL_TAG(p)) {
     case NODE_PAT_LIT:
         switch (p->pat_lit.tag) {
         case 0: return ctor_int(p->pat_lit.ival);
@@ -240,7 +240,7 @@ static Constructor pat_head_ctor(Node *p) {
         return ctor_tuple(p->pat_tuple.elems.len);
     case NODE_PAT_RANGE:
     case NODE_RANGE:
-        if (p->tag == NODE_PAT_RANGE)
+        if (VAL_TAG(p) == NODE_PAT_RANGE)
             return ctor_range(p->pat_range.start, p->pat_range.end,
                               p->pat_range.inclusive);
         else
@@ -306,10 +306,10 @@ static Node **sub_patterns(Node *p, int arity) {
         p = p->pat_capture.pattern;
     if (pat_is_guard(p))
         p = p->pat_guard.pattern;
-    if (p->tag == NODE_PAT_TUPLE) {
+    if (VAL_TAG(p) == NODE_PAT_TUPLE) {
         for (int i = 0; i < arity && i < p->pat_tuple.elems.len; i++)
             subs[i] = p->pat_tuple.elems.items[i];
-    } else if (p->tag == NODE_PAT_ENUM) {
+    } else if (VAL_TAG(p) == NODE_PAT_ENUM) {
         for (int i = 0; i < arity && i < p->pat_enum.args.len; i++)
             subs[i] = p->pat_enum.args.items[i];
     }
@@ -537,7 +537,7 @@ static DTNode *compile_matrix(PatMatrix *m, int depth) {
 }
 
 DTNode *match_compile(Node *match_node) {
-    if (!match_node || match_node->tag != NODE_MATCH)
+    if (!match_node || VAL_TAG(match_node) != NODE_MATCH)
         return dt_fail();
 
     int n_arms = match_node->match.arms.len;
@@ -798,7 +798,7 @@ Node *dt_to_ast(DTNode *dt, Node *subject, Span span) {
 }
 
 static int count_arms(Node *n) {
-    if (!n || n->tag != NODE_MATCH) return 0;
+    if (!n || VAL_TAG(n) != NODE_MATCH) return 0;
     return n->match.arms.len;
 }
 
@@ -809,9 +809,9 @@ static int should_compile_match(Node *n) {
     for (int i = 0; i < n->match.arms.len; i++) {
         Node *p = n->match.arms.items[i].pattern;
         if (!p) continue;
-        if (p->tag == NODE_PAT_ENUM || p->tag == NODE_PAT_TUPLE ||
-            p->tag == NODE_PAT_OR || p->tag == NODE_PAT_RANGE ||
-            p->tag == NODE_PAT_GUARD || p->tag == NODE_PAT_CAPTURE)
+        if (VAL_TAG(p) == NODE_PAT_ENUM || VAL_TAG(p) == NODE_PAT_TUPLE ||
+            VAL_TAG(p) == NODE_PAT_OR || VAL_TAG(p) == NODE_PAT_RANGE ||
+            VAL_TAG(p) == NODE_PAT_GUARD || VAL_TAG(p) == NODE_PAT_CAPTURE)
             has_complex = 1;
     }
     return arms >= 4 || has_complex;
@@ -827,7 +827,7 @@ static void optimize_list(NodeList *nl) {
 static Node *optimize_node(Node *n) {
     if (!n) return NULL;
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
     case NODE_BLOCK:
         optimize_list(&n->block.stmts);
         n->block.expr = optimize_node(n->block.expr);
@@ -1132,19 +1132,19 @@ static PatMatrix matrix_from_arms(MatchArmList *arms, int ncols) {
 }
 
 static int is_simple_lit_match(Node *match_node) {
-    if (!match_node || match_node->tag != NODE_MATCH) return 0;
+    if (!match_node || VAL_TAG(match_node) != NODE_MATCH) return 0;
     for (int i = 0; i < match_node->match.arms.len; i++) {
         Node *p = match_node->match.arms.items[i].pattern;
         if (!p) continue;
-        if (p->tag != NODE_PAT_LIT && p->tag != NODE_PAT_WILD &&
-            p->tag != NODE_PAT_IDENT)
+        if (VAL_TAG(p) != NODE_PAT_LIT && VAL_TAG(p) != NODE_PAT_WILD &&
+            VAL_TAG(p) != NODE_PAT_IDENT)
             return 0;
     }
     return 1;
 }
 
 static int64_t lit_key(Node *p) {
-    if (!p || p->tag != NODE_PAT_LIT) return 0;
+    if (!p || VAL_TAG(p) != NODE_PAT_LIT) return 0;
     switch (p->pat_lit.tag) {
     case 0: return p->pat_lit.ival;
     case 3: return p->pat_lit.bval ? 1 : 0;
@@ -1170,7 +1170,7 @@ static int is_dense_int_match(Node *match_node, int64_t *lo, int64_t *hi) {
     int64_t mn = 0, mx = 0;
     for (int i = 0; i < match_node->match.arms.len; i++) {
         Node *p = match_node->match.arms.items[i].pattern;
-        if (!p || p->tag != NODE_PAT_LIT || p->pat_lit.tag != 0) continue;
+        if (!p || VAL_TAG(p) != NODE_PAT_LIT || p->pat_lit.tag != 0) continue;
         int64_t v = p->pat_lit.ival;
         if (nlits == 0 || v < mn) mn = v;
         if (nlits == 0 || v > mx) mx = v;
@@ -1220,7 +1220,7 @@ static void warn_unreachable(PatMatrix *m, int total_arms) {
 
 static int pat_complexity(Node *p) {
     if (!p) return 0;
-    switch (p->tag) {
+    switch (VAL_TAG(p)) {
     case NODE_PAT_WILD:
     case NODE_PAT_IDENT:
         return 1;
@@ -1252,7 +1252,7 @@ static int pat_complexity(Node *p) {
 }
 
 static int match_complexity(Node *n) {
-    if (!n || n->tag != NODE_MATCH) return 0;
+    if (!n || VAL_TAG(n) != NODE_MATCH) return 0;
     int total = 0;
     for (int i = 0; i < n->match.arms.len; i++)
         total += pat_complexity(n->match.arms.items[i].pattern);
@@ -1299,13 +1299,13 @@ static int best_column_heuristic(PatMatrix *m) {
 }
 
 static Node *expand_pat_struct_fields(Node *pat, Node *subject, Span span) {
-    if (!pat || pat->tag != NODE_PAT_STRUCT) return NULL;
+    if (!pat || VAL_TAG(pat) != NODE_PAT_STRUCT) return NULL;
     NodeList stmts = nodelist_new();
     for (int i = 0; i < pat->pat_struct.fields.len; i++) {
         const char *fname = pat->pat_struct.fields.items[i].key;
         Node *sub_pat = pat->pat_struct.fields.items[i].val;
         Node *field_val = make_field_access(subject, fname, span);
-        if (sub_pat && sub_pat->tag == NODE_PAT_IDENT && sub_pat->pat_ident.name)
+        if (sub_pat && VAL_TAG(sub_pat) == NODE_PAT_IDENT && sub_pat->pat_ident.name)
             nodelist_push(&stmts, make_let(sub_pat->pat_ident.name, field_val, span));
     }
     if (stmts.len == 0) return NULL;

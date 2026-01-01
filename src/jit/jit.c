@@ -37,21 +37,21 @@
 
 /* coerce both operands to double, returns 1 on success */
 static int numcoerce(Value *a, Value *b, double *fa, double *fb) {
-    if ((a->tag != XS_INT && a->tag != XS_FLOAT) ||
-        (b->tag != XS_INT && b->tag != XS_FLOAT))
+    if ((VAL_TAG(a) != XS_INT && VAL_TAG(a) != XS_FLOAT) ||
+        (VAL_TAG(b) != XS_INT && VAL_TAG(b) != XS_FLOAT))
         return 0;
-    *fa = a->tag == XS_INT ? (double)a->i : a->f;
-    *fb = b->tag == XS_INT ? (double)b->i : b->f;
+    *fa = VAL_TAG(a) == XS_INT ? (double)VAL_INT(a) : a->f;
+    *fb = VAL_TAG(b) == XS_INT ? (double)VAL_INT(b) : b->f;
     return 1;
 }
 
 static Value *jit_rt_add(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT)
-        return xs_int(a->i + b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT)
+        return xs_int(VAL_INT(a) + VAL_INT(b));
     double fa, fb;
     if (numcoerce(a, b, &fa, &fb))
         return xs_float(fa + fb);
-    if (a->tag == XS_STR && b->tag == XS_STR) {
+    if (VAL_TAG(a) == XS_STR && VAL_TAG(b) == XS_STR) {
         size_t la = strlen(a->s), lb = strlen(b->s);
         char *buf = xs_malloc(la + lb + 1);
         memcpy(buf, a->s, la);
@@ -64,8 +64,8 @@ static Value *jit_rt_add(Value *a, Value *b) {
 }
 
 static Value *jit_rt_sub(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT)
-        return xs_int(a->i - b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT)
+        return xs_int(VAL_INT(a) - VAL_INT(b));
     double fa, fb;
     if (numcoerce(a, b, &fa, &fb))
         return xs_float(fa - fb);
@@ -73,8 +73,8 @@ static Value *jit_rt_sub(Value *a, Value *b) {
 }
 
 static Value *jit_rt_mul(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT)
-        return xs_int(a->i * b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT)
+        return xs_int(VAL_INT(a) * VAL_INT(b));
     double fa, fb;
     if (numcoerce(a, b, &fa, &fb))
         return xs_float(fa * fb);
@@ -82,9 +82,9 @@ static Value *jit_rt_mul(Value *a, Value *b) {
 }
 
 static Value *jit_rt_div(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) {
-        if (b->i == 0) return xs_null();
-        return xs_int(a->i / b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
+        if (VAL_INT(b) == 0) return xs_null();
+        return xs_int(VAL_INT(a) / VAL_INT(b));
     }
     double fa, fb;
     if (numcoerce(a, b, &fa, &fb)) {
@@ -95,9 +95,9 @@ static Value *jit_rt_div(Value *a, Value *b) {
 }
 
 static Value *jit_rt_mod(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) {
-        if (b->i == 0) return xs_null();
-        return xs_int(a->i % b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
+        if (VAL_INT(b) == 0) return xs_null();
+        return xs_int(VAL_INT(a) % VAL_INT(b));
     }
     double fa, fb;
     if (numcoerce(a, b, &fa, &fb)) {
@@ -108,18 +108,18 @@ static Value *jit_rt_mod(Value *a, Value *b) {
 }
 
 static Value *jit_rt_pow(Value *a, Value *b) {
-    double fa = (a->tag == XS_INT) ? (double)a->i : (a->tag == XS_FLOAT ? a->f : 0.0);
-    double fb = (b->tag == XS_INT) ? (double)b->i : (b->tag == XS_FLOAT ? b->f : 0.0);
+    double fa = (VAL_TAG(a) == XS_INT) ? (double)VAL_INT(a) : (VAL_TAG(a) == XS_FLOAT ? a->f : 0.0);
+    double fb = (VAL_TAG(b) == XS_INT) ? (double)VAL_INT(b) : (VAL_TAG(b) == XS_FLOAT ? b->f : 0.0);
     double r = pow(fa, fb);
-    if (a->tag == XS_INT && b->tag == XS_INT && b->i >= 0 &&
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT && VAL_INT(b) >= 0 &&
         r == (double)(int64_t)r)
         return xs_int((int64_t)r);
     return xs_float(r);
 }
 
 static Value *jit_rt_neg(Value *a) {
-    if (a->tag == XS_INT) return xs_int(-a->i);
-    if (a->tag == XS_FLOAT) return xs_float(-a->f);
+    if (VAL_TAG(a) == XS_INT) return xs_int(-VAL_INT(a));
+    if (VAL_TAG(a) == XS_FLOAT) return xs_float(-a->f);
     return xs_null();
 }
 
@@ -147,27 +147,27 @@ static Value *jit_rt_concat(Value *a, Value *b) {
 }
 
 static Value *jit_rt_band(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) return xs_int(a->i & b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) return xs_int(VAL_INT(a) & VAL_INT(b));
     return xs_null();
 }
 static Value *jit_rt_bor(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) return xs_int(a->i | b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) return xs_int(VAL_INT(a) | VAL_INT(b));
     return xs_null();
 }
 static Value *jit_rt_bxor(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) return xs_int(a->i ^ b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) return xs_int(VAL_INT(a) ^ VAL_INT(b));
     return xs_null();
 }
 static Value *jit_rt_bnot(Value *a) {
-    if (a->tag == XS_INT) return xs_int(~a->i);
+    if (VAL_TAG(a) == XS_INT) return xs_int(~VAL_INT(a));
     return xs_null();
 }
 static Value *jit_rt_shl(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) return xs_int(a->i << b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) return xs_int(VAL_INT(a) << VAL_INT(b));
     return xs_null();
 }
 static Value *jit_rt_shr(Value *a, Value *b) {
-    if (a->tag == XS_INT && b->tag == XS_INT) return xs_int(a->i >> b->i);
+    if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) return xs_int(VAL_INT(a) >> VAL_INT(b));
     return xs_null();
 }
 
@@ -176,8 +176,8 @@ static int jit_rt_truthy(Value *v) {
 }
 
 static Value *jit_rt_floor_div(Value *a, Value *b) {
-    double av = a->tag == XS_INT ? (double)a->i : a->f;
-    double bv = b->tag == XS_INT ? (double)b->i : b->f;
+    double av = VAL_TAG(a) == XS_INT ? (double)VAL_INT(a) : a->f;
+    double bv = VAL_TAG(b) == XS_INT ? (double)VAL_INT(b) : b->f;
     if (bv == 0.0) return xs_null();
     return xs_int((int64_t)floor(av / bv));
 }
@@ -189,16 +189,16 @@ static Value *jit_rt_spaceship(Value *a, Value *b) {
 
 static Value *jit_rt_in(Value *a, Value *b) {
     int found = 0;
-    if (b->tag == XS_ARRAY) {
+    if (VAL_TAG(b) == XS_ARRAY) {
         for (int j = 0; j < b->arr->len; j++)
             if (value_equal(a, b->arr->items[j])) { found = 1; break; }
-    } else if (b->tag == XS_MAP || b->tag == XS_MODULE) {
-        if (a->tag == XS_STR) found = map_has(b->map, a->s);
-    } else if (b->tag == XS_STR && a->tag == XS_STR) {
+    } else if (VAL_TAG(b) == XS_MAP || VAL_TAG(b) == XS_MODULE) {
+        if (VAL_TAG(a) == XS_STR) found = map_has(b->map, a->s);
+    } else if (VAL_TAG(b) == XS_STR && VAL_TAG(a) == XS_STR) {
         found = strstr(b->s, a->s) != NULL;
-    } else if (b->tag == XS_RANGE) {
-        if (a->tag == XS_INT) {
-            int64_t v = a->i;
+    } else if (VAL_TAG(b) == XS_RANGE) {
+        if (VAL_TAG(a) == XS_INT) {
+            int64_t v = VAL_INT(a);
             found = v >= b->range->start &&
                     (b->range->inclusive ? v <= b->range->end : v < b->range->end);
         }
@@ -208,17 +208,17 @@ static Value *jit_rt_in(Value *a, Value *b) {
 
 static Value *jit_rt_is(Value *a, Value *b) {
     int match = 0;
-    if (b->tag == XS_STR) {
+    if (VAL_TAG(b) == XS_STR) {
         const char *t = b->s;
-        if      (strcmp(t, "int") == 0 || strcmp(t, "i64") == 0) match = (a->tag == XS_INT);
-        else if (strcmp(t, "float") == 0 || strcmp(t, "f64") == 0) match = (a->tag == XS_FLOAT);
-        else if (strcmp(t, "str") == 0 || strcmp(t, "string") == 0) match = (a->tag == XS_STR);
-        else if (strcmp(t, "bool") == 0) match = (a->tag == XS_BOOL);
-        else if (strcmp(t, "array") == 0) match = (a->tag == XS_ARRAY);
-        else if (strcmp(t, "map") == 0) match = (a->tag == XS_MAP);
-        else if (strcmp(t, "null") == 0) match = (a->tag == XS_NULL);
-        else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (a->tag == XS_FUNC || a->tag == XS_NATIVE || a->tag == XS_CLOSURE);
-        else if (strcmp(t, "tuple") == 0) match = (a->tag == XS_TUPLE);
+        if      (strcmp(t, "int") == 0 || strcmp(t, "i64") == 0) match = (VAL_TAG(a) == XS_INT);
+        else if (strcmp(t, "float") == 0 || strcmp(t, "f64") == 0) match = (VAL_TAG(a) == XS_FLOAT);
+        else if (strcmp(t, "str") == 0 || strcmp(t, "string") == 0) match = (VAL_TAG(a) == XS_STR);
+        else if (strcmp(t, "bool") == 0) match = (VAL_TAG(a) == XS_BOOL);
+        else if (strcmp(t, "array") == 0) match = (VAL_TAG(a) == XS_ARRAY);
+        else if (strcmp(t, "map") == 0) match = (VAL_TAG(a) == XS_MAP);
+        else if (strcmp(t, "null") == 0) match = (VAL_TAG(a) == XS_NULL);
+        else if (strcmp(t, "fn") == 0 || strcmp(t, "function") == 0) match = (VAL_TAG(a) == XS_FUNC || VAL_TAG(a) == XS_NATIVE || VAL_TAG(a) == XS_CLOSURE);
+        else if (strcmp(t, "tuple") == 0) match = (VAL_TAG(a) == XS_TUPLE);
     }
     return xs_bool(match);
 }
@@ -233,8 +233,8 @@ static Value *jit_rt_make_tuple(Value **sp_bottom, int n) {
 }
 
 static Value *jit_rt_make_range(Value *start, Value *end, int inclusive) {
-    int64_t s = start->tag == XS_INT ? start->i : 0;
-    int64_t e = end->tag == XS_INT ? end->i : 0;
+    int64_t s = VAL_TAG(start) == XS_INT ? VAL_INT(start) : 0;
+    int64_t e = VAL_TAG(end) == XS_INT ? VAL_INT(end) : 0;
     value_decref(start);
     value_decref(end);
     return xs_range(s, e, inclusive);
@@ -242,9 +242,9 @@ static Value *jit_rt_make_range(Value *start, Value *end, int inclusive) {
 
 static Value *jit_rt_iter_len(Value *iter) {
     int64_t len = 0;
-    if (iter->tag == XS_ARRAY || iter->tag == XS_TUPLE) len = iter->arr->len;
-    else if (iter->tag == XS_STR) len = (int64_t)strlen(iter->s);
-    else if (iter->tag == XS_RANGE) {
+    if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) len = iter->arr->len;
+    else if (VAL_TAG(iter) == XS_STR) len = (int64_t)strlen(iter->s);
+    else if (VAL_TAG(iter) == XS_RANGE) {
         int64_t diff = iter->range->end - iter->range->start;
         if (!iter->range->inclusive) len = diff > 0 ? diff : 0;
         else len = diff >= 0 ? diff + 1 : 0;
@@ -255,14 +255,14 @@ static Value *jit_rt_iter_len(Value *iter) {
 
 static Value *jit_rt_iter_get(Value *iter, Value *idx) {
     Value *r;
-    int64_t i = idx->tag == XS_INT ? idx->i : 0;
-    if (iter->tag == XS_ARRAY || iter->tag == XS_TUPLE) {
+    int64_t i = VAL_TAG(idx) == XS_INT ? VAL_INT(idx) : 0;
+    if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) {
         r = (i >= 0 && i < iter->arr->len) ? value_incref(iter->arr->items[i]) : value_incref(XS_NULL_VAL);
-    } else if (iter->tag == XS_STR) {
+    } else if (VAL_TAG(iter) == XS_STR) {
         int64_t slen = (int64_t)strlen(iter->s);
         if (i >= 0 && i < slen) { char buf[2] = {iter->s[i], 0}; r = xs_str(buf); }
         else r = value_incref(XS_NULL_VAL);
-    } else if (iter->tag == XS_RANGE) {
+    } else if (VAL_TAG(iter) == XS_RANGE) {
         r = xs_int(iter->range->start + i);
     } else {
         r = value_incref(XS_NULL_VAL);
@@ -281,20 +281,20 @@ static Value *jit_rt_method_call(Value **sp_bottom, int argc, Value *name_val) {
     const char *mname = name_val->s;
     Value *method = NULL;
 
-    if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+    if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
         method = map_get(obj->map, mname);
         if (!method) {
             Value *methods = map_get(obj->map, "__methods");
-            if (methods && methods->tag == XS_MAP)
+            if (methods && VAL_TAG(methods) == XS_MAP)
                 method = map_get(methods->map, mname);
         }
-    } else if (obj->tag == XS_INST && obj->inst) {
+    } else if (VAL_TAG(obj) == XS_INST && obj->inst) {
         method = map_get(obj->inst->fields, mname);
         if (!method && obj->inst->methods)
             method = map_get(obj->inst->methods, mname);
     }
 
-    if (method && method->tag == XS_NATIVE) {
+    if (method && VAL_TAG(method) == XS_NATIVE) {
         /* For native methods, pass obj as first arg */
         Value *margs[17];
         margs[0] = obj;
@@ -320,14 +320,14 @@ static Value *jit_rt_store_local(Value **locals, int slot, Value *new_val) {
 
 /* Load global: look up name in globals map */
 static Value *jit_rt_load_global(XSMap *globals, Value *name_val) {
-    if (!globals || !name_val || name_val->tag != XS_STR) return xs_null();
+    if (!globals || !name_val || VAL_TAG(name_val) != XS_STR) return xs_null();
     Value *v = map_get(globals, name_val->s);
     return v ? value_incref(v) : value_incref(XS_NULL_VAL);
 }
 
 /* Store global: set name in globals map */
 static Value *jit_rt_store_global(XSMap *globals, Value *name_val, Value *val) {
-    if (!globals || !name_val || name_val->tag != XS_STR) return val;
+    if (!globals || !name_val || VAL_TAG(name_val) != XS_STR) return val;
     map_set(globals, name_val->s, val);
     return val;
 }
@@ -349,7 +349,7 @@ static Value *jit_rt_make_map(Value **sp_bottom, int npairs) {
     for (int i = 0; i < npairs; i++) {
         Value *k = sp_bottom[i * 2];
         Value *v = sp_bottom[i * 2 + 1];
-        if (k->tag == XS_STR) map_set(m->map, k->s, v);
+        if (VAL_TAG(k) == XS_STR) map_set(m->map, k->s, v);
         value_decref(k);
         value_decref(v);
     }
@@ -359,18 +359,18 @@ static Value *jit_rt_make_map(Value **sp_bottom, int npairs) {
 /* Index get: col[idx] */
 static Value *jit_rt_index_get(Value *col, Value *idx) {
     Value *r;
-    if ((col->tag == XS_ARRAY || col->tag == XS_TUPLE) && idx->tag == XS_INT) {
-        int64_t i = idx->i;
+    if ((VAL_TAG(col) == XS_ARRAY || VAL_TAG(col) == XS_TUPLE) && VAL_TAG(idx) == XS_INT) {
+        int64_t i = VAL_INT(idx);
         if (i < 0) i += col->arr->len;
         r = (i >= 0 && i < col->arr->len) ? value_incref(col->arr->items[i])
                                             : value_incref(XS_NULL_VAL);
-    } else if (col->tag == XS_MAP && idx->tag == XS_STR) {
+    } else if (VAL_TAG(col) == XS_MAP && VAL_TAG(idx) == XS_STR) {
         Value *v = map_get(col->map, idx->s);
         r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
-    } else if (col->tag == XS_STR && idx->tag == XS_INT) {
+    } else if (VAL_TAG(col) == XS_STR && VAL_TAG(idx) == XS_INT) {
         const char *s = col->s;
         int64_t slen = (int64_t)strlen(s);
-        int64_t i = idx->i;
+        int64_t i = VAL_INT(idx);
         if (i < 0) i += slen;
         if (i >= 0 && i < slen) {
             char buf[2] = {s[i], 0};
@@ -388,13 +388,13 @@ static Value *jit_rt_index_get(Value *col, Value *idx) {
 
 /* Index set: col[idx] = val */
 static Value *jit_rt_index_set(Value *col, Value *idx, Value *val) {
-    if ((col->tag == XS_ARRAY || col->tag == XS_TUPLE) && idx->tag == XS_INT) {
-        int64_t i = idx->i;
+    if ((VAL_TAG(col) == XS_ARRAY || VAL_TAG(col) == XS_TUPLE) && VAL_TAG(idx) == XS_INT) {
+        int64_t i = VAL_INT(idx);
         if (i >= 0 && i < col->arr->len) {
             value_decref(col->arr->items[i]);
             col->arr->items[i] = value_incref(val);
         }
-    } else if (col->tag == XS_MAP && idx->tag == XS_STR) {
+    } else if (VAL_TAG(col) == XS_MAP && VAL_TAG(idx) == XS_STR) {
         map_set(col->map, idx->s, val);
     }
     value_decref(val);
@@ -407,25 +407,25 @@ static Value *jit_rt_index_set(Value *col, Value *idx, Value *val) {
 static Value *jit_rt_load_field(Value *obj, Value *name_val) {
     Value *r = NULL;
     const char *name = name_val->s;
-    if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+    if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
         Value *v = map_get(obj->map, name);
         if (v) {
             r = value_incref(v);
         } else {
             Value *methods = map_get(obj->map, "__methods");
-            if (methods && methods->tag == XS_MAP) {
+            if (methods && VAL_TAG(methods) == XS_MAP) {
                 Value *mv = map_get(methods->map, name);
                 if (mv) r = value_incref(mv);
             }
             if (!r) {
                 Value *impl = map_get(obj->map, "__impl__");
-                if (impl && impl->tag == XS_MAP) {
+                if (impl && VAL_TAG(impl) == XS_MAP) {
                     Value *mv = map_get(impl->map, name);
                     if (mv) r = value_incref(mv);
                 }
             }
         }
-    } else if (obj->tag == XS_INST && obj->inst) {
+    } else if (VAL_TAG(obj) == XS_INST && obj->inst) {
         Value *v = map_get(obj->inst->fields, name);
         if (v) r = value_incref(v);
         if (!r && obj->inst->methods) {
@@ -441,9 +441,9 @@ static Value *jit_rt_load_field(Value *obj, Value *name_val) {
 /* Store field: obj.name = val */
 static Value *jit_rt_store_field(Value *obj, Value *name_val, Value *val) {
     const char *name = name_val->s;
-    if (obj->tag == XS_MAP || obj->tag == XS_MODULE) {
+    if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
         map_set(obj->map, name, val);
-    } else if (obj->tag == XS_INST && obj->inst) {
+    } else if (VAL_TAG(obj) == XS_INST && obj->inst) {
         map_set(obj->inst->fields, name, val);
     }
     value_decref(val);
@@ -461,7 +461,7 @@ static Value *jit_rt_call(Value **sp_bottom, int argc) {
     Value **args  = sp_bottom + 1;
     Value *result = NULL;
 
-    if (callee->tag == XS_NATIVE) {
+    if (VAL_TAG(callee) == XS_NATIVE) {
         result = callee->native(NULL, args, argc);
         if (!result) result = value_incref(XS_NULL_VAL);
     } else {
@@ -469,7 +469,7 @@ static Value *jit_rt_call(Value **sp_bottom, int argc) {
          * return null to signal bailout. In practice, closures
          * trigger the bail path in jit_compile so this is only
          * reached for XS_NATIVE. */
-        fprintf(stderr, "jit: call on non-native (tag=%d), returning null\n", callee->tag);
+        fprintf(stderr, "jit: call on non-native (tag=%d), returning null\n", VAL_TAG(callee));
         result = value_incref(XS_NULL_VAL);
     }
 
@@ -909,11 +909,16 @@ static void emit_push_rax_to_vm_sp(Emitter *e) {
     emit_byte(e, 0x08);
 }
 
-/* Inline value_incref(rax). Skips on null (matches value.c). */
+/* Inline value_incref(rax). Skips on null or SMI (low bit set, which
+   means the value lives in the pointer, no refcount to bump). */
 static void emit_inline_incref_rax(Emitter *e) {
+    /* test al, 1  ; low bit set = SMI, skip everything (9 bytes) */
+    emit_byte(e, 0xa8); emit_byte(e, 0x01);
+    /* jnz +9  (skip test+jz+add if SMI) */
+    emit_byte(e, 0x75); emit_byte(e, 0x09);
     /* test rax, rax */
     emit_byte(e, 0x48); emit_byte(e, 0x85); emit_byte(e, 0xc0);
-    /* jz +4  (skip the inc) */
+    /* jz +4  (skip the inc on null) */
     emit_byte(e, 0x74); emit_byte(e, 0x04);
     /* add dword [rax + 4], 1 */
     emit_byte(e, 0x83); emit_byte(e, 0x40);
@@ -1401,79 +1406,116 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
         JMP_REL32_TO(loop_top); \
     } while (0)
 
-    /* ---- OP_ADD (int + int) ---- */
+    /* SMI-only fast paths. With SMIs, int arithmetic operates on the
+       pointer bits directly -- no dereference, no malloc, no refcount.
+       Identities used:
+         a_smi + b_smi - 1 == ((a + b) << 1 | 1) == result_smi
+         a_smi - b_smi + 1 == ((a - b) << 1 | 1) == result_smi
+       Both work because SMI = (int << 1) | 1; the extra 1 cancels on
+       add and reappears on sub. `jo` catches overflow beyond 63-bit
+       SMI range and routes to the slow path. Any non-SMI operand
+       (including heap XS_INT, float, bigint, map with dunder, ...)
+       falls through to vm_step_jit which handles full semantics. */
+
+    /* rax = b, rcx = a, rsi = sp; jump to slow path if either operand
+       isn't a SMI. */
+    #define EMIT_BOTH_SMI_CHECK() do { \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x46); \
+        emit_byte(&em, 0xf8); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x4e); \
+        emit_byte(&em, 0xf0); \
+        /* mov rdx, rax; and rdx, rcx; test dl, 1 */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xc2); \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x21); emit_byte(&em, 0xca); \
+        emit_byte(&em, 0xf6); emit_byte(&em, 0xc2); emit_byte(&em, 0x01); \
+        /* jz slow_path (not both SMI) */ \
+        emit_byte(&em, 0x0f); emit_byte(&em, 0x84); \
+        emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); \
+        slow_patches[n_slow++] = em.pos - 4; \
+    } while (0)
+
+    /* After an SMI arith op, rcx holds the result SMI pointer.
+       Overwrite sp[-2] with it, sp -= 1, advance ip, loop.
+       No decref needed -- SMIs have no heap refs. */
+    #define EMIT_SMI_BINOP_FINISH() do { \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x83); emit_byte(&em, 0x6c); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); emit_byte(&em, 0x08); \
+        emit_byte(&em, 0x49); emit_byte(&em, 0x8b); emit_byte(&em, 0x74); \
+        emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_SP); \
+        /* mov [rsi - 8], rcx */ \
+        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x4e); \
+        emit_byte(&em, 0xf8); \
+        emit_advance_ip(&em); \
+        JMP_REL32_TO(loop_top); \
+    } while (0)
+
+    /* emit "jo rel32" -> slow_patches */
+    #define EMIT_JO_SLOW() do { \
+        emit_byte(&em, 0x0f); emit_byte(&em, 0x80); \
+        emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); emit_byte(&em, 0); \
+        slow_patches[n_slow++] = em.pos - 4; \
+    } while (0)
+
+    /* ---- OP_ADD (SMI + SMI) ---- */
     INLINE_CMP_JNE(OP_ADD);
     jne_patch = em.pos - 4;
-    EMIT_BINOP_INT_CHECK();
-    /* mov rdi, [rcx + 8]; mov rsi, [rax + 8] (but rsi is clobbered, use rsi ok) */
-    /* Actually we need a->i, b->i. rcx=a, rax=b, but b is in rax; after
-       spill we don't need rax anymore. Move b->i into a register. */
-    /* mov rdi, [rcx + 8] */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
-    emit_byte(&em, 0x08);
-    /* mov rsi, [rax + 8] */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x70);
-    emit_byte(&em, 0x08);
-    emit_call_abs(&em, (void *)(uintptr_t)xs_safe_add);
-    EMIT_BINOP_FINISH();
+    EMIT_BOTH_SMI_CHECK();
+    /* sub rcx, 1; add rcx, rax; jo slow */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xe9); emit_byte(&em, 0x01);
+    emit_byte(&em, 0x48); emit_byte(&em, 0x01); emit_byte(&em, 0xc1);
+    EMIT_JO_SLOW();
+    EMIT_SMI_BINOP_FINISH();
     PATCH_JNE_HERE(jne_patch);
 
-    /* ---- OP_SUB (int - int) ---- */
+    /* ---- OP_SUB (SMI - SMI) ---- */
     INLINE_CMP_JNE(OP_SUB);
     jne_patch = em.pos - 4;
-    EMIT_BINOP_INT_CHECK();
-    /* mov rdi, [rcx + 8]; mov rsi, [rax + 8]; call xs_safe_sub */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
-    emit_byte(&em, 0x08);
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x70);
-    emit_byte(&em, 0x08);
-    emit_call_abs(&em, (void *)(uintptr_t)xs_safe_sub);
-    EMIT_BINOP_FINISH();
+    EMIT_BOTH_SMI_CHECK();
+    /* sub rcx, rax; jo slow; add rcx, 1 */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x29); emit_byte(&em, 0xc1);
+    EMIT_JO_SLOW();
+    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xc1); emit_byte(&em, 0x01);
+    EMIT_SMI_BINOP_FINISH();
     PATCH_JNE_HERE(jne_patch);
 
-    /* ---- OP_LT (int < int) ----
-       Emit: compare a->i with b->i, produce TRUE_VAL or FALSE_VAL. */
+    /* ---- OP_LT (SMI < SMI) ----
+       Signed compare on SMI pointers works because (int << 1) | 1
+       preserves sign ordering. Result is TRUE_VAL/FALSE_VAL singleton,
+       pushed with incref (bool singletons are pinned but incref is a
+       few bytes). */
     INLINE_CMP_JNE(OP_LT);
     jne_patch = em.pos - 4;
-    EMIT_BINOP_INT_CHECK();
-    /* mov rdi, [rcx + 8]    ; a->i */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
-    emit_byte(&em, 0x08);
-    /* cmp rdi, [rax + 8]    ; a->i - b->i */
-    emit_byte(&em, 0x48); emit_byte(&em, 0x3b); emit_byte(&em, 0x78);
-    emit_byte(&em, 0x08);
-    /* setl al / movzx eax, al  : actually we just want a bool; use lea + address */
-    /* Simpler: jl is_lt; rax = &FALSE_VAL; jmp done; is_lt: rax = &TRUE_VAL; done: mov rax, [rax] */
-    /* jl rel8 +12 */
+    EMIT_BOTH_SMI_CHECK();
+    /* cmp rcx, rax */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xc1);
+    /* jl +12 to is_lt */
     emit_byte(&em, 0x7c); emit_byte(&em, 12);
-    /* mov rax, &XS_FALSE_VAL (10 bytes) */
     emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
-    /* jmp rel8 +10 (to skip mov TRUE_VAL) */
     emit_byte(&em, 0xeb); emit_byte(&em, 10);
-    /* is_lt: mov rax, &XS_TRUE_VAL (10 bytes) */
     emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
-    /* mov rax, [rax]  (deref extern) */
+    /* mov rax, [rax] -- deref to get singleton */
     emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
     emit_inline_incref_rax(&em);
-    EMIT_BINOP_FINISH();
+    /* mov rcx, rax (result into rcx for SMI finish) */
+    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    EMIT_SMI_BINOP_FINISH();
     PATCH_JNE_HERE(jne_patch);
 
-    /* ---- OP_GT (int > int) ---- */
+    /* ---- OP_GT (SMI > SMI) ---- */
     INLINE_CMP_JNE(OP_GT);
     jne_patch = em.pos - 4;
-    EMIT_BINOP_INT_CHECK();
-    emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x79);
-    emit_byte(&em, 0x08);
-    emit_byte(&em, 0x48); emit_byte(&em, 0x3b); emit_byte(&em, 0x78);
-    emit_byte(&em, 0x08);
-    /* jg rel8 +12 */
+    EMIT_BOTH_SMI_CHECK();
+    emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xc1);
     emit_byte(&em, 0x7f); emit_byte(&em, 12);
     emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
     emit_byte(&em, 0xeb); emit_byte(&em, 10);
     emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
     emit_byte(&em, 0x48); emit_byte(&em, 0x8b); emit_byte(&em, 0x00);
     emit_inline_incref_rax(&em);
-    EMIT_BINOP_FINISH();
+    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xc1);
+    EMIT_SMI_BINOP_FINISH();
     PATCH_JNE_HERE(jne_patch);
 
     /* ---- OP_JUMP_IF_FALSE / OP_JUMP_IF_TRUE ----
@@ -1772,6 +1814,14 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
     (void)emit_set_ip_abs;
     (void)emit_jnz_rel8_placeholder;
     (void)proto;
+    if (getenv("XS_JIT_DUMP")) {
+        FILE *fp = fopen("/tmp/jit.bin", "wb");
+        if (fp) {
+            size_t n = em.pos - (size_t)((uint8_t *)fn - j->code);
+            fwrite(fn, 1, n, fp); fclose(fp);
+            fprintf(stderr, "[jit] %zuB at %p\n", n, fn);
+        }
+    }
     return fn;
 }
 

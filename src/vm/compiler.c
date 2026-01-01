@@ -239,12 +239,12 @@ static void compile_sub_pattern_tos(Compiler *c, Node *sub,
         emit(c, MAKE_A(OP_POP, 0, 0));
         return;
     }
-    if (sub->tag == NODE_PAT_IDENT) {
+    if (VAL_TAG(sub) == NODE_PAT_IDENT) {
         int slot = local_add(c->current, sub->pat_ident.name);
         emit_a(c, OP_STORE_LOCAL, slot);
-    } else if (sub->tag == NODE_PAT_WILD) {
+    } else if (VAL_TAG(sub) == NODE_PAT_WILD) {
         emit(c, MAKE_A(OP_POP, 0, 0));
-    } else if (sub->tag == NODE_PAT_LIT) {
+    } else if (VAL_TAG(sub) == NODE_PAT_LIT) {
         switch (sub->pat_lit.tag) {
         case 0: emit_const(c, xs_int(sub->pat_lit.ival)); break;
         case 1: emit_const(c, xs_float(sub->pat_lit.fval)); break;
@@ -255,11 +255,11 @@ static void compile_sub_pattern_tos(Compiler *c, Node *sub,
         emit(c, MAKE_A(OP_EQ, 0, 0));
         if (*n_fail < max_fails)
             fail_jumps[(*n_fail)++] = emit_jump(c, OP_JUMP_IF_FALSE);
-    } else if (sub->tag == NODE_PAT_TUPLE) {
+    } else if (VAL_TAG(sub) == NODE_PAT_TUPLE) {
         int slot = local_add_hidden(c);
         emit_a(c, OP_STORE_LOCAL, slot);
         compile_tuple_pattern_at(c, sub, slot, fail_jumps, n_fail, max_fails);
-    } else if (sub->tag == NODE_PAT_MAP) {
+    } else if (VAL_TAG(sub) == NODE_PAT_MAP) {
         int slot = local_add_hidden(c);
         emit_a(c, OP_STORE_LOCAL, slot);
         compile_map_pattern_at(c, sub, slot, fail_jumps, n_fail, max_fails);
@@ -307,7 +307,7 @@ static void compile_map_pattern_at(Compiler *c, Node *pat, int val_slot,
         int fi_idx = emit_global_name(c, fname);
         emit_a(c, OP_LOAD_FIELD, fi_idx);
 
-        if (fpat && fpat->tag == NODE_PAT_WILD) {
+        if (fpat && VAL_TAG(fpat) == NODE_PAT_WILD) {
             emit(c, MAKE_A(OP_POP, 0, 0));
             continue;
         }
@@ -419,7 +419,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         return;
     }
 
-    switch (n->tag) {
+    switch (VAL_TAG(n)) {
 
     case NODE_LIT_INT:
         emit_const(c, xs_int(n->lit_int.ival));
@@ -458,14 +458,14 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int cnt = n->lit_array.elems.len;
         int has_spread = 0;
         for (int i = 0; i < cnt; i++)
-            if (n->lit_array.elems.items[i]->tag == NODE_SPREAD) { has_spread = 1; break; }
+            if (VAL_TAG(n->lit_array.elems.items[i]) == NODE_SPREAD) { has_spread = 1; break; }
         if (has_spread) {
             emit(c, MAKE_B(OP_MAKE_ARRAY, 0, 0, 0));
             int arr_slot = local_add_hidden(c);
             emit_a(c, OP_STORE_LOCAL, arr_slot);
             for (int i = 0; i < cnt; i++) {
                 Node *elem = n->lit_array.elems.items[i];
-                if (elem->tag == NODE_SPREAD) {
+                if (VAL_TAG(elem) == NODE_SPREAD) {
                     int sp_slot = local_add_hidden(c);
                     int sp_len  = local_add_hidden(c);
                     int sp_idx  = local_add_hidden(c);
@@ -631,7 +631,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             else if (strcmp(aop, "//=") == 0) compound_op = OP_FLOOR_DIV;
         }
 
-        if (tgt->tag == NODE_IDENT) {
+        if (VAL_TAG(tgt) == NODE_IDENT) {
             if (compound_op != OP_NOP) {
                 compile_name_load(c, tgt->ident.name);
                 compile_node(c, n->assign.value, 1);
@@ -641,7 +641,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             }
             if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
             compile_name_store(c, tgt->ident.name);
-        } else if (tgt->tag == NODE_FIELD) {
+        } else if (VAL_TAG(tgt) == NODE_FIELD) {
             compile_node(c, tgt->field.obj, 1);
             if (compound_op != OP_NOP) {
                 emit(c, MAKE_A(OP_DUP, 0, 0));
@@ -664,7 +664,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 int ni = emit_global_name(c, tgt->field.name);
                 emit_a(c, OP_STORE_FIELD, ni);
             }
-        } else if (tgt->tag == NODE_INDEX) {
+        } else if (VAL_TAG(tgt) == NODE_INDEX) {
             compile_node(c, tgt->index.obj,   1);
             compile_node(c, tgt->index.index, 1);
             if (compound_op != OP_NOP) {
@@ -711,8 +711,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         else
             emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         Node *pat = n->let.pattern;
-        if (pat && (pat->tag == NODE_PAT_TUPLE || pat->tag == NODE_PAT_SLICE)) {
-            NodeList *elems = (pat->tag == NODE_PAT_TUPLE)
+        if (pat && (VAL_TAG(pat) == NODE_PAT_TUPLE || VAL_TAG(pat) == NODE_PAT_SLICE)) {
+            NodeList *elems = (VAL_TAG(pat) == NODE_PAT_TUPLE)
                 ? &pat->pat_tuple.elems : &pat->pat_slice.elems;
             int val_slot = local_add_hidden(c);
             emit_a(c, OP_STORE_LOCAL, val_slot);
@@ -721,16 +721,16 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 emit_a(c, OP_LOAD_LOCAL, val_slot);
                 emit_const(c, xs_int(di));
                 emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
-                if (sub->tag == NODE_PAT_IDENT && sub->pat_ident.name) {
+                if (VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name) {
                     int ds = local_add(c->current, sub->pat_ident.name);
                     emit_a(c, OP_STORE_LOCAL, ds);
-                } else if (sub->tag == NODE_PAT_WILD) {
+                } else if (VAL_TAG(sub) == NODE_PAT_WILD) {
                     emit(c, MAKE_A(OP_POP, 0, 0));
                 } else {
                     emit(c, MAKE_A(OP_POP, 0, 0));
                 }
             }
-            if (pat->tag == NODE_PAT_SLICE && pat->pat_slice.rest) {
+            if (VAL_TAG(pat) == NODE_PAT_SLICE && pat->pat_slice.rest) {
                 emit_a(c, OP_LOAD_LOCAL, val_slot);
                 emit_const(c, xs_int(elems->len));
                 int rest_ni = emit_global_name(c, "slice");
@@ -739,7 +739,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 emit_a(c, OP_STORE_LOCAL, rs);
             }
             if (want_value) emit_a(c, OP_LOAD_LOCAL, val_slot);
-        } else if (pat && pat->tag == NODE_PAT_STRUCT) {
+        } else if (pat && VAL_TAG(pat) == NODE_PAT_STRUCT) {
             int val_slot = local_add_hidden(c);
             emit_a(c, OP_STORE_LOCAL, val_slot);
             for (int di = 0; di < pat->pat_struct.fields.len; di++) {
@@ -751,7 +751,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     emit_a(c, OP_LOAD_FIELD, fi_idx);
                 }
                 const char *bind_name = key;
-                if (fpat && fpat->tag == NODE_PAT_IDENT && fpat->pat_ident.name)
+                if (fpat && VAL_TAG(fpat) == NODE_PAT_IDENT && fpat->pat_ident.name)
                     bind_name = fpat->pat_ident.name;
                 int ds = local_add(c->current, bind_name);
                 emit_a(c, OP_STORE_LOCAL, ds);
@@ -908,14 +908,14 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int cnt = n->lit_map.keys.len;
         int has_spread = 0;
         for (int i = 0; i < cnt; i++)
-            if (n->lit_map.keys.items[i] && n->lit_map.keys.items[i]->tag == NODE_SPREAD) { has_spread = 1; break; }
+            if (n->lit_map.keys.items[i] && VAL_TAG(n->lit_map.keys.items[i]) == NODE_SPREAD) { has_spread = 1; break; }
         /* In `#{ name: v }`, a bareword key parses as NODE_IDENT. The
            interpreter treats it as the string "name", so we must too -
            otherwise the VM emits LOAD_GLOBAL "name" which usually
            returns null and silently produces an empty map. */
         #define EMIT_KEY(KEYNODE) do { \
             Node *_k = (KEYNODE); \
-            if (_k && _k->tag == NODE_IDENT && _k->ident.name) \
+            if (_k && VAL_TAG(_k) == NODE_IDENT && _k->ident.name) \
                 emit_const(c, xs_str(_k->ident.name)); \
             else \
                 compile_node(c, _k, 1); \
@@ -926,7 +926,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             emit_a(c, OP_STORE_LOCAL, map_slot);
             for (int i = 0; i < cnt; i++) {
                 Node *key = n->lit_map.keys.items[i];
-                if (key && key->tag == NODE_SPREAD) {
+                if (key && VAL_TAG(key) == NODE_SPREAD) {
                     emit_a(c, OP_LOAD_LOCAL, map_slot);
                     compile_node(c, key->spread.expr, 1);
                     emit(c, MAKE_A(OP_MAP_MERGE, 0, 0));
@@ -1013,7 +1013,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         }
         for (int i = 0; i < cnt; i++) {
             Node *part = n->lit_string.parts.items[i];
-            if (part->tag == NODE_LIT_STRING) {
+            if (VAL_TAG(part) == NODE_LIT_STRING) {
                 emit_const(c, xs_str(part->lit_string.sval ? part->lit_string.sval : ""));
             } else {
                 emit_a(c, OP_LOAD_GLOBAL, emit_global_name(c, "str"));
@@ -1113,18 +1113,18 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         emit_a(c, OP_LOAD_LOCAL, iter_slot);
         emit_a(c, OP_LOAD_LOCAL, idx_slot);
         Node *pat = n->for_loop.pattern;
-        int want_pairs = (pat && pat->tag == NODE_PAT_TUPLE) ? 1 : 0;
+        int want_pairs = (pat && VAL_TAG(pat) == NODE_PAT_TUPLE) ? 1 : 0;
         emit(c, MAKE_A(OP_ITER_GET, want_pairs, 0));
         const char *pat_name = NULL;
         if (pat) {
-            if (pat->tag == NODE_IDENT)     pat_name = pat->ident.name;
-            if (pat->tag == NODE_PAT_IDENT) pat_name = pat->pat_ident.name;
+            if (VAL_TAG(pat) == NODE_IDENT)     pat_name = pat->ident.name;
+            if (VAL_TAG(pat) == NODE_PAT_IDENT) pat_name = pat->pat_ident.name;
         }
         if (pat_name) {
             int vs = local_add(c->current, pat_name);
             emit_a(c, OP_STORE_LOCAL, vs);
-        } else if (pat && (pat->tag == NODE_PAT_TUPLE || pat->tag == NODE_PAT_SLICE)) {
-            NodeList *elems = (pat->tag == NODE_PAT_TUPLE)
+        } else if (pat && (VAL_TAG(pat) == NODE_PAT_TUPLE || VAL_TAG(pat) == NODE_PAT_SLICE)) {
+            NodeList *elems = (VAL_TAG(pat) == NODE_PAT_TUPLE)
                 ? &pat->pat_tuple.elems : &pat->pat_slice.elems;
             int elem_slot = local_add_hidden(c);
             emit_a(c, OP_STORE_LOCAL, elem_slot);
@@ -1133,10 +1133,10 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 emit_a(c, OP_LOAD_LOCAL, elem_slot);
                 emit_const(c, xs_int(di));
                 emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
-                if (sub->tag == NODE_PAT_IDENT && sub->pat_ident.name) {
+                if (VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name) {
                     int ds = local_add(c->current, sub->pat_ident.name);
                     emit_a(c, OP_STORE_LOCAL, ds);
-                } else if (sub->tag == NODE_PAT_WILD) {
+                } else if (VAL_TAG(sub) == NODE_PAT_WILD) {
                     emit(c, MAKE_A(OP_POP, 0, 0));
                 } else {
                     emit(c, MAKE_A(OP_POP, 0, 0));
@@ -1252,9 +1252,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             int tuple_jumps[16];
             int n_tuple_jumps = 0;
 
-            if (!pat || pat->tag == NODE_PAT_WILD) {
+            if (!pat || VAL_TAG(pat) == NODE_PAT_WILD) {
                 /* wildcard: always matches, no binding */
-            } else if (pat->tag == NODE_PAT_IDENT && !arm->guard) {
+            } else if (VAL_TAG(pat) == NODE_PAT_IDENT && !arm->guard) {
                 /* Catchall binding: `n => ...` matches anything and binds
                    `n` to the subject. Without this, the arm body can't
                    reference the bound name. */
@@ -1263,7 +1263,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     emit_a(c, OP_LOAD_LOCAL, subj_slot);
                     emit_a(c, OP_STORE_LOCAL, bs);
                 }
-            } else if (pat->tag == NODE_PAT_LIT) {
+            } else if (VAL_TAG(pat) == NODE_PAT_LIT) {
                 emit_a(c, OP_LOAD_LOCAL, subj_slot);
                 switch (pat->pat_lit.tag) {
                 case 0: emit_const(c, xs_int(pat->pat_lit.ival));   break;
@@ -1274,12 +1274,12 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 }
                 emit(c, MAKE_A(OP_EQ, 0, 0));
                 j_next = emit_jump(c, OP_JUMP_IF_FALSE);
-            } else if (pat->tag == NODE_PAT_RANGE || pat->tag == NODE_RANGE) {
-                Node *start = (pat->tag == NODE_PAT_RANGE)
+            } else if (VAL_TAG(pat) == NODE_PAT_RANGE || VAL_TAG(pat) == NODE_RANGE) {
+                Node *start = (VAL_TAG(pat) == NODE_PAT_RANGE)
                     ? pat->pat_range.start : pat->range.start;
-                Node *end_n = (pat->tag == NODE_PAT_RANGE)
+                Node *end_n = (VAL_TAG(pat) == NODE_PAT_RANGE)
                     ? pat->pat_range.end   : pat->range.end;
-                int incl = (pat->tag == NODE_PAT_RANGE)
+                int incl = (VAL_TAG(pat) == NODE_PAT_RANGE)
                     ? pat->pat_range.inclusive : pat->range.inclusive;
                 compile_node(c, start, 1);
                 emit_a(c, OP_LOAD_LOCAL, subj_slot);
@@ -1304,9 +1304,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     patch_jump(c, jf_hi);
                 }
                 continue; /* handled */
-            } else if (pat->tag == NODE_PAT_CAPTURE) {
+            } else if (VAL_TAG(pat) == NODE_PAT_CAPTURE) {
                 Node *sub = pat->pat_capture.pattern;
-                if (sub && sub->tag == NODE_PAT_RANGE) {
+                if (sub && VAL_TAG(sub) == NODE_PAT_RANGE) {
                     Node *start = sub->range.start;
                     Node *end_n = sub->range.end;
                     int incl = sub->range.inclusive;
@@ -1333,7 +1333,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     patch_jump(c, jf_end);
                     if (j_next >= 0) patch_jump(c, j_next);
                     continue; /* handled */
-                } else if (!sub || sub->tag == NODE_PAT_WILD) {
+                } else if (!sub || VAL_TAG(sub) == NODE_PAT_WILD) {
                     if (pat->pat_capture.name) {
                         int bs = local_add(c->current, pat->pat_capture.name);
                         emit_a(c, OP_LOAD_LOCAL, subj_slot);
@@ -1342,14 +1342,14 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 } else {
                     /* unsupported sub-pattern */
                 }
-            } else if (pat->tag == NODE_PAT_IDENT) {
+            } else if (VAL_TAG(pat) == NODE_PAT_IDENT) {
                 int bs = local_add(c->current, pat->pat_ident.name);
                 emit_a(c, OP_LOAD_LOCAL, subj_slot);
                 emit_a(c, OP_STORE_LOCAL, bs);
-            } else if (pat->tag == NODE_PAT_TUPLE) {
+            } else if (VAL_TAG(pat) == NODE_PAT_TUPLE) {
                 compile_tuple_pattern_at(c, pat, subj_slot,
                                          tuple_jumps, &n_tuple_jumps, 16);
-            } else if (pat->tag == NODE_PAT_ENUM) {
+            } else if (VAL_TAG(pat) == NODE_PAT_ENUM) {
                 emit_a(c, OP_LOAD_LOCAL, subj_slot);
                 {
                     int tag_idx = emit_global_name(c, "_tag");
@@ -1365,7 +1365,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 j_next = emit_jump(c, OP_JUMP_IF_FALSE);
                 for (int eai = 0; eai < pat->pat_enum.args.len; eai++) {
                     Node *arg_pat = pat->pat_enum.args.items[eai];
-                    if (arg_pat->tag == NODE_PAT_IDENT) {
+                    if (VAL_TAG(arg_pat) == NODE_PAT_IDENT) {
                         emit_a(c, OP_LOAD_LOCAL, subj_slot);
                         {
                             int val_idx = emit_global_name(c, "_val");
@@ -1379,7 +1379,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         emit_a(c, OP_STORE_LOCAL, slot);
                     }
                 }
-            } else if (pat->tag == NODE_PAT_OR) {
+            } else if (VAL_TAG(pat) == NODE_PAT_OR) {
                 /* Flatten the OR tree into leaves. Each leaf is a PAT_LIT,
                    PAT_IDENT, or PAT_WILD. For each LIT leaf we emit an EQ
                    + JUMP_IF_TRUE to a common hit target; for WILD or IDENT
@@ -1390,7 +1390,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 Node *leaves[64]; int nleaves = 0;
                 while (stop > 0 && nleaves < 64) {
                     Node *cur = stack[--stop];
-                    if (cur && cur->tag == NODE_PAT_OR) {
+                    if (cur && VAL_TAG(cur) == NODE_PAT_OR) {
                         if (stop < 30) {
                             if (cur->pat_or.right) stack[stop++] = cur->pat_or.right;
                             if (cur->pat_or.left)  stack[stop++] = cur->pat_or.left;
@@ -1403,7 +1403,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 int has_catchall = 0;
                 for (int li = 0; li < nleaves; li++) {
                     Node *lf = leaves[li];
-                    if (lf->tag == NODE_PAT_LIT) {
+                    if (VAL_TAG(lf) == NODE_PAT_LIT) {
                         emit_a(c, OP_LOAD_LOCAL, subj_slot);
                         switch (lf->pat_lit.tag) {
                         case 0: emit_const(c, xs_int(lf->pat_lit.ival)); break;
@@ -1415,9 +1415,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         emit(c, MAKE_A(OP_EQ, 0, 0));
                         if (n_hit < 64)
                             hit_jumps[n_hit++] = emit_jump(c, OP_JUMP_IF_TRUE);
-                    } else if (lf->tag == NODE_PAT_WILD || lf->tag == NODE_PAT_IDENT) {
+                    } else if (VAL_TAG(lf) == NODE_PAT_WILD || VAL_TAG(lf) == NODE_PAT_IDENT) {
                         has_catchall = 1;
-                        if (lf->tag == NODE_PAT_IDENT) {
+                        if (VAL_TAG(lf) == NODE_PAT_IDENT) {
                             int bs = local_add(c->current, lf->pat_ident.name);
                             emit_a(c, OP_LOAD_LOCAL, subj_slot);
                             emit_a(c, OP_STORE_LOCAL, bs);
@@ -1431,7 +1431,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 /* all hit jumps land here */
                 for (int hi = 0; hi < n_hit; hi++)
                     patch_jump(c, hit_jumps[hi]);
-            } else if (pat->tag == NODE_PAT_SLICE) {
+            } else if (VAL_TAG(pat) == NODE_PAT_SLICE) {
                 int head_n = pat->pat_slice.elems.len;
                 /* Guard: subject must actually be array-like. Without this
                    an int like 99 would sail through because ITER_LEN returns
@@ -1452,13 +1452,13 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     tuple_jumps[n_tuple_jumps++] = emit_jump(c, OP_JUMP_IF_FALSE);
                 for (int si = 0; si < head_n; si++) {
                     Node *elem_pat = pat->pat_slice.elems.items[si];
-                    if (elem_pat->tag == NODE_PAT_IDENT) {
+                    if (VAL_TAG(elem_pat) == NODE_PAT_IDENT) {
                         emit_a(c, OP_LOAD_LOCAL, subj_slot);
                         emit_const(c, xs_int(si));
                         emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
                         int slot = local_add(c->current, elem_pat->pat_ident.name);
                         emit_a(c, OP_STORE_LOCAL, slot);
-                    } else if (elem_pat->tag == NODE_PAT_LIT) {
+                    } else if (VAL_TAG(elem_pat) == NODE_PAT_LIT) {
                         emit_a(c, OP_LOAD_LOCAL, subj_slot);
                         emit_const(c, xs_int(si));
                         emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
@@ -1471,7 +1471,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         }
                         emit(c, MAKE_A(OP_EQ, 0, 0));
                         j_next = emit_jump(c, OP_JUMP_IF_FALSE);
-                    } else if (elem_pat->tag == NODE_PAT_WILD) {
+                    } else if (VAL_TAG(elem_pat) == NODE_PAT_WILD) {
                         /* nothing to do */
                     }
                 }
@@ -1484,13 +1484,13 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     int rs = local_add(c->current, pat->pat_slice.rest);
                     emit_a(c, OP_STORE_LOCAL, rs);
                 }
-            } else if (pat->tag == NODE_PAT_EXPR) {
+            } else if (VAL_TAG(pat) == NODE_PAT_EXPR) {
                 emit_a(c, OP_LOAD_LOCAL, subj_slot);
                 compile_node(c, pat->pat_expr.expr, 1);
                 emit(c, MAKE_A(OP_EQ, 0, 0));
                 j_next = emit_jump(c, OP_JUMP_IF_FALSE);
-            } else if (pat->tag == NODE_PAT_GUARD) {
-                if (pat->pat_guard.pattern && pat->pat_guard.pattern->tag == NODE_PAT_IDENT) {
+            } else if (VAL_TAG(pat) == NODE_PAT_GUARD) {
+                if (pat->pat_guard.pattern && VAL_TAG(pat->pat_guard.pattern) == NODE_PAT_IDENT) {
                     int bs = local_add(c->current, pat->pat_guard.pattern->pat_ident.name);
                     emit_a(c, OP_LOAD_LOCAL, subj_slot);
                     emit_a(c, OP_STORE_LOCAL, bs);
@@ -1499,7 +1499,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     compile_node(c, pat->pat_guard.guard, 1);
                     j_next = emit_jump(c, OP_JUMP_IF_FALSE);
                 }
-            } else if (pat->tag == NODE_PAT_STRUCT) {
+            } else if (VAL_TAG(pat) == NODE_PAT_STRUCT) {
                 for (int fi = 0; fi < pat->pat_struct.fields.len; fi++) {
                     const char *fname = pat->pat_struct.fields.items[fi].key;
                     Node *fpat = pat->pat_struct.fields.items[fi].val;
@@ -1508,10 +1508,10 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         int fi_idx = emit_global_name(c, fname);
                         emit_a(c, OP_LOAD_FIELD, fi_idx);
                     }
-                    if (fpat && fpat->tag == NODE_PAT_IDENT) {
+                    if (fpat && VAL_TAG(fpat) == NODE_PAT_IDENT) {
                         int slot = local_add(c->current, fpat->pat_ident.name);
                         emit_a(c, OP_STORE_LOCAL, slot);
-                    } else if (fpat && fpat->tag == NODE_PAT_LIT) {
+                    } else if (fpat && VAL_TAG(fpat) == NODE_PAT_LIT) {
                         switch (fpat->pat_lit.tag) {
                         case 0: emit_const(c, xs_int(fpat->pat_lit.ival)); break;
                         case 1: emit_const(c, xs_float(fpat->pat_lit.fval)); break;
@@ -1525,7 +1525,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         emit(c, MAKE_A(OP_POP, 0, 0));
                     }
                 }
-            } else if (pat->tag == NODE_PAT_STRING_CONCAT) {
+            } else if (VAL_TAG(pat) == NODE_PAT_STRING_CONCAT) {
                 /* "prefix" ++ rest: match iff subject is a string starting
                    with prefix, bind rest to the tail. */
                 const char *prefix = pat->pat_str_concat.prefix ? pat->pat_str_concat.prefix : "";
@@ -1541,17 +1541,17 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 /* Compute rest = subject.slice(plen). slice(start) with one
                    arg returns the substring from start to end. */
                 Node *rest = pat->pat_str_concat.rest;
-                if (rest && rest->tag == NODE_PAT_IDENT) {
+                if (rest && VAL_TAG(rest) == NODE_PAT_IDENT) {
                     emit_a(c, OP_LOAD_LOCAL, subj_slot);
                     emit_const(c, xs_int((int64_t)plen));
                     int sl_k = emit_global_name(c, "slice");
                     emit(c, MAKE_A(OP_METHOD_CALL, 1, (uint16_t)(unsigned)sl_k));
                     int rs = local_add(c->current, rest->pat_ident.name);
                     emit_a(c, OP_STORE_LOCAL, rs);
-                } else if (rest && rest->tag == NODE_PAT_WILD) {
+                } else if (rest && VAL_TAG(rest) == NODE_PAT_WILD) {
                     /* no binding needed */
                 }
-            } else if (pat->tag == NODE_PAT_MAP) {
+            } else if (VAL_TAG(pat) == NODE_PAT_MAP) {
                 /* Guard: subject must be map-like. Without this the
                    pattern #{} would spuriously match any value, including
                    ints, because the field loop below has nothing to check
@@ -1562,7 +1562,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 j_next = emit_jump(c, OP_JUMP_IF_FALSE);
                 compile_map_pattern_at(c, pat, subj_slot,
                                        tuple_jumps, &n_tuple_jumps, 16);
-            } else if (pat->tag == NODE_PAT_REGEX) {
+            } else if (VAL_TAG(pat) == NODE_PAT_REGEX) {
                 /* /re/ arm: match iff subject is a string that the regex
                    matches fully. Anchor the pattern with ^...$ at compile
                    time and call test(). */
@@ -1595,9 +1595,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             if (j_next >= 0)  patch_jump(c, j_next);
             if (j_guard >= 0) patch_jump(c, j_guard);
             /* patch per-element fail jumps from tuple / slice / map patterns */
-            if (pat && (pat->tag == NODE_PAT_TUPLE ||
-                        pat->tag == NODE_PAT_SLICE ||
-                        pat->tag == NODE_PAT_MAP)) {
+            if (pat && (VAL_TAG(pat) == NODE_PAT_TUPLE ||
+                        VAL_TAG(pat) == NODE_PAT_SLICE ||
+                        VAL_TAG(pat) == NODE_PAT_MAP)) {
                 for (int tj = 0; tj < n_tuple_jumps; tj++)
                     patch_jump(c, tuple_jumps[tj]);
             }
@@ -1694,8 +1694,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int field_count = 0, method_count = 0;
         for (int mi = 0; mi < n->class_decl.members.len; mi++) {
             Node *mem = n->class_decl.members.items[mi];
-            if (mem->tag == NODE_LET || mem->tag == NODE_VAR) field_count++;
-            else if (mem->tag == NODE_FN_DECL) method_count++;
+            if (VAL_TAG(mem) == NODE_LET || VAL_TAG(mem) == NODE_VAR) field_count++;
+            else if (VAL_TAG(mem) == NODE_FN_DECL) method_count++;
         }
 
         int fields_slot = local_add_hidden(c);
@@ -1703,7 +1703,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int bases_slot = local_add_hidden(c);
         for (int mi = 0; mi < n->class_decl.members.len; mi++) {
             Node *mem = n->class_decl.members.items[mi];
-            if (mem->tag == NODE_LET || mem->tag == NODE_VAR) {
+            if (VAL_TAG(mem) == NODE_LET || VAL_TAG(mem) == NODE_VAR) {
                 emit_const(c, xs_str(mem->let.name ? mem->let.name : "?"));
                 if (mem->let.value) compile_node(c, mem->let.value, 1);
                 else emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
@@ -1714,7 +1714,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
 
         for (int mi = 0; mi < n->class_decl.members.len; mi++) {
             Node *mem = n->class_decl.members.items[mi];
-            if (mem->tag == NODE_FN_DECL) {
+            if (VAL_TAG(mem) == NODE_FN_DECL) {
                 emit_const(c, xs_str(mem->fn_decl.name ? mem->fn_decl.name : "?"));
                 int fidx = compile_fn(c, mem->fn_decl.name,
                                       &mem->fn_decl.params, mem->fn_decl.body);
@@ -1770,7 +1770,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int ndefaults = 0;
         for (int j = 0; j < n->trait_decl.methods.len; j++) {
             Node *meth = n->trait_decl.methods.items[j];
-            if (meth->tag != NODE_FN_DECL || !meth->fn_decl.body ||
+            if (VAL_TAG(meth) != NODE_FN_DECL || !meth->fn_decl.body ||
                 !meth->fn_decl.name) continue;
             emit_const(c, xs_str(meth->fn_decl.name));
             int fidx = compile_fn(c, meth->fn_decl.name,
@@ -1809,7 +1809,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     case NODE_IMPL_DECL: {
         for (int mi = 0; mi < n->impl_decl.members.len; mi++) {
             Node *mem = n->impl_decl.members.items[mi];
-            if (mem->tag != NODE_FN_DECL || !mem->fn_decl.name) continue;
+            if (VAL_TAG(mem) != NODE_FN_DECL || !mem->fn_decl.name) continue;
 
             compile_name_load(c, n->impl_decl.type_name);
             emit_const(c, xs_str(mem->fn_decl.name));
@@ -1869,7 +1869,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
 
         for (int mi = 0; mi < n->module_decl.body.len; mi++) {
             Node *item = n->module_decl.body.items[mi];
-            if (item->tag == NODE_FN_DECL && item->fn_decl.name) {
+            if (VAL_TAG(item) == NODE_FN_DECL && item->fn_decl.name) {
                 int fidx = compile_fn(c, item->fn_decl.name,
                                       &item->fn_decl.params, item->fn_decl.body);
                 if (item->fn_decl.is_generator) {
@@ -1879,7 +1879,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 emit_make_closure(c, fidx);
                 int slot = local_add(c->current, item->fn_decl.name);
                 emit_a(c, OP_STORE_LOCAL, slot);
-            } else if (item->tag == NODE_LET || item->tag == NODE_VAR) {
+            } else if (VAL_TAG(item) == NODE_LET || VAL_TAG(item) == NODE_VAR) {
                 compile_node(c, item, 0);
             } else {
                 compile_node(c, item, 0);
@@ -1950,11 +1950,11 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         emit(c, MAKE_A(OP_CATCH, 0, 0));
         if (n->try_.catch_arms.len > 0) {
             MatchArm *arm = &n->try_.catch_arms.items[0];
-            if (arm->pattern && arm->pattern->tag == NODE_IDENT
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_IDENT
                     && arm->pattern->ident.name) {
                 int slot = local_add(c->current, arm->pattern->ident.name);
                 emit_a(c, OP_STORE_LOCAL, slot);
-            } else if (arm->pattern && arm->pattern->tag == NODE_PAT_IDENT
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT
                     && arm->pattern->pat_ident.name) {
                 int slot = local_add(c->current, arm->pattern->pat_ident.name);
                 emit_a(c, OP_STORE_LOCAL, slot);
@@ -2024,8 +2024,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
 
             /* bind pattern variable */
             const char *cpat_name = NULL;
-            if (cpat && cpat->tag == NODE_PAT_IDENT) cpat_name = cpat->pat_ident.name;
-            else if (cpat && cpat->tag == NODE_IDENT) cpat_name = cpat->ident.name;
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT) cpat_name = cpat->pat_ident.name;
+            else if (cpat && VAL_TAG(cpat) == NODE_IDENT) cpat_name = cpat->ident.name;
             if (cpat_name) {
                 int var_slot = local_add(c->current, cpat_name);
                 emit_a(c, OP_STORE_LOCAL, var_slot);
@@ -2108,8 +2108,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             emit(c, MAKE_A(OP_ITER_GET, 0, 0));
 
             const char *cpat_name = NULL;
-            if (cpat && cpat->tag == NODE_PAT_IDENT) cpat_name = cpat->pat_ident.name;
-            else if (cpat && cpat->tag == NODE_IDENT) cpat_name = cpat->ident.name;
+            if (cpat && VAL_TAG(cpat) == NODE_PAT_IDENT) cpat_name = cpat->pat_ident.name;
+            else if (cpat && VAL_TAG(cpat) == NODE_IDENT) cpat_name = cpat->ident.name;
             if (cpat_name) {
                 int var_slot = local_add(c->current, cpat_name);
                 emit_a(c, OP_STORE_LOCAL, var_slot);
@@ -2193,7 +2193,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         int actual_methods = 0;
         for (int mi = 0; mi < nmethods; mi++) {
             Node *m = n->actor_decl.methods.items[mi];
-            if (m->tag != NODE_FN_DECL) continue;
+            if (VAL_TAG(m) != NODE_FN_DECL) continue;
             emit_const(c, xs_str(m->fn_decl.name ? m->fn_decl.name : "?"));
             /* compile actor method with self + state field loading */
             {
@@ -2513,7 +2513,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     default:
-        fprintf(stderr, "unhandled node tag %d\n", (int)n->tag);
+        fprintf(stderr, "unhandled node tag %d\n", (int)VAL_TAG(n));
         if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         return;
     }
