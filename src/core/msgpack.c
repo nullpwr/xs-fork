@@ -984,10 +984,10 @@ Value *mp_benchmark(Value *v, int iterations) {
 
     /* return result map */
     Value *result = xs_map_new();
-    map_set(result->map, "encode_ms", xs_int(enc_end - enc_start));
-    map_set(result->map, "decode_ms", xs_int(dec_end - dec_start));
-    map_set(result->map, "bytes", xs_int((int64_t)total_bytes));
-    map_set(result->map, "iterations", xs_int(iterations));
+    map_take(result->map, "encode_ms", xs_int(enc_end - enc_start));
+    map_take(result->map, "decode_ms", xs_int(dec_end - dec_start));
+    map_take(result->map, "bytes", xs_int((int64_t)total_bytes));
+    map_take(result->map, "iterations", xs_int(iterations));
     return result;
 }
 
@@ -1091,15 +1091,15 @@ static Value *native_mp_pack_str(Interp *interp, Value **args, int argc) {
 
 Value *make_msgpack_module(void) {
     XSMap *m = map_new();
-    map_set(m, "encode", xs_native(native_mp_encode));
-    map_set(m, "decode", xs_native(native_mp_decode));
-    map_set(m, "encode_stream", xs_native(native_mp_encode_stream));
-    map_set(m, "decode_stream", xs_native(native_mp_decode_stream));
-    map_set(m, "benchmark", xs_native(native_mp_benchmark));
-    map_set(m, "size", xs_native(native_mp_size));
-    map_set(m, "roundtrip", xs_native(native_mp_roundtrip));
-    map_set(m, "pack_int", xs_native(native_mp_pack_int));
-    map_set(m, "pack_float", xs_native(native_mp_pack_float));
-    map_set(m, "pack_str", xs_native(native_mp_pack_str));
+    map_take(m, "encode", xs_native(native_mp_encode));
+    map_take(m, "decode", xs_native(native_mp_decode));
+    map_take(m, "encode_stream", xs_native(native_mp_encode_stream));
+    map_take(m, "decode_stream", xs_native(native_mp_decode_stream));
+    map_take(m, "benchmark", xs_native(native_mp_benchmark));
+    map_take(m, "size", xs_native(native_mp_size));
+    map_take(m, "roundtrip", xs_native(native_mp_roundtrip));
+    map_take(m, "pack_int", xs_native(native_mp_pack_int));
+    map_take(m, "pack_float", xs_native(native_mp_pack_float));
+    map_take(m, "pack_str", xs_native(native_mp_pack_str));
     return xs_module(m);
 }

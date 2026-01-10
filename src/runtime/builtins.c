@@ -1178,7 +1178,7 @@ Value *make_math_module(void) {
     MATH_CONST("nan",    0.0/0.0);
 #undef MATH_CONST
 
-#define REG(name, fn) map_set(m, name, xs_native(fn))
+#define REG(name, fn) map_take(m, name, xs_native(fn))
 
     /* trigonometric */
     REG("sin",       builtin_sin);
@@ -1409,26 +1409,26 @@ static Value *native_time_from_iso(Interp *ig, Value **a, int n) {
 
 Value *make_time_module(void) {
     XSMap *m = map_new();
-    map_set(m, "now",       xs_native(native_time_now));
-    map_set(m, "now_ms",    xs_native(native_time_now_ms));
-    map_set(m, "now_ns",    xs_native(native_time_now_ns));
-    map_set(m, "sleep",     xs_native(native_time_sleep));
-    map_set(m, "sleep_ms",  xs_native(native_time_sleep_ms));
-    map_set(m, "stopwatch", xs_native(native_time_stopwatch));
-    map_set(m, "millis",    xs_native(native_time_millis));
-    map_set(m, "format",    xs_native(native_time_format));
-    map_set(m, "monotonic", xs_native(native_time_monotonic));
-    map_set(m, "clock",     xs_native(native_time_monotonic));
-    map_set(m, "parse",     xs_native(native_time_parse));
-    map_set(m, "date",      xs_native(native_time_date));
-    map_set(m, "to_iso",    xs_native(native_time_to_iso));
-    map_set(m, "from_iso",  xs_native(native_time_from_iso));
-    map_set(m, "year",      xs_native(native_time_year));
-    map_set(m, "month",     xs_native(native_time_month));
-    map_set(m, "day",       xs_native(native_time_day));
-    map_set(m, "hour",      xs_native(native_time_hour));
-    map_set(m, "minute",    xs_native(native_time_minute));
-    map_set(m, "second",    xs_native(native_time_second));
+    map_take(m, "now",       xs_native(native_time_now));
+    map_take(m, "now_ms",    xs_native(native_time_now_ms));
+    map_take(m, "now_ns",    xs_native(native_time_now_ns));
+    map_take(m, "sleep",     xs_native(native_time_sleep));
+    map_take(m, "sleep_ms",  xs_native(native_time_sleep_ms));
+    map_take(m, "stopwatch", xs_native(native_time_stopwatch));
+    map_take(m, "millis",    xs_native(native_time_millis));
+    map_take(m, "format",    xs_native(native_time_format));
+    map_take(m, "monotonic", xs_native(native_time_monotonic));
+    map_take(m, "clock",     xs_native(native_time_monotonic));
+    map_take(m, "parse",     xs_native(native_time_parse));
+    map_take(m, "date",      xs_native(native_time_date));
+    map_take(m, "to_iso",    xs_native(native_time_to_iso));
+    map_take(m, "from_iso",  xs_native(native_time_from_iso));
+    map_take(m, "year",      xs_native(native_time_year));
+    map_take(m, "month",     xs_native(native_time_month));
+    map_take(m, "day",       xs_native(native_time_day));
+    map_take(m, "hour",      xs_native(native_time_hour));
+    map_take(m, "minute",    xs_native(native_time_minute));
+    map_take(m, "second",    xs_native(native_time_second));
     return xs_module(m);
 }
 
@@ -1638,20 +1638,20 @@ static Value *native_str_bytes(Interp *i, Value **a, int n) {
 }
 Value *make_string_module(void) {
     XSMap *m=map_new();
-    map_set(m,"pad_left",       xs_native(native_str_pad_left));
-    map_set(m,"pad_right",      xs_native(native_str_pad_right));
-    map_set(m,"center",         xs_native(native_str_center));
-    map_set(m,"truncate",       xs_native(native_str_truncate));
-    map_set(m,"camel_to_snake", xs_native(native_str_camel_to_snake));
-    map_set(m,"snake_to_camel", xs_native(native_str_snake_to_camel));
-    map_set(m,"escape_html",    xs_native(native_str_escape_html));
-    map_set(m,"is_numeric",     xs_native(native_str_is_numeric));
-    map_set(m,"words",          xs_native(native_str_words));
-    map_set(m,"levenshtein",    xs_native(native_str_levenshtein));
-    map_set(m,"similarity",     xs_native(native_str_similarity));
-    map_set(m,"repeat",         xs_native(native_str_repeat));
-    map_set(m,"chars",          xs_native(native_str_chars));
-    map_set(m,"bytes",          xs_native(native_str_bytes));
+    map_take(m,"pad_left",       xs_native(native_str_pad_left));
+    map_take(m,"pad_right",      xs_native(native_str_pad_right));
+    map_take(m,"center",         xs_native(native_str_center));
+    map_take(m,"truncate",       xs_native(native_str_truncate));
+    map_take(m,"camel_to_snake", xs_native(native_str_camel_to_snake));
+    map_take(m,"snake_to_camel", xs_native(native_str_snake_to_camel));
+    map_take(m,"escape_html",    xs_native(native_str_escape_html));
+    map_take(m,"is_numeric",     xs_native(native_str_is_numeric));
+    map_take(m,"words",          xs_native(native_str_words));
+    map_take(m,"levenshtein",    xs_native(native_str_levenshtein));
+    map_take(m,"similarity",     xs_native(native_str_similarity));
+    map_take(m,"repeat",         xs_native(native_str_repeat));
+    map_take(m,"chars",          xs_native(native_str_chars));
+    map_take(m,"bytes",          xs_native(native_str_bytes));
     return xs_module(m);
 }
 
@@ -1717,11 +1717,11 @@ static Value *native_path_join(Interp *i, Value **a, int argc) {
 }
 Value *make_path_module(void) {
     XSMap *m=map_new();
-    map_set(m,"basename", xs_native(native_path_basename));
-    map_set(m,"dirname",  xs_native(native_path_dirname));
-    map_set(m,"ext",      xs_native(native_path_ext));
-    map_set(m,"stem",     xs_native(native_path_stem));
-    map_set(m,"join",     xs_native(native_path_join));
+    map_take(m,"basename", xs_native(native_path_basename));
+    map_take(m,"dirname",  xs_native(native_path_dirname));
+    map_take(m,"ext",      xs_native(native_path_ext));
+    map_take(m,"stem",     xs_native(native_path_stem));
+    map_take(m,"join",     xs_native(native_path_join));
     { Value *v=xs_str("/"); map_set(m,"sep",v); value_decref(v); }
     return xs_module(m);
 }
@@ -1769,8 +1769,8 @@ static Value *native_b64_decode(Interp *i, Value **a, int n) {
 }
 Value *make_base64_module(void) {
     XSMap *m=map_new();
-    map_set(m,"encode",xs_native(native_b64_encode));
-    map_set(m,"decode",xs_native(native_b64_decode));
+    map_take(m,"encode",xs_native(native_b64_encode));
+    map_take(m,"decode",xs_native(native_b64_decode));
     return xs_module(m);
 }
 
@@ -1801,8 +1801,8 @@ static Value *native_hash_sha256(Interp *i, Value **a, int n) {
 }
 Value *make_hash_module(void) {
     XSMap *m=map_new();
-    map_set(m,"md5",   xs_native(native_hash_md5));
-    map_set(m,"sha256",xs_native(native_hash_sha256));
+    map_take(m,"md5",   xs_native(native_hash_md5));
+    map_take(m,"sha256",xs_native(native_hash_sha256));
     return xs_module(m);
 }
 
@@ -1830,8 +1830,8 @@ static Value *native_uuid_is_valid(Interp *i, Value **a, int n) {
 }
 Value *make_uuid_module(void) {
     XSMap *m=map_new();
-    map_set(m,"v4",      xs_native(native_uuid_v4));
-    map_set(m,"is_valid",xs_native(native_uuid_is_valid));
+    map_take(m,"v4",      xs_native(native_uuid_v4));
+    map_take(m,"is_valid",xs_native(native_uuid_is_valid));
     return xs_module(m);
 }
 
@@ -1949,19 +1949,19 @@ static Value *native_random_hex_str(Interp *ig, Value **a, int n) {
 
 Value *make_random_module(void) {
     XSMap *m = map_new();
-    map_set(m, "int",     xs_native(native_random_int));
-    map_set(m, "float",   xs_native(native_random_float));
-    map_set(m, "bool",    xs_native(native_random_bool));
-    map_set(m, "choice",  xs_native(native_random_choice));
-    map_set(m, "choices", xs_native(native_random_choices));
-    map_set(m, "shuffle", xs_native(native_random_shuffle));
-    map_set(m, "shuffled",xs_native(native_random_shuffled));
-    map_set(m, "sample",  xs_native(native_random_sample));
-    map_set(m, "gauss",   xs_native(native_random_gauss));
-    map_set(m, "uniform", xs_native(native_random_uniform));
-    map_set(m, "bytes",   xs_native(native_random_bytes));
-    map_set(m, "hex_str", xs_native(native_random_hex_str));
-    map_set(m, "seed",    xs_native(native_random_seed));
+    map_take(m, "int",     xs_native(native_random_int));
+    map_take(m, "float",   xs_native(native_random_float));
+    map_take(m, "bool",    xs_native(native_random_bool));
+    map_take(m, "choice",  xs_native(native_random_choice));
+    map_take(m, "choices", xs_native(native_random_choices));
+    map_take(m, "shuffle", xs_native(native_random_shuffle));
+    map_take(m, "shuffled",xs_native(native_random_shuffled));
+    map_take(m, "sample",  xs_native(native_random_sample));
+    map_take(m, "gauss",   xs_native(native_random_gauss));
+    map_take(m, "uniform", xs_native(native_random_uniform));
+    map_take(m, "bytes",   xs_native(native_random_bytes));
+    map_take(m, "hex_str", xs_native(native_random_hex_str));
+    map_take(m, "seed",    xs_native(native_random_seed));
     return xs_module(m);
 }
 
@@ -2071,15 +2071,15 @@ static Value *collections_counter_simple(Interp *ig, Value **a, int n) {
 }
 Value *make_collections_module(void) {
     XSMap *m=map_new();
-    map_set(m,"Counter",      xs_native(collections_counter));
-    map_set(m,"Stack",        xs_native(collections_stack_new));
-    map_set(m,"PriorityQueue",xs_native(collections_pq_new));
-    map_set(m,"Deque",        xs_native(collections_deque_new));
-    map_set(m,"Set",          xs_native(collections_set_new));
-    map_set(m,"OrderedMap",   xs_native(collections_ordered_map_new));
-    map_set(m,"set",          xs_native(collections_set_simple));
-    map_set(m,"deque",        xs_native(collections_deque_simple));
-    map_set(m,"counter",      xs_native(collections_counter_simple));
+    map_take(m,"Counter",      xs_native(collections_counter));
+    map_take(m,"Stack",        xs_native(collections_stack_new));
+    map_take(m,"PriorityQueue",xs_native(collections_pq_new));
+    map_take(m,"Deque",        xs_native(collections_deque_new));
+    map_take(m,"Set",          xs_native(collections_set_new));
+    map_take(m,"OrderedMap",   xs_native(collections_ordered_map_new));
+    map_take(m,"set",          xs_native(collections_set_simple));
+    map_take(m,"deque",        xs_native(collections_deque_simple));
+    map_take(m,"counter",      xs_native(collections_counter_simple));
     return xs_module(m);
 }
 
@@ -2184,11 +2184,11 @@ static Value *native_process_spawn_wait(Interp *ig, Value **a, int n) {
     waitpid((pid_t)VAL_INT(pidv), &status, 0);
     /* close remaining fds */
     Value *si = map_get(a[0]->map, "_stdin_fd");
-    if (si && VAL_TAG(si) == XS_INT && VAL_INT(si) > 0) { close((int)VAL_INT(si)); map_set(a[0]->map, "_stdin_fd", xs_int(0)); }
+    if (si && VAL_TAG(si) == XS_INT && VAL_INT(si) > 0) { close((int)VAL_INT(si)); map_take(a[0]->map, "_stdin_fd", xs_int(0)); }
     Value *so = map_get(a[0]->map, "_stdout_fd");
-    if (so && VAL_TAG(so) == XS_INT && VAL_INT(so) > 0) { close((int)VAL_INT(so)); map_set(a[0]->map, "_stdout_fd", xs_int(0)); }
+    if (so && VAL_TAG(so) == XS_INT && VAL_INT(so) > 0) { close((int)VAL_INT(so)); map_take(a[0]->map, "_stdout_fd", xs_int(0)); }
     Value *se = map_get(a[0]->map, "_stderr_fd");
-    if (se && VAL_TAG(se) == XS_INT && VAL_INT(se) > 0) { close((int)VAL_INT(se)); map_set(a[0]->map, "_stderr_fd", xs_int(0)); }
+    if (se && VAL_TAG(se) == XS_INT && VAL_INT(se) > 0) { close((int)VAL_INT(se)); map_take(a[0]->map, "_stderr_fd", xs_int(0)); }
     if (WIFEXITED(status)) return xs_int(WEXITSTATUS(status));
     return xs_int(-1);
 #else
@@ -2234,7 +2234,7 @@ static Value *native_process_spawn_wait_win(Interp *ig, Value **a, int n) {
     if (!fpv || VAL_TAG(fpv) != XS_INT || VAL_INT(fpv) == 0) return xs_int(-1);
     FILE *fp = (FILE*)(uintptr_t)VAL_INT(fpv);
     int rc = _pclose(fp);
-    map_set(a[0]->map, "_fp", xs_int(0));
+    map_take(a[0]->map, "_fp", xs_int(0));
     return xs_int(rc);
 }
 #endif
@@ -2258,13 +2258,13 @@ static Value *native_process_spawn(Interp *ig, Value **a, int n) {
     FILE *fp = _popen(cmdline, "r");
     if (!fp) return value_incref(XS_NULL_VAL);
     XSMap *proc = map_new();
-    map_set(proc, "pid", xs_int(0));
-    map_set(proc, "_fp", xs_int((int64_t)(uintptr_t)fp));
-    map_set(proc, "stdout_read", xs_native(native_process_spawn_stdout_read_win));
-    map_set(proc, "stderr_read", xs_native(native_process_spawn_stdout_read_win));
-    map_set(proc, "stdin_write", xs_native(native_process_spawn_stdin_write));
-    map_set(proc, "wait", xs_native(native_process_spawn_wait_win));
-    map_set(proc, "kill", xs_native(native_process_spawn_kill));
+    map_take(proc, "pid", xs_int(0));
+    map_take(proc, "_fp", xs_int((int64_t)(uintptr_t)fp));
+    map_take(proc, "stdout_read", xs_native(native_process_spawn_stdout_read_win));
+    map_take(proc, "stderr_read", xs_native(native_process_spawn_stdout_read_win));
+    map_take(proc, "stdin_write", xs_native(native_process_spawn_stdin_write));
+    map_take(proc, "wait", xs_native(native_process_spawn_wait_win));
+    map_take(proc, "kill", xs_native(native_process_spawn_kill));
     return xs_module(proc);
 #elif !defined(__wasi__)
     if (n < 1 || VAL_TAG(a[0]) != XS_STR) return value_incref(XS_NULL_VAL);
@@ -2319,15 +2319,15 @@ static Value *native_process_spawn(Interp *ig, Value **a, int n) {
     free(argv_list);
 
     XSMap *proc = map_new();
-    map_set(proc, "pid", xs_int((int64_t)pid));
-    map_set(proc, "_stdin_fd", xs_int((int64_t)stdin_pipe[1]));
-    map_set(proc, "_stdout_fd", xs_int((int64_t)stdout_pipe[0]));
-    map_set(proc, "_stderr_fd", xs_int((int64_t)stderr_pipe[0]));
-    map_set(proc, "stdin_write", xs_native(native_process_spawn_stdin_write));
-    map_set(proc, "stdout_read", xs_native(native_process_spawn_stdout_read));
-    map_set(proc, "stderr_read", xs_native(native_process_spawn_stderr_read));
-    map_set(proc, "wait", xs_native(native_process_spawn_wait));
-    map_set(proc, "kill", xs_native(native_process_spawn_kill));
+    map_take(proc, "pid", xs_int((int64_t)pid));
+    map_take(proc, "_stdin_fd", xs_int((int64_t)stdin_pipe[1]));
+    map_take(proc, "_stdout_fd", xs_int((int64_t)stdout_pipe[0]));
+    map_take(proc, "_stderr_fd", xs_int((int64_t)stderr_pipe[0]));
+    map_take(proc, "stdin_write", xs_native(native_process_spawn_stdin_write));
+    map_take(proc, "stdout_read", xs_native(native_process_spawn_stdout_read));
+    map_take(proc, "stderr_read", xs_native(native_process_spawn_stderr_read));
+    map_take(proc, "wait", xs_native(native_process_spawn_wait));
+    map_take(proc, "kill", xs_native(native_process_spawn_kill));
     return xs_module(proc);
 #else
     (void)a; (void)n;
@@ -2405,14 +2405,14 @@ static Value *native_process_exit(Interp *ig, Value **a, int n) {
 
 Value *make_process_module(void) {
     XSMap *m=map_new();
-    map_set(m,"pid",       xs_native(native_process_pid));
-    map_set(m,"run",       xs_native(native_process_run));
-    map_set(m,"exec",      xs_native(native_process_exec));
-    map_set(m,"spawn",     xs_native(native_process_spawn));
-    map_set(m,"on_signal", xs_native(native_process_on_signal));
-    map_set(m,"env",       xs_native(native_process_env));
-    map_set(m,"cwd",       xs_native(native_process_cwd));
-    map_set(m,"exit",      xs_native(native_process_exit));
+    map_take(m,"pid",       xs_native(native_process_pid));
+    map_take(m,"run",       xs_native(native_process_run));
+    map_take(m,"exec",      xs_native(native_process_exec));
+    map_take(m,"spawn",     xs_native(native_process_spawn));
+    map_take(m,"on_signal", xs_native(native_process_on_signal));
+    map_take(m,"env",       xs_native(native_process_env));
+    map_take(m,"cwd",       xs_native(native_process_cwd));
+    map_take(m,"exit",      xs_native(native_process_exit));
     return xs_module(m);
 }
 
@@ -2824,54 +2824,54 @@ static Value *native_io_stderr_flush(Interp *ig, Value **a, int n) {
 Value *make_io_module(void) {
     XSMap *m = map_new();
     /* file operations */
-    map_set(m,"read_file",      xs_native(native_io_read_file));
-    map_set(m,"write_file",     xs_native(native_io_write_file));
-    map_set(m,"append_file",    xs_native(native_io_append_file));
-    map_set(m,"read_lines",     xs_native(native_io_read_lines));
-    map_set(m,"write_lines",    xs_native(native_io_write_lines));
-    map_set(m,"read_bytes",     xs_native(native_io_read_bytes));
-    map_set(m,"write_bytes",    xs_native(native_io_write_bytes));
+    map_take(m,"read_file",      xs_native(native_io_read_file));
+    map_take(m,"write_file",     xs_native(native_io_write_file));
+    map_take(m,"append_file",    xs_native(native_io_append_file));
+    map_take(m,"read_lines",     xs_native(native_io_read_lines));
+    map_take(m,"write_lines",    xs_native(native_io_write_lines));
+    map_take(m,"read_bytes",     xs_native(native_io_read_bytes));
+    map_take(m,"write_bytes",    xs_native(native_io_write_bytes));
     /* file info */
-    map_set(m,"file_exists",    xs_native(native_io_file_exists));
-    map_set(m,"exists",         xs_native(native_io_file_exists));
-    map_set(m,"file_size",      xs_native(native_io_file_size));
-    map_set(m,"size",           xs_native(native_io_file_size));
-    map_set(m,"file_info",      xs_native(native_io_file_info));
-    map_set(m,"is_file",        xs_native(native_io_is_file));
-    map_set(m,"is_dir",         xs_native(native_io_is_dir));
+    map_take(m,"file_exists",    xs_native(native_io_file_exists));
+    map_take(m,"exists",         xs_native(native_io_file_exists));
+    map_take(m,"file_size",      xs_native(native_io_file_size));
+    map_take(m,"size",           xs_native(native_io_file_size));
+    map_take(m,"file_info",      xs_native(native_io_file_info));
+    map_take(m,"is_file",        xs_native(native_io_is_file));
+    map_take(m,"is_dir",         xs_native(native_io_is_dir));
     /* file manipulation */
-    map_set(m,"delete_file",    xs_native(native_io_delete_file));
-    map_set(m,"copy_file",      xs_native(native_io_copy_file));
-    map_set(m,"move_file",      xs_native(native_io_move_file));
-    map_set(m,"rename_file",    xs_native(native_io_rename_file));
-    map_set(m,"symlink",        xs_native(native_io_symlink));
+    map_take(m,"delete_file",    xs_native(native_io_delete_file));
+    map_take(m,"copy_file",      xs_native(native_io_copy_file));
+    map_take(m,"move_file",      xs_native(native_io_move_file));
+    map_take(m,"rename_file",    xs_native(native_io_rename_file));
+    map_take(m,"symlink",        xs_native(native_io_symlink));
     /* directories */
-    map_set(m,"make_dir",       xs_native(native_io_make_dir));
-    map_set(m,"list_dir",       xs_native(native_io_list_dir));
-    map_set(m,"glob",           xs_native(native_io_glob));
+    map_take(m,"make_dir",       xs_native(native_io_make_dir));
+    map_take(m,"list_dir",       xs_native(native_io_list_dir));
+    map_take(m,"glob",           xs_native(native_io_glob));
     /* temp files */
-    map_set(m,"temp_file",      xs_native(native_io_temp_file));
-    map_set(m,"temp_dir",       xs_native(native_io_temp_dir));
+    map_take(m,"temp_file",      xs_native(native_io_temp_file));
+    map_take(m,"temp_dir",       xs_native(native_io_temp_dir));
     /* stdin */
-    map_set(m,"stdin_read",     xs_native(native_io_stdin_read));
-    map_set(m,"stdin_readline", xs_native(native_io_stdin_readline));
-    map_set(m,"stdin_read_n",  xs_native(native_io_stdin_read_n));
-    map_set(m,"stdin_lines",    xs_native(native_io_stdin_lines));
+    map_take(m,"stdin_read",     xs_native(native_io_stdin_read));
+    map_take(m,"stdin_readline", xs_native(native_io_stdin_readline));
+    map_take(m,"stdin_read_n",  xs_native(native_io_stdin_read_n));
+    map_take(m,"stdin_lines",    xs_native(native_io_stdin_lines));
     /* keyboard */
-    map_set(m,"wait_for_key",   xs_native(native_io_wait_for_key));
-    map_set(m,"read_line",      xs_native(native_io_read_line));
-    map_set(m,"get_key_nowait", xs_native(native_io_get_key_nowait));
+    map_take(m,"wait_for_key",   xs_native(native_io_wait_for_key));
+    map_take(m,"read_line",      xs_native(native_io_read_line));
+    map_take(m,"get_key_nowait", xs_native(native_io_get_key_nowait));
     /* stdout sub-module */
     Value *out_m=xs_map_new();
-    map_set(out_m->map,"write",   xs_native(native_io_stdout_write));
-    map_set(out_m->map,"writeln", xs_native(native_io_stdout_writeln));
-    map_set(out_m->map,"flush",   xs_native(native_io_stdout_flush));
+    map_take(out_m->map, "write", xs_native(native_io_stdout_write));
+    map_take(out_m->map, "writeln", xs_native(native_io_stdout_writeln));
+    map_take(out_m->map, "flush", xs_native(native_io_stdout_flush));
     map_set(m,"stdout",out_m); value_decref(out_m);
     /* stderr sub-module */
     Value *err_m=xs_map_new();
-    map_set(err_m->map,"write",   xs_native(native_io_stderr_write));
-    map_set(err_m->map,"writeln", xs_native(native_io_stderr_writeln));
-    map_set(err_m->map,"flush",   xs_native(native_io_stderr_flush));
+    map_take(err_m->map, "write", xs_native(native_io_stderr_write));
+    map_take(err_m->map, "writeln", xs_native(native_io_stderr_writeln));
+    map_take(err_m->map, "flush", xs_native(native_io_stderr_flush));
     map_set(m,"stderr",err_m); value_decref(err_m);
     return xs_module(m);
 }
@@ -3016,26 +3016,29 @@ static Value *native_os_env_all(Interp *ig, Value **a, int n) {
 Value *make_os_module(Interp *ig) {
     XSMap *m=map_new();
     Value *args_arr=xs_array_new();
-    for (int ai = 0; ai < g_xs_argc; ai++)
-        array_push(args_arr->arr, xs_str(g_xs_argv[ai]));
+    for (int ai = 0; ai < g_xs_argc; ai++) {
+        Value *s = xs_str(g_xs_argv[ai]);
+        array_push(args_arr->arr, s);
+        value_decref(s);
+    }
     map_set(m,"args",args_arr); value_decref(args_arr);
-    map_set(m,"cwd",      xs_native(native_os_cwd));
-    map_set(m,"chdir",    xs_native(native_os_chdir));
-    map_set(m,"home",     xs_native(native_os_home));
-    map_set(m,"tempdir",  xs_native(native_os_tempdir));
-    map_set(m,"mkdir",    xs_native(native_os_mkdir));
-    map_set(m,"rmdir",    xs_native(native_os_rmdir));
-    map_set(m,"remove",   xs_native(native_os_remove));
-    map_set(m,"rename",   xs_native(native_os_rename));
-    map_set(m,"exists",   xs_native(native_os_exists));
-    map_set(m,"is_file",  xs_native(native_os_is_file));
-    map_set(m,"is_dir",   xs_native(native_os_is_dir));
-    map_set(m,"cpu_count",xs_native(native_os_cpu_count));
-    map_set(m,"pid",      xs_native(native_os_pid));
-    map_set(m,"ppid",     xs_native(native_os_ppid));
-    map_set(m,"exit",     xs_native(native_os_exit));
-    map_set(m,"list_dir", xs_native(native_os_list_dir));
-    map_set(m,"glob",     xs_native(native_os_glob));
+    map_take(m,"cwd",      xs_native(native_os_cwd));
+    map_take(m,"chdir",    xs_native(native_os_chdir));
+    map_take(m,"home",     xs_native(native_os_home));
+    map_take(m,"tempdir",  xs_native(native_os_tempdir));
+    map_take(m,"mkdir",    xs_native(native_os_mkdir));
+    map_take(m,"rmdir",    xs_native(native_os_rmdir));
+    map_take(m,"remove",   xs_native(native_os_remove));
+    map_take(m,"rename",   xs_native(native_os_rename));
+    map_take(m,"exists",   xs_native(native_os_exists));
+    map_take(m,"is_file",  xs_native(native_os_is_file));
+    map_take(m,"is_dir",   xs_native(native_os_is_dir));
+    map_take(m,"cpu_count",xs_native(native_os_cpu_count));
+    map_take(m,"pid",      xs_native(native_os_pid));
+    map_take(m,"ppid",     xs_native(native_os_ppid));
+    map_take(m,"exit",     xs_native(native_os_exit));
+    map_take(m,"list_dir", xs_native(native_os_list_dir));
+    map_take(m,"glob",     xs_native(native_os_glob));
     /* platform / sep */
 #ifdef __APPLE__
     { Value *v=xs_str("darwin"); map_set(m,"platform",v); value_decref(v); }
@@ -3050,11 +3053,11 @@ Value *make_os_module(Interp *ig) {
     { Value *v=xs_str("/"); map_set(m,"sep",v); value_decref(v); }
 #endif
     /* env as a callable (getenv) + helper functions at top level */
-    map_set(m,"env",      xs_native(native_os_env_get));
-    map_set(m,"getenv",   xs_native(native_os_env_get));
-    map_set(m,"setenv",   xs_native(native_os_env_set));
-    map_set(m,"hasenv",   xs_native(native_os_env_has));
-    map_set(m,"environ",  xs_native(native_os_env_all));
+    map_take(m,"env",      xs_native(native_os_env_get));
+    map_take(m,"getenv",   xs_native(native_os_env_get));
+    map_take(m,"setenv",   xs_native(native_os_env_set));
+    map_take(m,"hasenv",   xs_native(native_os_env_has));
+    map_take(m,"environ",  xs_native(native_os_env_all));
     (void)ig;
     return xs_module(m);
 }
@@ -3304,11 +3307,11 @@ static Value *native_json_parse_safe(Interp *ig, Value **a, int n) {
 }
 Value *make_json_module(void) {
     XSMap *m=map_new();
-    map_set(m,"parse",       xs_native(native_json_parse));
-    map_set(m,"stringify",   xs_native(native_json_stringify));
-    map_set(m,"pretty",      xs_native(native_json_pretty));
-    map_set(m,"valid",       xs_native(native_json_valid));
-    map_set(m,"parse_safe",  xs_native(native_json_parse_safe));
+    map_take(m,"parse",       xs_native(native_json_parse));
+    map_take(m,"stringify",   xs_native(native_json_stringify));
+    map_take(m,"pretty",      xs_native(native_json_pretty));
+    map_take(m,"valid",       xs_native(native_json_valid));
+    map_take(m,"parse_safe",  xs_native(native_json_parse_safe));
     return xs_module(m);
 }
 
@@ -3368,12 +3371,12 @@ static Value *native_log_set_level(Interp *ig, Value **a, int n) {
 }
 Value *make_log_module(void) {
     XSMap *m=map_new();
-    map_set(m,"debug",     xs_native(native_log_debug));
-    map_set(m,"info",      xs_native(native_log_info));
-    map_set(m,"warn",      xs_native(native_log_warn));
-    map_set(m,"error",     xs_native(native_log_error));
-    map_set(m,"fatal",     xs_native(native_log_fatal));
-    map_set(m,"set_level", xs_native(native_log_set_level));
+    map_take(m,"debug",     xs_native(native_log_debug));
+    map_take(m,"info",      xs_native(native_log_info));
+    map_take(m,"warn",      xs_native(native_log_warn));
+    map_take(m,"error",     xs_native(native_log_error));
+    map_take(m,"fatal",     xs_native(native_log_fatal));
+    map_take(m,"set_level", xs_native(native_log_set_level));
     return xs_module(m);
 }
 
@@ -3577,19 +3580,19 @@ static Value *native_fmt_oct(Interp *ig, Value **a, int n) {
 
 Value *make_fmt_module(void) {
     XSMap *m=map_new();
-    map_set(m,"sprintf",   xs_native(native_fmt_sprintf));
-    map_set(m,"pad_left",  xs_native(native_fmt_pad_left));
-    map_set(m,"pad_right", xs_native(native_fmt_pad_right));
-    map_set(m,"center",    xs_native(native_fmt_center));
-    map_set(m,"number",    xs_native(native_fmt_number));
-    map_set(m,"hex",       xs_native(native_fmt_hex));
-    map_set(m,"bin",       xs_native(native_fmt_bin));
-    map_set(m,"oct",       xs_native(native_fmt_oct));
-    map_set(m,"pad",       xs_native(native_fmt_pad));
-    map_set(m,"comma",     xs_native(native_fmt_comma));
-    map_set(m,"filesize",  xs_native(native_fmt_filesize));
-    map_set(m,"ordinal",   xs_native(native_fmt_ordinal));
-    map_set(m,"pluralize", xs_native(native_fmt_pluralize));
+    map_take(m,"sprintf",   xs_native(native_fmt_sprintf));
+    map_take(m,"pad_left",  xs_native(native_fmt_pad_left));
+    map_take(m,"pad_right", xs_native(native_fmt_pad_right));
+    map_take(m,"center",    xs_native(native_fmt_center));
+    map_take(m,"number",    xs_native(native_fmt_number));
+    map_take(m,"hex",       xs_native(native_fmt_hex));
+    map_take(m,"bin",       xs_native(native_fmt_bin));
+    map_take(m,"oct",       xs_native(native_fmt_oct));
+    map_take(m,"pad",       xs_native(native_fmt_pad));
+    map_take(m,"comma",     xs_native(native_fmt_comma));
+    map_take(m,"filesize",  xs_native(native_fmt_filesize));
+    map_take(m,"ordinal",   xs_native(native_fmt_ordinal));
+    map_take(m,"pluralize", xs_native(native_fmt_pluralize));
     return xs_module(m);
 }
 
@@ -3712,15 +3715,15 @@ static Value *native_test_summary(Interp *ig, Value **a, int n) {
 }
 Value *make_test_module(void) {
     XSMap *m=map_new();
-    map_set(m,"assert",       xs_native(native_test_assert));
-    map_set(m,"assert_eq",    xs_native(native_test_assert_eq));
-    map_set(m,"assert_ne",    xs_native(native_test_assert_ne));
-    map_set(m,"assert_gt",    xs_native(native_test_assert_gt));
-    map_set(m,"assert_lt",    xs_native(native_test_assert_lt));
-    map_set(m,"assert_close", xs_native(native_test_assert_close));
-    map_set(m,"assert_throws",xs_native(native_test_assert_throws));
-    map_set(m,"run",          xs_native(native_test_run));
-    map_set(m,"summary",      xs_native(native_test_summary));
+    map_take(m,"assert",       xs_native(native_test_assert));
+    map_take(m,"assert_eq",    xs_native(native_test_assert_eq));
+    map_take(m,"assert_ne",    xs_native(native_test_assert_ne));
+    map_take(m,"assert_gt",    xs_native(native_test_assert_gt));
+    map_take(m,"assert_lt",    xs_native(native_test_assert_lt));
+    map_take(m,"assert_close", xs_native(native_test_assert_close));
+    map_take(m,"assert_throws",xs_native(native_test_assert_throws));
+    map_take(m,"run",          xs_native(native_test_run));
+    map_take(m,"summary",      xs_native(native_test_summary));
     return xs_module(m);
 }
 
@@ -3843,10 +3846,10 @@ static Value *native_csv_stringify_with_headers(Interp *ig, Value **a, int n) {
 }
 Value *make_csv_module(void) {
     XSMap *m=map_new();
-    map_set(m,"parse",               xs_native(native_csv_parse));
-    map_set(m,"parse_with_headers",  xs_native(native_csv_parse_with_headers));
-    map_set(m,"stringify",           xs_native(native_csv_stringify));
-    map_set(m,"stringify_with_headers",xs_native(native_csv_stringify_with_headers));
+    map_take(m,"parse",               xs_native(native_csv_parse));
+    map_take(m,"parse_with_headers",  xs_native(native_csv_parse_with_headers));
+    map_take(m,"stringify",           xs_native(native_csv_stringify));
+    map_take(m,"stringify_with_headers",xs_native(native_csv_stringify_with_headers));
     return xs_module(m);
 }
 
@@ -3973,11 +3976,11 @@ static Value *native_url_parse(Interp *ig, Value **a, int n) {
 }
 Value *make_url_module(void) {
     XSMap *m=map_new();
-    map_set(m,"encode",       xs_native(native_url_encode));
-    map_set(m,"decode",       xs_native(native_url_decode));
-    map_set(m,"encode_query", xs_native(native_url_encode_query));
-    map_set(m,"parse_query",  xs_native(native_url_parse_query));
-    map_set(m,"parse",        xs_native(native_url_parse));
+    map_take(m,"encode",       xs_native(native_url_encode));
+    map_take(m,"decode",       xs_native(native_url_decode));
+    map_take(m,"encode_query", xs_native(native_url_encode_query));
+    map_take(m,"parse_query",  xs_native(native_url_parse_query));
+    map_take(m,"parse",        xs_native(native_url_parse));
     return xs_module(m);
 }
 
@@ -4121,14 +4124,14 @@ static Value *native_re_groups(Interp *ig, Value **a, int n) {
 }
 Value *make_re_module(void) {
     XSMap *m=map_new();
-    map_set(m,"test",        xs_native(native_re_test));
-    map_set(m,"is_match",    xs_native(native_re_test));
-    map_set(m,"match",       xs_native(native_re_match));
-    map_set(m,"find_all",    xs_native(native_re_find_all));
-    map_set(m,"replace",     xs_native(native_re_replace));
-    map_set(m,"replace_all", xs_native(native_re_replace_all));
-    map_set(m,"split",       xs_native(native_re_split));
-    map_set(m,"groups",      xs_native(native_re_groups));
+    map_take(m,"test",        xs_native(native_re_test));
+    map_take(m,"is_match",    xs_native(native_re_test));
+    map_take(m,"match",       xs_native(native_re_match));
+    map_take(m,"find_all",    xs_native(native_re_find_all));
+    map_take(m,"replace",     xs_native(native_re_replace));
+    map_take(m,"replace_all", xs_native(native_re_replace_all));
+    map_take(m,"split",       xs_native(native_re_split));
+    map_take(m,"groups",      xs_native(native_re_groups));
     return xs_module(m);
 }
 
@@ -4186,12 +4189,12 @@ static Value *builtin_channel(Interp *i, Value **args, int argc) {
     Value *t = xs_str("Channel");        map_set(ch->map,"_type",t);     value_decref(t);
     Value *idv = xs_int(chid);           map_set(ch->map,"_chan_id",idv); value_decref(idv);
     Value *data = xs_array_new();        map_set(ch->map,"_buf",data);    value_decref(data);
-    map_set(ch->map, "send",     xs_native(native_channel_send));
-    map_set(ch->map, "recv",     xs_native(native_channel_recv));
-    map_set(ch->map, "try_recv", xs_native(native_channel_try_recv));
-    map_set(ch->map, "len",      xs_native(native_channel_len));
-    map_set(ch->map, "is_empty", xs_native(native_channel_is_empty));
-    map_set(ch->map, "is_full",  xs_native(native_channel_is_full));
+    map_take(ch->map, "send", xs_native(native_channel_send));
+    map_take(ch->map, "recv", xs_native(native_channel_recv));
+    map_take(ch->map, "try_recv", xs_native(native_channel_try_recv));
+    map_take(ch->map, "len", xs_native(native_channel_len));
+    map_take(ch->map, "is_empty", xs_native(native_channel_is_empty));
+    map_take(ch->map, "is_full", xs_native(native_channel_is_full));
     return ch;
 }
 
@@ -4346,8 +4349,8 @@ void stdlib_register(Interp *i) {
 
     Value *io_mod = make_io_module();
     /* read_json/write_json are defined after json helpers, patch them in here */
-    map_set(io_mod->map,"read_json",  xs_native(native_io_read_json));
-    map_set(io_mod->map,"write_json", xs_native(native_io_write_json));
+    map_take(io_mod->map, "read_json", xs_native(native_io_read_json));
+    map_take(io_mod->map, "write_json", xs_native(native_io_write_json));
     env_define(i->globals, "io", io_mod, 1);
     value_decref(io_mod);
 
@@ -4604,12 +4607,12 @@ static Value *native_async_channel(Interp *ig, Value **a, int n) {
     Value *idv = xs_int(chid);
     map_set(ch, "_chan_id", idv);
     value_decref(idv);
-    map_set(ch, "send", xs_native(native_channel_send));
-    map_set(ch, "recv", xs_native(native_channel_recv));
-    map_set(ch, "try_recv", xs_native(native_channel_try_recv));
-    map_set(ch, "len", xs_native(native_channel_len));
-    map_set(ch, "is_empty", xs_native(native_channel_is_empty));
-    map_set(ch, "is_full", xs_native(native_channel_is_full));
+    map_take(ch, "send", xs_native(native_channel_send));
+    map_take(ch, "recv", xs_native(native_channel_recv));
+    map_take(ch, "try_recv", xs_native(native_channel_try_recv));
+    map_take(ch, "len", xs_native(native_channel_len));
+    map_take(ch, "is_empty", xs_native(native_channel_is_empty));
+    map_take(ch, "is_full", xs_native(native_channel_is_full));
     return xs_module(ch);
 }
 
@@ -4636,7 +4639,7 @@ static Value *native_async_select(Interp *ig, Value **a, int n) {
                     buf->arr->items[j] = buf->arr->items[j + 1];
                 buf->arr->len--;
                 XSMap *result = map_new();
-                map_set(result, "index", xs_int(i));
+                map_take(result, "index", xs_int(i));
                 map_set(result, "value", val);
                 value_decref(val);
                 return xs_module(result);
@@ -4645,7 +4648,7 @@ static Value *native_async_select(Interp *ig, Value **a, int n) {
             Value *res = map_get(item->map, "_result");
             if (res) {
                 XSMap *result = map_new();
-                map_set(result, "index", xs_int(i));
+                map_take(result, "index", xs_int(i));
                 map_set(result, "value", value_incref(res));
                 value_decref(res);
                 return xs_module(result);
@@ -4723,14 +4726,14 @@ static Value *native_async_reject(Interp *ig, Value **a, int n) {
 
 Value *make_async_module(void) {
     XSMap *m = map_new();
-    map_set(m, "spawn",   xs_native(native_async_spawn));
-    map_set(m, "sleep",   xs_native(native_async_sleep));
-    map_set(m, "channel", xs_native(native_async_channel));
-    map_set(m, "select",  xs_native(native_async_select));
-    map_set(m, "all",     xs_native(native_async_all));
-    map_set(m, "race",    xs_native(native_async_race));
-    map_set(m, "resolve", xs_native(native_async_resolve));
-    map_set(m, "reject",  xs_native(native_async_reject));
+    map_take(m, "spawn",   xs_native(native_async_spawn));
+    map_take(m, "sleep",   xs_native(native_async_sleep));
+    map_take(m, "channel", xs_native(native_async_channel));
+    map_take(m, "select",  xs_native(native_async_select));
+    map_take(m, "all",     xs_native(native_async_all));
+    map_take(m, "race",    xs_native(native_async_race));
+    map_take(m, "resolve", xs_native(native_async_resolve));
+    map_take(m, "reject",  xs_native(native_async_reject));
     return xs_module(m);
 }
 
@@ -4767,7 +4770,7 @@ static Value *native_net_tcp_connect(Interp *ig, Value **a, int n) {
     freeaddrinfo(res);
 
     XSMap *conn = map_new();
-    map_set(conn, "fd", xs_int(fd));
+    map_take(conn, "fd", xs_int(fd));
     return xs_module(conn);
 #else
     (void)a; (void)n;
@@ -4799,7 +4802,7 @@ static Value *native_net_tcp_listen(Interp *ig, Value **a, int n) {
     }
 
     XSMap *srv = map_new();
-    map_set(srv, "fd", xs_int(fd));
+    map_take(srv, "fd", xs_int(fd));
     return xs_module(srv);
 #else
     (void)a; (void)n;
@@ -5310,7 +5313,7 @@ static Value *native_net_udp_bind(Interp *ig, Value **a, int n) {
         close(fd); return value_incref(XS_NULL_VAL);
     }
     XSMap *m = map_new();
-    map_set(m, "fd", xs_int(fd));
+    map_take(m, "fd", xs_int(fd));
     return xs_module(m);
 #else
     (void)a; (void)n;
@@ -5423,7 +5426,7 @@ static Value *native_net_close(Interp *ig, Value **a, int n) {
     Value *fdv = map_get(a[0]->map, "fd");
     if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_FALSE_VAL);
     close((int)VAL_INT(fdv));
-    map_set(a[0]->map, "fd", xs_int(-1));
+    map_take(a[0]->map, "fd", xs_int(-1));
     return value_incref(XS_TRUE_VAL);
 #else
     (void)a; (void)n;
@@ -5469,21 +5472,21 @@ static Value *native_net_recv(Interp *ig, Value **a, int n) {
 
 Value *make_net_module(void) {
     XSMap *m = map_new();
-    map_set(m, "tcp_connect", xs_native(native_net_tcp_connect));
-    map_set(m, "tcp_listen",  xs_native(native_net_tcp_listen));
-    map_set(m, "resolve",     xs_native(native_net_resolve));
-    map_set(m, "url_parse",   xs_native(native_net_url_parse));
-    map_set(m, "http_get",    xs_native(native_net_http_get));
-    map_set(m, "http_post",   xs_native(native_net_http_post));
-    map_set(m, "http",        xs_native(native_net_http));
-    map_set(m, "udp_bind",    xs_native(native_net_udp_bind));
-    map_set(m, "udp_send",    xs_native(native_net_udp_send));
-    map_set(m, "udp_recv",    xs_native(native_net_udp_recv));
-    map_set(m, "set_timeout", xs_native(native_net_set_timeout));
-    map_set(m, "set_nodelay", xs_native(native_net_set_nodelay));
-    map_set(m, "close",       xs_native(native_net_close));
-    map_set(m, "send",        xs_native(native_net_send));
-    map_set(m, "recv",        xs_native(native_net_recv));
+    map_take(m, "tcp_connect", xs_native(native_net_tcp_connect));
+    map_take(m, "tcp_listen",  xs_native(native_net_tcp_listen));
+    map_take(m, "resolve",     xs_native(native_net_resolve));
+    map_take(m, "url_parse",   xs_native(native_net_url_parse));
+    map_take(m, "http_get",    xs_native(native_net_http_get));
+    map_take(m, "http_post",   xs_native(native_net_http_post));
+    map_take(m, "http",        xs_native(native_net_http));
+    map_take(m, "udp_bind",    xs_native(native_net_udp_bind));
+    map_take(m, "udp_send",    xs_native(native_net_udp_send));
+    map_take(m, "udp_recv",    xs_native(native_net_udp_recv));
+    map_take(m, "set_timeout", xs_native(native_net_set_timeout));
+    map_take(m, "set_nodelay", xs_native(native_net_set_nodelay));
+    map_take(m, "close",       xs_native(native_net_close));
+    map_take(m, "send",        xs_native(native_net_send));
+    map_take(m, "recv",        xs_native(native_net_recv));
     return xs_module(m);
 }
 
@@ -6127,25 +6130,25 @@ static Value *native_crypto_constant_time_eq(Interp *ig, Value **a2, int n) {
 
 Value *make_crypto_module(void) {
     XSMap *m = map_new();
-    map_set(m, "sha256",           xs_native(native_crypto_sha256));
+    map_take(m, "sha256",           xs_native(native_crypto_sha256));
 #ifndef __wasi__
-    map_set(m, "sha1",             xs_native(native_crypto_sha1));
-    map_set(m, "hmac_sha256",      xs_native(native_crypto_hmac_sha256));
-    map_set(m, "hkdf",             xs_native(native_crypto_hkdf));
-    map_set(m, "pbkdf2",           xs_native(native_crypto_pbkdf2));
-    map_set(m, "aes_encrypt",      xs_native(native_crypto_aes_encrypt));
-    map_set(m, "aes_decrypt",      xs_native(native_crypto_aes_decrypt));
+    map_take(m, "sha1",             xs_native(native_crypto_sha1));
+    map_take(m, "hmac_sha256",      xs_native(native_crypto_hmac_sha256));
+    map_take(m, "hkdf",             xs_native(native_crypto_hkdf));
+    map_take(m, "pbkdf2",           xs_native(native_crypto_pbkdf2));
+    map_take(m, "aes_encrypt",      xs_native(native_crypto_aes_encrypt));
+    map_take(m, "aes_decrypt",      xs_native(native_crypto_aes_decrypt));
 #endif
-    map_set(m, "md5",              xs_native(native_crypto_md5));
-    map_set(m, "hash",             xs_native(native_crypto_hash));
-    map_set(m, "hex_encode",       xs_native(native_crypto_hex_encode));
-    map_set(m, "hex_decode",       xs_native(native_crypto_hex_decode));
-    map_set(m, "base64_encode",    xs_native(native_crypto_base64_encode));
-    map_set(m, "base64_decode",    xs_native(native_crypto_base64_decode));
-    map_set(m, "random_bytes",     xs_native(native_crypto_random_bytes));
-    map_set(m, "random_int",       xs_native(native_crypto_random_int));
-    map_set(m, "uuid4",            xs_native(native_crypto_uuid4));
-    map_set(m, "constant_time_eq", xs_native(native_crypto_constant_time_eq));
+    map_take(m, "md5",              xs_native(native_crypto_md5));
+    map_take(m, "hash",             xs_native(native_crypto_hash));
+    map_take(m, "hex_encode",       xs_native(native_crypto_hex_encode));
+    map_take(m, "hex_decode",       xs_native(native_crypto_hex_decode));
+    map_take(m, "base64_encode",    xs_native(native_crypto_base64_encode));
+    map_take(m, "base64_decode",    xs_native(native_crypto_base64_decode));
+    map_take(m, "random_bytes",     xs_native(native_crypto_random_bytes));
+    map_take(m, "random_int",       xs_native(native_crypto_random_int));
+    map_take(m, "uuid4",            xs_native(native_crypto_uuid4));
+    map_take(m, "constant_time_eq", xs_native(native_crypto_constant_time_eq));
     return xs_module(m);
 }
 
@@ -6188,8 +6191,8 @@ static Value *native_thread_spawn(Interp *ig, Value **a, int n) {
     }
 
     XSMap *handle = map_new();
-    map_set(handle, "_tid",  xs_int((int64_t)(uintptr_t)tid));
-    map_set(handle, "_targ", xs_int((int64_t)(uintptr_t)ta));
+    map_take(handle, "_tid", xs_int((int64_t)(uintptr_t)tid));
+    map_take(handle, "_targ", xs_int((int64_t)(uintptr_t)ta));
     map_set(handle, "status", xs_str("running"));
     return xs_module(handle);
 }
@@ -6298,7 +6301,7 @@ static Value *native_mutex_destroy_fn(Interp *ig, Value **a, int n) {
         xs_mutex_destroy(mtx);
         free(mtx);
         /* Clear the pointer so double-destroy is harmless */
-        map_set(a[0]->map, "_ptr", xs_int(0));
+        map_take(a[0]->map, "_ptr", xs_int(0));
     }
     return value_incref(XS_NULL_VAL);
 }
@@ -6312,23 +6315,23 @@ static Value *native_thread_mutex(Interp *ig, Value **a, int n) {
     }
     XSMap *m = map_new();
     /* Store the mutex pointer as an opaque int (same pattern as XSBuf) */
-    map_set(m, "_ptr", xs_int((int64_t)(uintptr_t)mtx));
+    map_take(m, "_ptr", xs_int((int64_t)(uintptr_t)mtx));
     map_set(m, "locked", value_incref(XS_FALSE_VAL));
-    map_set(m, "lock",    xs_native(native_mutex_lock_fn));
-    map_set(m, "unlock",  xs_native(native_mutex_unlock_fn));
-    map_set(m, "try_lock", xs_native(native_mutex_try_lock_fn));
-    map_set(m, "destroy", xs_native(native_mutex_destroy_fn));
+    map_take(m, "lock",    xs_native(native_mutex_lock_fn));
+    map_take(m, "unlock",  xs_native(native_mutex_unlock_fn));
+    map_take(m, "try_lock", xs_native(native_mutex_try_lock_fn));
+    map_take(m, "destroy", xs_native(native_mutex_destroy_fn));
     return xs_module(m);
 }
 
 Value *make_thread_module(void) {
     XSMap *m = map_new();
-    map_set(m, "spawn",     xs_native(native_thread_spawn));
-    map_set(m, "join",      xs_native(native_thread_join));
-    map_set(m, "id",        xs_native(native_thread_id));
-    map_set(m, "cpu_count", xs_native(native_thread_cpu_count));
-    map_set(m, "sleep",     xs_native(native_thread_sleep));
-    map_set(m, "mutex",     xs_native(native_thread_mutex));
+    map_take(m, "spawn",     xs_native(native_thread_spawn));
+    map_take(m, "join",      xs_native(native_thread_join));
+    map_take(m, "id",        xs_native(native_thread_id));
+    map_take(m, "cpu_count", xs_native(native_thread_cpu_count));
+    map_take(m, "sleep",     xs_native(native_thread_sleep));
+    map_take(m, "mutex",     xs_native(native_thread_mutex));
     return xs_module(m);
 }
 
@@ -6369,7 +6372,7 @@ static Value *native_buf_new(Interp *ig, Value **a, int n) {
     int cap = (n > 0 && VAL_TAG(a[0]) == XS_INT) ? (int)VAL_INT(a[0]) : 64;
     XSBuf *b = buf_create(cap);
     XSMap *m = map_new();
-    map_set(m, "_ptr", xs_int((int64_t)(uintptr_t)b));
+    map_take(m, "_ptr", xs_int((int64_t)(uintptr_t)b));
     return xs_module(m);
 }
 
@@ -6500,19 +6503,19 @@ static Value *native_buf_len(Interp *ig, Value **a, int n) {
 
 Value *make_buf_module(void) {
     XSMap *m = map_new();
-    map_set(m, "new",       xs_native(native_buf_new));
-    map_set(m, "write_u8",  xs_native(native_buf_write_u8));
-    map_set(m, "write_u16", xs_native(native_buf_write_u16));
-    map_set(m, "write_u32", xs_native(native_buf_write_u32));
-    map_set(m, "write_u64", xs_native(native_buf_write_u64));
-    map_set(m, "read_u8",   xs_native(native_buf_read_u8));
-    map_set(m, "read_u16",  xs_native(native_buf_read_u16));
-    map_set(m, "read_u32",  xs_native(native_buf_read_u32));
-    map_set(m, "read_u64",  xs_native(native_buf_read_u64));
-    map_set(m, "write_str", xs_native(native_buf_write_str));
-    map_set(m, "to_str",    xs_native(native_buf_to_str));
-    map_set(m, "to_hex",    xs_native(native_buf_to_hex));
-    map_set(m, "len",       xs_native(native_buf_len));
+    map_take(m, "new",       xs_native(native_buf_new));
+    map_take(m, "write_u8",  xs_native(native_buf_write_u8));
+    map_take(m, "write_u16", xs_native(native_buf_write_u16));
+    map_take(m, "write_u32", xs_native(native_buf_write_u32));
+    map_take(m, "write_u64", xs_native(native_buf_write_u64));
+    map_take(m, "read_u8",   xs_native(native_buf_read_u8));
+    map_take(m, "read_u16",  xs_native(native_buf_read_u16));
+    map_take(m, "read_u32",  xs_native(native_buf_read_u32));
+    map_take(m, "read_u64",  xs_native(native_buf_read_u64));
+    map_take(m, "write_str", xs_native(native_buf_write_str));
+    map_take(m, "to_str",    xs_native(native_buf_to_str));
+    map_take(m, "to_hex",    xs_native(native_buf_to_hex));
+    map_take(m, "len",       xs_native(native_buf_len));
     return xs_module(m);
 }
 
@@ -6672,12 +6675,12 @@ static Value *native_encode_url_decode(Interp *ig, Value **a, int n) {
 
 Value *make_encode_module(void) {
     XSMap *m = map_new();
-    map_set(m, "base64_encode", xs_native(native_encode_base64_encode));
-    map_set(m, "base64_decode", xs_native(native_encode_base64_decode));
-    map_set(m, "hex_encode",    xs_native(native_encode_hex_encode));
-    map_set(m, "hex_decode",    xs_native(native_encode_hex_decode));
-    map_set(m, "url_encode",    xs_native(native_encode_url_encode));
-    map_set(m, "url_decode",    xs_native(native_encode_url_decode));
+    map_take(m, "base64_encode", xs_native(native_encode_base64_encode));
+    map_take(m, "base64_decode", xs_native(native_encode_base64_decode));
+    map_take(m, "hex_encode",    xs_native(native_encode_hex_encode));
+    map_take(m, "hex_decode",    xs_native(native_encode_hex_decode));
+    map_take(m, "url_encode",    xs_native(native_encode_url_encode));
+    map_take(m, "url_decode",    xs_native(native_encode_url_decode));
     return xs_module(m);
 }
 
@@ -7053,10 +7056,10 @@ static Value *native_db_close(Interp *ig, Value **a, int n) {
 
 Value *make_db_module(void) {
     XSMap *m = map_new();
-    map_set(m, "open",  xs_native(native_db_open));
-    map_set(m, "exec",  xs_native(native_db_exec));
-    map_set(m, "query", xs_native(native_db_query));
-    map_set(m, "close", xs_native(native_db_close));
+    map_take(m, "open",  xs_native(native_db_open));
+    map_take(m, "exec",  xs_native(native_db_exec));
+    map_take(m, "query", xs_native(native_db_query));
+    map_take(m, "close", xs_native(native_db_close));
     return xs_module(m);
 }
 
@@ -7153,10 +7156,10 @@ static Value *native_cli_positional(Interp *ig, Value **a, int n) {
 
 Value *make_cli_module(void) {
     XSMap *m = map_new();
-    map_set(m, "parse",      xs_native(native_cli_parse));
-    map_set(m, "flag",       xs_native(native_cli_flag));
-    map_set(m, "option",     xs_native(native_cli_option));
-    map_set(m, "positional", xs_native(native_cli_positional));
+    map_take(m, "parse",      xs_native(native_cli_parse));
+    map_take(m, "flag",       xs_native(native_cli_flag));
+    map_take(m, "option",     xs_native(native_cli_option));
+    map_take(m, "positional", xs_native(native_cli_positional));
     return xs_module(m);
 }
 
@@ -7180,7 +7183,7 @@ static Value *native_ffi_load(Interp *ig, Value **a, int n) {
 #endif
     if (!handle) return value_incref(XS_NULL_VAL);
     XSMap *h = map_new();
-    map_set(h, "_handle", xs_int((int64_t)(uintptr_t)handle));
+    map_take(h, "_handle", xs_int((int64_t)(uintptr_t)handle));
     map_set(h, "path", value_incref(a[0]));
     return xs_module(h);
 #else
@@ -7204,7 +7207,7 @@ static Value *native_ffi_sym(Interp *ig, Value **a, int n) {
 #endif
     if (!sym) return value_incref(XS_NULL_VAL);
     XSMap *s = map_new();
-    map_set(s, "_sym", xs_int((int64_t)(uintptr_t)sym));
+    map_take(s, "_sym", xs_int((int64_t)(uintptr_t)sym));
     map_set(s, "name", value_incref(a[1]));
     return xs_module(s);
 #else
@@ -7255,7 +7258,7 @@ static Value *native_ffi_close(Interp *ig, Value **a, int n) {
     dlclose(handle);
 #endif
     /* Invalidate the handle */
-    map_set(a[0]->map, "_handle", xs_int(0));
+    map_take(a[0]->map, "_handle", xs_int(0));
     map_set(a[0]->map, "_closed", value_incref(XS_TRUE_VAL));
     return xs_str("ok");
 #else
@@ -7292,11 +7295,11 @@ static Value *native_ffi_typeof(Interp *ig, Value **a, int n) {
 
 Value *make_ffi_module(void) {
     XSMap *m = map_new();
-    map_set(m, "load",   xs_native(native_ffi_load));
-    map_set(m, "sym",    xs_native(native_ffi_sym));
-    map_set(m, "call",   xs_native(native_ffi_call));
-    map_set(m, "close",  xs_native(native_ffi_close));
-    map_set(m, "typeof", xs_native(native_ffi_typeof));
+    map_take(m, "load",   xs_native(native_ffi_load));
+    map_take(m, "sym",    xs_native(native_ffi_sym));
+    map_take(m, "call",   xs_native(native_ffi_call));
+    map_take(m, "close",  xs_native(native_ffi_close));
+    map_take(m, "typeof", xs_native(native_ffi_typeof));
     return xs_module(m);
 }
 
@@ -7407,10 +7410,10 @@ static Value *native_reflect_is_instance(Interp *ig, Value **a, int n) {
 
 Value *make_reflect_module(void) {
     XSMap *m = map_new();
-    map_set(m, "type_of",     xs_native(native_reflect_type_of));
-    map_set(m, "fields",      xs_native(native_reflect_fields));
-    map_set(m, "methods",     xs_native(native_reflect_methods));
-    map_set(m, "is_instance", xs_native(native_reflect_is_instance));
+    map_take(m, "type_of",     xs_native(native_reflect_type_of));
+    map_take(m, "fields",      xs_native(native_reflect_fields));
+    map_take(m, "methods",     xs_native(native_reflect_methods));
+    map_take(m, "is_instance", xs_native(native_reflect_is_instance));
     return xs_module(m);
 }
 
@@ -7438,13 +7441,13 @@ static Value *native_gc_stats(Interp *ig, Value **a, int n) {
     (void)ig; (void)a; (void)n;
     GCStats st = gc_get_stats();
     XSMap *s = map_new();
-    map_set(s, "total_collected",   xs_int(st.total_collected));
-    map_set(s, "total_allocations", xs_int(st.total_allocations));
-    map_set(s, "gen0_collections",  xs_int(st.gen0_collections));
-    map_set(s, "gen1_collections",  xs_int(st.gen1_collections));
-    map_set(s, "gen2_collections",  xs_int(st.gen2_collections));
-    map_set(s, "tracked",           xs_int(gc_tracked_count()));
-    map_set(s, "peak_tracked",      xs_int(st.peak_tracked));
+    map_take(s, "total_collected", xs_int(st.total_collected));
+    map_take(s, "total_allocations", xs_int(st.total_allocations));
+    map_take(s, "gen0_collections", xs_int(st.gen0_collections));
+    map_take(s, "gen1_collections", xs_int(st.gen1_collections));
+    map_take(s, "gen2_collections", xs_int(st.gen2_collections));
+    map_take(s, "tracked", xs_int(gc_tracked_count()));
+    map_take(s, "peak_tracked", xs_int(st.peak_tracked));
     map_set(s, "gc_time_ms",        xs_float(st.total_gc_time_ms));
     map_set(s, "strategy",          xs_str("generational-refcount"));
     return xs_module(s);
@@ -7473,13 +7476,13 @@ static Value *native_gc_tracked(Interp *ig, Value **a, int n) {
 Value *make_gc_module(void) {
     gc_init();
     XSMap *m = map_new();
-    map_set(m, "collect",       xs_native(native_gc_collect));
-    map_set(m, "disable",       xs_native(native_gc_disable));
-    map_set(m, "enable",        xs_native(native_gc_enable));
-    map_set(m, "stats",         xs_native(native_gc_stats));
-    map_set(m, "set_threshold", xs_native(native_gc_set_threshold));
-    map_set(m, "freeze",        xs_native(native_gc_freeze));
-    map_set(m, "tracked",       xs_native(native_gc_tracked));
+    map_take(m, "collect",       xs_native(native_gc_collect));
+    map_take(m, "disable",       xs_native(native_gc_disable));
+    map_take(m, "enable",        xs_native(native_gc_enable));
+    map_take(m, "stats",         xs_native(native_gc_stats));
+    map_take(m, "set_threshold", xs_native(native_gc_set_threshold));
+    map_take(m, "freeze",        xs_native(native_gc_freeze));
+    map_take(m, "tracked",       xs_native(native_gc_tracked));
     return xs_module(m);
 }
 
@@ -7518,9 +7521,9 @@ static Value *native_reactive_effect(Interp *ig, Value **a, int n) {
 
 Value *make_reactive_module(void) {
     XSMap *m = map_new();
-    map_set(m, "signal",  xs_native(native_reactive_signal));
-    map_set(m, "derived", xs_native(native_reactive_derived));
-    map_set(m, "effect",  xs_native(native_reactive_effect));
+    map_take(m, "signal",  xs_native(native_reactive_signal));
+    map_take(m, "derived", xs_native(native_reactive_derived));
+    map_take(m, "effect",  xs_native(native_reactive_effect));
     return xs_module(m);
 }
 
@@ -7614,10 +7617,10 @@ static Value *native_fs_stat(Interp *ig, Value **a, int n) {
     struct stat st;
     if (stat(a[0]->s, &st) != 0) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
-    map_set(m, "size", xs_int((int64_t)st.st_size));
+    map_take(m, "size", xs_int((int64_t)st.st_size));
     map_set(m, "is_file", S_ISREG(st.st_mode) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL));
     map_set(m, "is_dir", S_ISDIR(st.st_mode) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL));
-    map_set(m, "mtime", xs_int((int64_t)st.st_mtime));
+    map_take(m, "mtime", xs_int((int64_t)st.st_mtime));
     return xs_module(m);
 }
 
@@ -7854,7 +7857,7 @@ static Value *native_fs_reader_close(Interp *ig, Value **a, int n) {
     Value *fdv = map_get(a[0]->map, "_fd");
     if (!fdv || VAL_TAG(fdv) != XS_INT) return value_incref(XS_NULL_VAL);
     FILE *f = (FILE*)(uintptr_t)VAL_INT(fdv);
-    if (f) { fclose(f); map_set(a[0]->map, "_fd", xs_int(0)); }
+    if (f) { fclose(f); map_take(a[0]->map, "_fd", xs_int(0)); }
     return value_incref(XS_NULL_VAL);
 }
 
@@ -7864,11 +7867,11 @@ static Value *native_fs_read_stream(Interp *ig, Value **a, int n) {
     FILE *f = fopen(a[0]->s, "r");
     if (!f) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
-    map_set(m, "_fd", xs_int((int64_t)(uintptr_t)f));
-    map_set(m, "read", xs_native(native_fs_reader_read));
-    map_set(m, "read_line", xs_native(native_fs_reader_read_line));
-    map_set(m, "read_all", xs_native(native_fs_reader_read_all));
-    map_set(m, "close", xs_native(native_fs_reader_close));
+    map_take(m, "_fd", xs_int((int64_t)(uintptr_t)f));
+    map_take(m, "read", xs_native(native_fs_reader_read));
+    map_take(m, "read_line", xs_native(native_fs_reader_read_line));
+    map_take(m, "read_all", xs_native(native_fs_reader_read_all));
+    map_take(m, "close", xs_native(native_fs_reader_close));
     return xs_module(m);
 }
 
@@ -7900,10 +7903,10 @@ static Value *native_fs_write_stream(Interp *ig, Value **a, int n) {
     FILE *f = fopen(a[0]->s, "w");
     if (!f) return value_incref(XS_NULL_VAL);
     XSMap *m = map_new();
-    map_set(m, "_fd", xs_int((int64_t)(uintptr_t)f));
-    map_set(m, "write", xs_native(native_fs_writer_write));
-    map_set(m, "flush", xs_native(native_fs_writer_flush));
-    map_set(m, "close", xs_native(native_fs_reader_close));
+    map_take(m, "_fd", xs_int((int64_t)(uintptr_t)f));
+    map_take(m, "write", xs_native(native_fs_writer_write));
+    map_take(m, "flush", xs_native(native_fs_writer_flush));
+    map_take(m, "close", xs_native(native_fs_reader_close));
     return xs_module(m);
 }
 
@@ -8221,7 +8224,7 @@ static Value *native_toml_parse(Interp *ig, Value **a, int n) {
 }
 Value *make_toml_module(void) {
     XSMap *m=map_new();
-    map_set(m,"parse",xs_native(native_toml_parse));
+    map_take(m,"parse",xs_native(native_toml_parse));
     return xs_module(m);
 }
 
@@ -8509,52 +8512,52 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
 
 Value *make_http_module(void) {
     XSMap *m=map_new();
-    map_set(m,"get",     xs_native(native_http_get));
-    map_set(m,"post",    xs_native(native_http_post));
-    map_set(m,"put",     xs_native(native_http_put));
-    map_set(m,"delete",  xs_native(native_http_delete));
-    map_set(m,"patch",   xs_native(native_http_patch));
-    map_set(m,"request", xs_native(native_http_request));
-    map_set(m,"serve",   xs_native(native_http_serve));
+    map_take(m,"get",     xs_native(native_http_get));
+    map_take(m,"post",    xs_native(native_http_post));
+    map_take(m,"put",     xs_native(native_http_put));
+    map_take(m,"delete",  xs_native(native_http_delete));
+    map_take(m,"patch",   xs_native(native_http_patch));
+    map_take(m,"request", xs_native(native_http_request));
+    map_take(m,"serve",   xs_native(native_http_serve));
     return xs_module(m);
 }
 
 Value *make_fs_module(void) {
     XSMap *m = map_new();
-    map_set(m, "read",         xs_native(native_fs_read));
-    map_set(m, "read_bytes",   xs_native(native_fs_read_bytes));
-    map_set(m, "write",        xs_native(native_fs_write));
-    map_set(m, "write_bytes",  xs_native(native_fs_write_bytes));
-    map_set(m, "append",       xs_native(native_fs_append));
-    map_set(m, "exists",       xs_native(native_fs_exists));
-    map_set(m, "remove",       xs_native(native_fs_remove));
-    map_set(m, "mkdir",        xs_native(native_fs_mkdir));
-    map_set(m, "mkdir_p",      xs_native(native_fs_mkdir_p));
-    map_set(m, "rmdir",        xs_native(native_fs_rmdir));
-    map_set(m, "list",         xs_native(native_fs_ls));
-    map_set(m, "ls",           xs_native(native_fs_ls));
-    map_set(m, "is_dir",       xs_native(native_fs_is_dir));
-    map_set(m, "is_file",      xs_native(native_fs_is_file));
-    map_set(m, "size",         xs_native(native_fs_size));
-    map_set(m, "stat",         xs_native(native_fs_stat));
-    map_set(m, "rename",       xs_native(native_fs_rename));
-    map_set(m, "copy",         xs_native(native_fs_copy));
-    map_set(m, "join",         xs_native(native_fs_join));
-    map_set(m, "basename",     xs_native(native_fs_basename));
-    map_set(m, "dirname",      xs_native(native_fs_dirname));
-    map_set(m, "ext",          xs_native(native_fs_ext));
-    map_set(m, "abs",          xs_native(native_fs_abs));
-    map_set(m, "temp_dir",     xs_native(native_fs_temp_dir));
-    map_set(m, "temp_file",    xs_native(native_fs_temp_file));
-    map_set(m, "read_stream",  xs_native(native_fs_read_stream));
-    map_set(m, "write_stream", xs_native(native_fs_write_stream));
-    map_set(m, "read_lines",   xs_native(native_fs_read_lines));
-    map_set(m, "walk",         xs_native(native_fs_walk));
-    map_set(m, "glob",         xs_native(native_fs_glob));
-    map_set(m, "chmod",        xs_native(native_fs_chmod));
-    map_set(m, "symlink",      xs_native(native_fs_symlink));
-    map_set(m, "readlink",     xs_native(native_fs_readlink));
-    map_set(m, "realpath",     xs_native(native_fs_realpath));
-    map_set(m, "watch",        xs_native(native_fs_watch));
+    map_take(m, "read",         xs_native(native_fs_read));
+    map_take(m, "read_bytes",   xs_native(native_fs_read_bytes));
+    map_take(m, "write",        xs_native(native_fs_write));
+    map_take(m, "write_bytes",  xs_native(native_fs_write_bytes));
+    map_take(m, "append",       xs_native(native_fs_append));
+    map_take(m, "exists",       xs_native(native_fs_exists));
+    map_take(m, "remove",       xs_native(native_fs_remove));
+    map_take(m, "mkdir",        xs_native(native_fs_mkdir));
+    map_take(m, "mkdir_p",      xs_native(native_fs_mkdir_p));
+    map_take(m, "rmdir",        xs_native(native_fs_rmdir));
+    map_take(m, "list",         xs_native(native_fs_ls));
+    map_take(m, "ls",           xs_native(native_fs_ls));
+    map_take(m, "is_dir",       xs_native(native_fs_is_dir));
+    map_take(m, "is_file",      xs_native(native_fs_is_file));
+    map_take(m, "size",         xs_native(native_fs_size));
+    map_take(m, "stat",         xs_native(native_fs_stat));
+    map_take(m, "rename",       xs_native(native_fs_rename));
+    map_take(m, "copy",         xs_native(native_fs_copy));
+    map_take(m, "join",         xs_native(native_fs_join));
+    map_take(m, "basename",     xs_native(native_fs_basename));
+    map_take(m, "dirname",      xs_native(native_fs_dirname));
+    map_take(m, "ext",          xs_native(native_fs_ext));
+    map_take(m, "abs",          xs_native(native_fs_abs));
+    map_take(m, "temp_dir",     xs_native(native_fs_temp_dir));
+    map_take(m, "temp_file",    xs_native(native_fs_temp_file));
+    map_take(m, "read_stream",  xs_native(native_fs_read_stream));
+    map_take(m, "write_stream", xs_native(native_fs_write_stream));
+    map_take(m, "read_lines",   xs_native(native_fs_read_lines));
+    map_take(m, "walk",         xs_native(native_fs_walk));
+    map_take(m, "glob",         xs_native(native_fs_glob));
+    map_take(m, "chmod",        xs_native(native_fs_chmod));
+    map_take(m, "symlink",      xs_native(native_fs_symlink));
+    map_take(m, "readlink",     xs_native(native_fs_readlink));
+    map_take(m, "realpath",     xs_native(native_fs_realpath));
+    map_take(m, "watch",        xs_native(native_fs_watch));
     return xs_module(m);
 }

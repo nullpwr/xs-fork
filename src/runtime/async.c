@@ -627,7 +627,7 @@ XSPromise *async_timeout(AsyncRuntime *rt, XSPromise *p, int ms) {
 Value *promise_to_value(XSPromise *p) {
     if (!p) return xs_null();
     Value *v = xs_map_new();
-    map_set(v->map, "__promise_id", xs_int(p->id));
+    map_take(v->map, "__promise_id", xs_int(p->id));
 
     const char *state_str = "pending";
     if (p->state == PROMISE_RESOLVED) state_str = "resolved";
@@ -883,20 +883,20 @@ static Value *native_async_drain(Interp *interp, Value **args, int argc) {
 
 Value *make_promise_module(void) {
     XSMap *m = map_new();
-    map_set(m, "new", xs_native(native_promise_new));
-    map_set(m, "resolve", xs_native(native_promise_resolve));
-    map_set(m, "reject", xs_native(native_promise_reject));
-    map_set(m, "all", xs_native(native_promise_all));
-    map_set(m, "race", xs_native(native_promise_race));
-    map_set(m, "any", xs_native(native_promise_any));
-    map_set(m, "all_settled", xs_native(native_promise_all_settled));
-    map_set(m, "sleep", xs_native(native_async_sleep));
-    map_set(m, "timeout", xs_native(native_async_timeout));
-    map_set(m, "then", xs_native(native_promise_then));
-    map_set(m, "catch_err", xs_native(native_promise_catch));
-    map_set(m, "finally_do", xs_native(native_promise_finally));
-    map_set(m, "state", xs_native(native_promise_state));
-    map_set(m, "value", xs_native(native_promise_value));
-    map_set(m, "drain", xs_native(native_async_drain));
+    map_take(m, "new", xs_native(native_promise_new));
+    map_take(m, "resolve", xs_native(native_promise_resolve));
+    map_take(m, "reject", xs_native(native_promise_reject));
+    map_take(m, "all", xs_native(native_promise_all));
+    map_take(m, "race", xs_native(native_promise_race));
+    map_take(m, "any", xs_native(native_promise_any));
+    map_take(m, "all_settled", xs_native(native_promise_all_settled));
+    map_take(m, "sleep", xs_native(native_async_sleep));
+    map_take(m, "timeout", xs_native(native_async_timeout));
+    map_take(m, "then", xs_native(native_promise_then));
+    map_take(m, "catch_err", xs_native(native_promise_catch));
+    map_take(m, "finally_do", xs_native(native_promise_finally));
+    map_take(m, "state", xs_native(native_promise_state));
+    map_take(m, "value", xs_native(native_promise_value));
+    map_take(m, "drain", xs_native(native_async_drain));
     return xs_module(m);
 }

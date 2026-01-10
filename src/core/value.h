@@ -43,6 +43,11 @@ void     array_free(XSArray *a);
 
 XSMap  *map_new(void);
 void    map_set(XSMap *m, const char *k, Value *v);
+/* Convenience for freshly-allocated values: stores into the map (which
+ * bumps its own ref) and then drops the caller's +1. Lets stdlib
+ * registration sites like `map_take(m, "sin", xs_native(f))` avoid
+ * leaking the unowned temporary. */
+void    map_take(XSMap *m, const char *k, Value *v);
 Value  *map_get(XSMap *m, const char *k);
 int     map_has(XSMap *m, const char *k);
 void    map_del(XSMap *m, const char *k);

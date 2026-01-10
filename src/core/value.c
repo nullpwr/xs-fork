@@ -779,6 +779,11 @@ void map_set(XSMap *m, const char *k, Value *v) {
     m->len++;
 }
 
+void map_take(XSMap *m, const char *k, Value *v) {
+    map_set(m, k, v);
+    value_decref(v);
+}
+
 Value *map_get(XSMap *m, const char *k) {
     if (!m) return NULL;
     uint32_t idx = hash_str(k) % (uint32_t)m->cap;

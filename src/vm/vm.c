@@ -1012,8 +1012,8 @@ static void vm_register_stdlib(VM *vm) {
         { Value *_m = make_io_module();
           extern Value *native_io_read_json(Interp*,Value**,int);
           extern Value *native_io_write_json(Interp*,Value**,int);
-          map_set(_m->map,"read_json",  xs_native(native_io_read_json));
-          map_set(_m->map,"write_json", xs_native(native_io_write_json));
+          map_take(_m->map, "read_json", xs_native(native_io_read_json));
+          map_take(_m->map, "write_json", xs_native(native_io_write_json));
           map_set(vm->globals, "io", _m); value_decref(_m); }
         REG_MOD("async",       make_async_module);
         REG_MOD("net",         make_net_module);
@@ -5026,18 +5026,14 @@ int vm_call_closure_fast(VM *vm, int argc) {
     if (vm->frame_count >= 2) {
         vm->frames[vm->frame_count - 2].ip += 1;
     }
-    /* If the callee carries a tier-2 JIT entry, run it directly.
-     * jit_entry expects a freshly pushed frame with locals filled
-     * in -- exactly what we just set up. On success the frame has
-     * already been torn down and we return 0; the caller's JIT
-     * sees a no-op dispatch (ip already advanced above) and
-     * continues with the next instruction. On error we fall back
-     * so the caller's slow path surfaces it the usual way. */
-    if (proto->jit_entry) {
-        int (*fn)(VM *) = (int (*)(VM *))proto->jit_entry;
-        int rc = fn(vm);
-        if (rc != 0) return 1;
-    }
+    /* Intentionally NOT dispatching proto->jit_entry here. Doing so
+     * caused tier-1 to route into partially-tested tier-2 code paths
+     * for inner protos (the match-compiler / deep-pattern tests pull
+     * in IR shapes the tier-2 codegen doesn't yet handle cleanly).
+     * The tier-2 inner-frame dispatcher (tier2_run_until) still picks
+     * up proto->jit_entry when the enclosing caller is itself a
+     * tier-2 frame, so recursive self-calls inside a compiled proto
+     * still land on native code. */
     return 0;
 }
 

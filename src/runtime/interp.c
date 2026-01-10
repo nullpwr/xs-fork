@@ -1217,7 +1217,7 @@ tail_call_entry: ;
                                 map_set(node_map->map, "tag", xs_str("let"));
                                 map_set(node_map->map, "name", xs_str(param->pat_ident.name));
                                 /* value is null: classify will fall through to param entry */
-                                map_set(node_map->map, "line", xs_int(param->span.line));
+                                map_take(node_map->map, "line", xs_int(param->span.line));
                                 Value *hargs[2] = { node_map, cur_args[arg_idx] };
                                 Value *hresult = call_value(i, hook->callback, hargs, 2, "after_eval");
                                 value_decref(node_map);
@@ -6364,10 +6364,10 @@ do_call: ;
     }
     case NODE_LIT_COLOR: {
         Value *v = xs_map_new();
-        map_set(v->map, "r", xs_int(n->lit_color.r));
-        map_set(v->map, "g", xs_int(n->lit_color.g));
-        map_set(v->map, "b", xs_int(n->lit_color.b));
-        map_set(v->map, "a", xs_int(n->lit_color.a));
+        map_take(v->map, "r", xs_int(n->lit_color.r));
+        map_take(v->map, "g", xs_int(n->lit_color.g));
+        map_take(v->map, "b", xs_int(n->lit_color.b));
+        map_take(v->map, "a", xs_int(n->lit_color.a));
         return v;
     }
     case NODE_LIT_DATE: {
@@ -7042,11 +7042,11 @@ static Value *node_to_xs_map(Node *n) {
     if (!n) return value_incref(XS_NULL_VAL);
     Value *m = xs_map_new();
     map_set(m->map, "tag", xs_str(node_tag_to_string(VAL_TAG(n))));
-    if (n->span.line > 0) map_set(m->map, "line", xs_int(n->span.line));
+    if (n->span.line > 0) map_take(m->map, "line", xs_int(n->span.line));
 
     switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
-        map_set(m->map, "value", xs_int(n->lit_int.ival));
+        map_take(m->map, "value", xs_int(n->lit_int.ival));
         break;
     case NODE_LIT_FLOAT:
         map_set(m->map, "value", xs_float(n->lit_float.fval));
@@ -7140,10 +7140,10 @@ static Value *node_to_xs_map(Node *n) {
         map_set(m->map, "ms", xs_float(n->lit_duration.ms));
         break;
     case NODE_LIT_COLOR:
-        map_set(m->map, "r", xs_int(n->lit_color.r));
-        map_set(m->map, "g", xs_int(n->lit_color.g));
-        map_set(m->map, "b", xs_int(n->lit_color.b));
-        map_set(m->map, "a", xs_int(n->lit_color.a));
+        map_take(m->map, "r", xs_int(n->lit_color.r));
+        map_take(m->map, "g", xs_int(n->lit_color.g));
+        map_take(m->map, "b", xs_int(n->lit_color.b));
+        map_take(m->map, "a", xs_int(n->lit_color.a));
         break;
     case NODE_LIT_DATE:
         map_set(m->map, "value", xs_str(n->lit_date.value ? n->lit_date.value : ""));
@@ -7760,8 +7760,8 @@ static Value *native_parser_peek(Interp *interp, Value **args, int argc) {
     Value *m = xs_map_new();
     map_set(m->map, "kind", xs_str(token_kind_name(tok->kind)));
     map_set(m->map, "value", xs_str(tok->sval ? tok->sval : token_kind_name(tok->kind)));
-    map_set(m->map, "line", xs_int(tok->span.line));
-    map_set(m->map, "col", xs_int(tok->span.col));
+    map_take(m->map, "line", xs_int(tok->span.line));
+    map_take(m->map, "col", xs_int(tok->span.col));
     return m;
 }
 
@@ -7784,8 +7784,8 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
     Value *token_map = xs_map_new();
     map_set(token_map->map, "kind", xs_str(token_kind_name(tok->kind)));
     map_set(token_map->map, "value", xs_str(tok->sval ? tok->sval : token_kind_name(tok->kind)));
-    map_set(token_map->map, "line", xs_int(tok->span.line));
-    map_set(token_map->map, "col", xs_int(tok->span.col));
+    map_take(token_map->map, "line", xs_int(tok->span.line));
+    map_take(token_map->map, "col", xs_int(tok->span.col));
 
     void *saved_parser = g_active_parser;
     g_active_parser = p;
@@ -7818,12 +7818,12 @@ static Node *plugin_try_syntax_handler_impl(Parser *p, Token *tok) {
                 strcmp(g_parser_productions[j].plugin_id, g_plugin_forced_id) != 0) continue;
             /* build a parser state map so callback can use plugin.parser methods */
             Value *parser_map = xs_map_new();
-            map_set(parser_map->map, "expr", xs_native(native_parser_expr));
-            map_set(parser_map->map, "block", xs_native(native_parser_block));
-            map_set(parser_map->map, "ident", xs_native(native_parser_ident));
-            map_set(parser_map->map, "expect", xs_native(native_parser_expect));
-            map_set(parser_map->map, "at", xs_native(native_parser_at));
-            map_set(parser_map->map, "peek", xs_native(native_parser_peek));
+            map_take(parser_map->map, "expr", xs_native(native_parser_expr));
+            map_take(parser_map->map, "block", xs_native(native_parser_block));
+            map_take(parser_map->map, "ident", xs_native(native_parser_ident));
+            map_take(parser_map->map, "expect", xs_native(native_parser_expect));
+            map_take(parser_map->map, "at", xs_native(native_parser_at));
+            map_take(parser_map->map, "peek", xs_native(native_parser_peek));
             Value *args[2] = { parser_map, token_map };
             Value *ret = call_value(g_plugin_interp, g_parser_productions[j].callback,
                                     args, 2, "parser.production");
@@ -7850,8 +7850,8 @@ static Node *plugin_try_syntax_expr_handler_impl(Parser *p, Token *tok) {
     Value *token_map = xs_map_new();
     map_set(token_map->map, "kind", xs_str(token_kind_name(tok->kind)));
     map_set(token_map->map, "value", xs_str(tok->sval ? tok->sval : token_kind_name(tok->kind)));
-    map_set(token_map->map, "line", xs_int(tok->span.line));
-    map_set(token_map->map, "col", xs_int(tok->span.col));
+    map_take(token_map->map, "line", xs_int(tok->span.line));
+    map_take(token_map->map, "col", xs_int(tok->span.col));
 
     void *saved_parser = g_active_parser;
     g_active_parser = p;
@@ -7966,7 +7966,7 @@ static Value *make_hook_handle(int idx, const char *type) {
     map_set(handle->map, "_hook_idx", idx_v); value_decref(idx_v);
     Value *type_v = xs_str(type);
     map_set(handle->map, "_hook_type", type_v); value_decref(type_v);
-    map_set(handle->map, "remove", xs_native(native_hook_remove));
+    map_take(handle->map, "remove", xs_native(native_hook_remove));
     return handle;
 }
 
@@ -8217,94 +8217,94 @@ static Node *plugin_try_parser_override_impl(Parser *p, const char *keyword) {
 static void build_plugin_map(Value *plugin_map) {
     /* plugin.lexer */
     Value *lexer_map = xs_map_new();
-    map_set(lexer_map->map, "add_keyword", xs_native(native_plugin_add_keyword));
-    map_set(lexer_map->map, "transform", xs_native(native_plugin_lexer_transform));
+    map_take(lexer_map->map, "add_keyword", xs_native(native_plugin_add_keyword));
+    map_take(lexer_map->map, "transform", xs_native(native_plugin_lexer_transform));
     map_set(plugin_map->map, "lexer", lexer_map);
     value_decref(lexer_map);
 
     /* plugin.parser */
     Value *parser_map = xs_map_new();
-    map_set(parser_map->map, "on_unknown", xs_native(native_plugin_on_unknown));
-    map_set(parser_map->map, "on_unknown_expr", xs_native(native_plugin_on_unknown_expr));
-    map_set(parser_map->map, "on_postfix", xs_native(native_plugin_on_postfix));
-    map_set(parser_map->map, "override", xs_native(native_plugin_parser_override));
-    map_set(parser_map->map, "expr", xs_native(native_parser_expr));
-    map_set(parser_map->map, "block", xs_native(native_parser_block));
-    map_set(parser_map->map, "ident", xs_native(native_parser_ident));
-    map_set(parser_map->map, "expect", xs_native(native_parser_expect));
-    map_set(parser_map->map, "at", xs_native(native_parser_at));
-    map_set(parser_map->map, "peek", xs_native(native_parser_peek));
+    map_take(parser_map->map, "on_unknown", xs_native(native_plugin_on_unknown));
+    map_take(parser_map->map, "on_unknown_expr", xs_native(native_plugin_on_unknown_expr));
+    map_take(parser_map->map, "on_postfix", xs_native(native_plugin_on_postfix));
+    map_take(parser_map->map, "override", xs_native(native_plugin_parser_override));
+    map_take(parser_map->map, "expr", xs_native(native_parser_expr));
+    map_take(parser_map->map, "block", xs_native(native_parser_block));
+    map_take(parser_map->map, "ident", xs_native(native_parser_ident));
+    map_take(parser_map->map, "expect", xs_native(native_parser_expect));
+    map_take(parser_map->map, "at", xs_native(native_parser_at));
+    map_take(parser_map->map, "peek", xs_native(native_parser_peek));
     map_set(plugin_map->map, "parser", parser_map);
     value_decref(parser_map);
 
     /* plugin.hooks: callable that returns current hook state */
-    map_set(plugin_map->map, "hooks", xs_native(native_plugin_hooks));
+    map_take(plugin_map->map, "hooks", xs_native(native_plugin_hooks));
 
     /* plugin.runtime */
     Value *runtime_map = xs_map_new();
 
     /* plugin.runtime.global with .set/.get/.names */
     Value *global_map = xs_map_new();
-    map_set(global_map->map, "set", xs_native(native_plugin_global_set));
-    map_set(global_map->map, "get", xs_native(native_plugin_global_get));
-    map_set(global_map->map, "names", xs_native(native_plugin_global_names));
+    map_take(global_map->map, "set", xs_native(native_plugin_global_set));
+    map_take(global_map->map, "get", xs_native(native_plugin_global_get));
+    map_take(global_map->map, "names", xs_native(native_plugin_global_names));
     map_set(runtime_map->map, "global", global_map);
     value_decref(global_map);
 
     /* plugin.runtime.add_method */
-    map_set(runtime_map->map, "add_method", xs_native(native_plugin_add_method));
+    map_take(runtime_map->map, "add_method", xs_native(native_plugin_add_method));
 
     /* plugin.runtime.before_eval / after_eval */
-    map_set(runtime_map->map, "before_eval", xs_native(native_plugin_before_eval));
-    map_set(runtime_map->map, "after_eval", xs_native(native_plugin_after_eval));
+    map_take(runtime_map->map, "before_eval", xs_native(native_plugin_before_eval));
+    map_take(runtime_map->map, "after_eval", xs_native(native_plugin_after_eval));
 
     /* plugin.runtime.resolve_import / on_error */
-    map_set(runtime_map->map, "resolve_import", xs_native(native_plugin_resolve_import));
-    map_set(runtime_map->map, "on_error", xs_native(native_plugin_on_error));
+    map_take(runtime_map->map, "resolve_import", xs_native(native_plugin_resolve_import));
+    map_take(runtime_map->map, "on_error", xs_native(native_plugin_on_error));
 
     map_set(plugin_map->map, "runtime", runtime_map);
     value_decref(runtime_map);
 
     /* plugin.teardown */
-    map_set(plugin_map->map, "teardown", xs_native(native_plugin_teardown));
+    map_take(plugin_map->map, "teardown", xs_native(native_plugin_teardown));
 
     /* plugin.requires */
-    map_set(plugin_map->map, "requires", xs_native(native_plugin_requires));
+    map_take(plugin_map->map, "requires", xs_native(native_plugin_requires));
 
     /* plugin.ast constructors */
     Value *ast_map = xs_map_new();
-    map_set(ast_map->map, "int_node", xs_native(native_ast_int_node));
-    map_set(ast_map->map, "float_node", xs_native(native_ast_float_node));
-    map_set(ast_map->map, "str_node", xs_native(native_ast_str_node));
-    map_set(ast_map->map, "bool_node", xs_native(native_ast_bool_node));
-    map_set(ast_map->map, "null_node", xs_native(native_ast_null_node));
-    map_set(ast_map->map, "ident", xs_native(native_ast_ident));
-    map_set(ast_map->map, "binop", xs_native(native_ast_binop));
-    map_set(ast_map->map, "unary", xs_native(native_ast_unary));
-    map_set(ast_map->map, "call", xs_native(native_ast_call));
-    map_set(ast_map->map, "method_call", xs_native(native_ast_method_call));
-    map_set(ast_map->map, "if_expr", xs_native(native_ast_if_expr));
-    map_set(ast_map->map, "if_else", xs_native(native_ast_if_else));
-    map_set(ast_map->map, "block", xs_native(native_ast_block));
-    map_set(ast_map->map, "let_decl", xs_native(native_ast_let_decl));
-    map_set(ast_map->map, "var_decl", xs_native(native_ast_var_decl));
-    map_set(ast_map->map, "fn_decl", xs_native(native_ast_fn_decl));
-    map_set(ast_map->map, "lambda", xs_native(native_ast_lambda));
-    map_set(ast_map->map, "return_node", xs_native(native_ast_return_node));
-    map_set(ast_map->map, "assign", xs_native(native_ast_assign));
-    map_set(ast_map->map, "for_loop", xs_native(native_ast_for_loop));
-    map_set(ast_map->map, "while_loop", xs_native(native_ast_while_loop));
-    map_set(ast_map->map, "array", xs_native(native_ast_array));
-    map_set(ast_map->map, "map", xs_native(native_ast_map_node));
-    map_set(ast_map->map, "duration", xs_native(native_ast_duration));
-    map_set(ast_map->map, "color", xs_native(native_ast_color));
-    map_set(ast_map->map, "date", xs_native(native_ast_date));
-    map_set(ast_map->map, "size", xs_native(native_ast_size));
-    map_set(ast_map->map, "angle", xs_native(native_ast_angle));
-    map_set(ast_map->map, "every", xs_native(native_ast_every));
-    map_set(ast_map->map, "after", xs_native(native_ast_after));
-    map_set(ast_map->map, "timeout", xs_native(native_ast_timeout));
-    map_set(ast_map->map, "debounce", xs_native(native_ast_debounce));
+    map_take(ast_map->map, "int_node", xs_native(native_ast_int_node));
+    map_take(ast_map->map, "float_node", xs_native(native_ast_float_node));
+    map_take(ast_map->map, "str_node", xs_native(native_ast_str_node));
+    map_take(ast_map->map, "bool_node", xs_native(native_ast_bool_node));
+    map_take(ast_map->map, "null_node", xs_native(native_ast_null_node));
+    map_take(ast_map->map, "ident", xs_native(native_ast_ident));
+    map_take(ast_map->map, "binop", xs_native(native_ast_binop));
+    map_take(ast_map->map, "unary", xs_native(native_ast_unary));
+    map_take(ast_map->map, "call", xs_native(native_ast_call));
+    map_take(ast_map->map, "method_call", xs_native(native_ast_method_call));
+    map_take(ast_map->map, "if_expr", xs_native(native_ast_if_expr));
+    map_take(ast_map->map, "if_else", xs_native(native_ast_if_else));
+    map_take(ast_map->map, "block", xs_native(native_ast_block));
+    map_take(ast_map->map, "let_decl", xs_native(native_ast_let_decl));
+    map_take(ast_map->map, "var_decl", xs_native(native_ast_var_decl));
+    map_take(ast_map->map, "fn_decl", xs_native(native_ast_fn_decl));
+    map_take(ast_map->map, "lambda", xs_native(native_ast_lambda));
+    map_take(ast_map->map, "return_node", xs_native(native_ast_return_node));
+    map_take(ast_map->map, "assign", xs_native(native_ast_assign));
+    map_take(ast_map->map, "for_loop", xs_native(native_ast_for_loop));
+    map_take(ast_map->map, "while_loop", xs_native(native_ast_while_loop));
+    map_take(ast_map->map, "array", xs_native(native_ast_array));
+    map_take(ast_map->map, "map", xs_native(native_ast_map_node));
+    map_take(ast_map->map, "duration", xs_native(native_ast_duration));
+    map_take(ast_map->map, "color", xs_native(native_ast_color));
+    map_take(ast_map->map, "date", xs_native(native_ast_date));
+    map_take(ast_map->map, "size", xs_native(native_ast_size));
+    map_take(ast_map->map, "angle", xs_native(native_ast_angle));
+    map_take(ast_map->map, "every", xs_native(native_ast_every));
+    map_take(ast_map->map, "after", xs_native(native_ast_after));
+    map_take(ast_map->map, "timeout", xs_native(native_ast_timeout));
+    map_take(ast_map->map, "debounce", xs_native(native_ast_debounce));
     map_set(plugin_map->map, "ast", ast_map);
     value_decref(ast_map);
 }
@@ -8723,8 +8723,8 @@ static Node *walk_node_for_passes(Interp *interp, Node *n, CustomPass *pass) {
 #define FIRE_SCOPE_EXIT(block_node) do { \
     if (pass->on_scope_exit && (VAL_TAG(pass->on_scope_exit) == XS_FUNC || VAL_TAG(pass->on_scope_exit) == XS_NATIVE)) { \
         Value *scope_info = xs_map_new(); \
-        map_set(scope_info->map, "line", xs_int((block_node)->span.line)); \
-        map_set(scope_info->map, "col", xs_int((block_node)->span.col)); \
+        map_take(scope_info->map, "line", xs_int((block_node)->span.line)); \
+        map_take(scope_info->map, "col", xs_int((block_node)->span.col)); \
         Value *se_args[1] = { scope_info }; \
         DiagContext *sd = interp->diag; \
         interp->diag = NULL; \

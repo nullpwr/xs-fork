@@ -576,6 +576,38 @@ static void ir_inline_one(IRFunc *f, int ci,
             if (ni->op == IR_JUMP || ni->op == IR_JIF_FALSE || ni->op == IR_JIF_TRUE) {
                 if (ni->imm >= 0 && ni->imm < orig_n_blocks)
                     ni->imm = ni->imm + clone_base;
+            } else if (ni->op == IR_LOAD_LOCAL && ni->imm >= 0
+                       && ni->imm < orig_n_locals) {
+                /* Cloned LOAD_LOCAL's imm still refers to the CALLER's
+                 * slot index; if we leave it as LOAD_LOCAL, codegen
+                 * would read f->local_vregs[imm] (the caller's local)
+                 * instead of the clone's fresh local. Rewrite into
+                 * IR_DUP from the clone's own local_vreg. */
+                ni->op = IR_DUP;
+                ni->src1 = clone_locals[ni->imm];
+                ni->src2 = -1;
+                ni->imm = 0;
+            } else if (ni->op == IR_STORE_LOCAL && ni->imm >= 0
+                       && ni->imm < orig_n_locals) {
+                /* Cloned STORE_LOCAL has to decref the clone's own
+                 * current local-vreg value and then take src1. Model
+                 * it as IR_POP(clone_local) + IR_MOVE(clone_local <- src1).
+                 * Clone locals are initialized to null in the entry
+                 * block so the first pop is safe. */
+                IRVReg new_val = ni->src1;
+                ni->op = IR_POP;
+                ni->src1 = clone_locals[ni->imm];
+                ni->src2 = -1;
+                ni->dst = -1;
+                ni->imm = 0;
+                IRInst *nj = &f->insts[f->n_insts++];
+                memset(nj, 0, sizeof(IRInst));
+                nj->op = IR_MOVE;
+                nj->dst = clone_locals[src_in.imm];
+                nj->src1 = new_val;
+                nj->src2 = -1;
+                nj->bc_offset = src_in.bc_offset;
+                for (int k = 0; k < IR_MAX_CALL_ARGS; k++) nj->call_args[k] = -1;
             } else if (ni->op == IR_RETURN) {
                 /* Rewrite into IR_MOVE + IR_JUMP. The current ni
                  * slot becomes the MOVE; append a JUMP after it. */

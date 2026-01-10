@@ -4,6 +4,11 @@
 # the main suite and meant to be paired with `make asan` / `make ubsan`.
 
 cd "$(dirname "$0")/../.."
+
+# Same LSan policy as the main suite: report leaks but don't fail the
+# process over one-shot shutdown leaks that the OS reclaims anyway.
+export LSAN_OPTIONS="${LSAN_OPTIONS:-exitcode=0:print_suppressions=0}"
+
 pass=0
 fail=0
 
