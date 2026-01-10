@@ -9,6 +9,7 @@
 #pragma GCC diagnostic ignored "-Wunused-function"
 
 #include "jit/jit.h"
+#include "jit/ra_ir.h"
 #include "core/value.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -973,8 +974,63 @@ static void patch_rel8(Emitter *e, size_t pos) {
    look up ip at runtime rather than linearizing pc at compile time,
    the same compiled trampoline correctly handles calls, returns,
    throws, and any other control flow that vm_step manages. */
+/* Walk the proto's nested inner[] tree and tier-2-compile each one
+ * whose bytecode is supported. This populates proto->jit_entry for
+ * any callee the top-level code may invoke, letting the tier-2
+ * dispatcher (tier2_run_until) stay in native code across recursive
+ * and first-order calls alike. Inner protos that tier-2 can't handle
+ * keep a NULL jit_entry and fall back to the interpreter. */
+static void tier2_compile_inner_tree(XSJIT *j, XSProto *proto) {
+    if (!proto || proto->jit_entry) return;
+    IRFunc *f = ralow_lower(proto);
+    if (f) {
+        ralow_liveness(f);
+        IRAlloc *ra = ralow_alloc(f);
+        void *e = ralow_codegen(j, f, ra);
+        iralloc_free(ra);
+        irfunc_free(f);
+        if (e) proto->jit_entry = e;
+    }
+    for (int i = 0; i < proto->n_inner; i++)
+        tier2_compile_inner_tree(j, proto->inner[i]);
+}
+
 void *jit_compile(XSJIT *j, XSProto *proto) {
     if (!j || !j->available || !proto) return NULL;
+
+    /* Tier 2 (register-allocating specialiser): attempt first for
+     * protos whose bytecode stays within the supported subset. A NULL
+     * from ralow_lower/codegen falls through to the tier-1 dispatch
+     * JIT below so unsupported opcodes stay correct. Gated by
+     * XS_JIT_TIER2 so we can toggle it from benchmarks without
+     * recompiling; defaults on. On success we stash the entry on
+     * the proto too so the tier-2 inner-frame dispatcher can re-
+     * enter native code for recursive calls.
+     *
+     * Regardless of whether the TOP proto ends up tier-2 or tier-1,
+     * we walk inner[] and tier-2-compile every nested proto we can.
+     * That way fib-style recursive callees get native entries even
+     * when the outer proto contains MAKE_CLOSURE (which is not yet
+     * in the tier-2 supported set). */
+    {
+        const char *off = getenv("XS_JIT_TIER2");
+        if (!off || (off[0] != '0' && off[0] != 'n' && off[0] != 'N')) {
+            for (int i = 0; i < proto->n_inner; i++)
+                tier2_compile_inner_tree(j, proto->inner[i]);
+            IRFunc *f = ralow_lower(proto);
+            if (f) {
+                ralow_liveness(f);
+                IRAlloc *ra = ralow_alloc(f);
+                void *e2 = ralow_codegen(j, f, ra);
+                iralloc_free(ra);
+                irfunc_free(f);
+                if (e2) {
+                    proto->jit_entry = e2;
+                    return e2;
+                }
+            }
+        }
+    }
 
     size_t est = 4096;
     if (j->code_used + est > j->code_size) return NULL;

@@ -1,0 +1,143 @@
+/* Tier-2 JIT: bytecode -> IR -> register allocation -> x86-64.
+ *
+ * This replaces the per-opcode dispatch template JIT for protos whose
+ * bytecode fits within a supported subset. The pipeline:
+ *
+ *   1. ralow_lower:   bytecode -> linear IR + basic blocks
+ *   2. ralow_liveness: per-block use/def + iterative live-in/live-out
+ *   3. ralow_alloc:    linear-scan register allocation with spilling
+ *   4. ralow_codegen:  emit x86-64 using the allocation
+ *
+ * Values flow as SSA-ish virtual registers. At VM-visible boundaries
+ * (CALL, RETURN, throws, deopt) registers are flushed to vm->sp so the
+ * rest of the runtime sees the stack in its expected shape. */
+
+#ifndef XS_JIT_RA_IR_H
+#define XS_JIT_RA_IR_H
+
+#include <stdint.h>
+#include "core/xs.h"
+#include "vm/bytecode.h"
+
+/* IR opcode set. These are a strict subset of the bytecode opcodes --
+ * a proto that contains any opcode outside the supported set falls
+ * back to the template JIT. Keeping the set small keeps the compiler
+ * small; we can grow it opcode by opcode as wins are measured. */
+typedef enum {
+    /* pure value production */
+    IR_CONST,        /* dst = consts[imm] (incref'd copy pushed later) */
+    IR_LOAD_LOCAL,   /* dst = frame->base[imm] (incref'd) */
+    IR_LOAD_GLOBAL,  /* dst = global via IC; imm = const index of name */
+    IR_PUSH_NULL,
+    IR_PUSH_TRUE,
+    IR_PUSH_FALSE,
+
+    /* pure value consumption */
+    IR_STORE_LOCAL,  /* frame->base[imm] = src1 (decref old) */
+    IR_POP,          /* decref src1 */
+
+    /* binops: dst = src1 op src2, SMI fast path + slow fallback */
+    IR_ADD, IR_SUB, IR_MUL,
+    IR_LT, IR_GT, IR_LE, IR_GE, IR_EQ, IR_NE,
+
+    /* control flow */
+    IR_JUMP,         /* unconditional jump to imm = block index */
+    IR_JIF_FALSE,    /* if !src1 jump to imm else fall through */
+    IR_JIF_TRUE,     /* if src1 jump to imm else fall through */
+
+    /* calls: src1 = callee, then srcs[] = args (argc of them) */
+    IR_CALL,
+
+    /* return src1 */
+    IR_RETURN,
+
+    /* misc */
+    IR_DUP,          /* dst = src1 (incref) */
+
+    IR__MAX
+} IROp;
+
+#define IR_MAX_CALL_ARGS 16   /* anything above this falls back to template JIT */
+
+typedef int16_t IRVReg;   /* virtual register id; -1 = no operand */
+
+typedef struct {
+    IROp     op;
+    IRVReg   dst;                     /* -1 if op has no output */
+    IRVReg   src1;                    /* primary input or -1 */
+    IRVReg   src2;                    /* secondary input or -1 */
+    int32_t  imm;                     /* const index, slot, block, or argc */
+    IRVReg   call_args[IR_MAX_CALL_ARGS]; /* used only by IR_CALL */
+    int      bc_offset;               /* original bytecode instruction index -- for deopt */
+} IRInst;
+
+/* A basic block is a maximal straight-line sequence of IR instructions.
+ * Control flow enters at `start` and leaves at `end - 1` which is a
+ * branch/jump/return. Fall-through blocks are connected via the
+ * branch's imm (conditional) and through the next block in index order
+ * (unconditional). */
+typedef struct {
+    int      start;       /* first IR inst index */
+    int      end;         /* one past last IR inst index */
+    int      succ[2];     /* up to 2 successor block indices; -1 = no succ */
+    int      n_succ;
+    /* liveness */
+    uint64_t *use;        /* bitset, one bit per vreg */
+    uint64_t *def;
+    uint64_t *live_in;
+    uint64_t *live_out;
+} IRBlock;
+
+typedef struct {
+    IRInst   *insts;
+    int       n_insts, cap_insts;
+    IRBlock  *blocks;
+    int       n_blocks, cap_blocks;
+    int       n_vregs;
+    int       n_locals;
+    int       n_consts;        /* mirror of proto->chunk.nconsts */
+    XSProto  *proto;           /* original proto we're compiling */
+    /* Each local slot gets a long-lived vreg (`local_vregs[slot]`)
+     * that the allocator keeps live across the whole function, so
+     * LOAD_LOCAL becomes a reg copy rather than a memory chase. See
+     * ra_codegen.c for the shadow-model refcount discipline. NULL if
+     * the proto has 0 locals. */
+    IRVReg   *local_vregs;
+    /* Per-slot flag: 1 if the slot is ever STORE_LOCAL'd. Read-only
+     * slots skip the incref/writeback/decref dance entirely and just
+     * borrow frame->base[slot]'s reference for the function body;
+     * the caller's +1 on that slot stays in place throughout, so
+     * teardown cleans it up without our help. */
+    int8_t   *local_written;
+} IRFunc;
+
+/* Linear-scan register allocation output. For each vreg either:
+ *   - assigned a physical x86-64 register (index into phys_regs[])
+ *   - spilled to a numbered slot on the native stack (frame-relative)
+ */
+typedef struct {
+    int8_t *reg;      /* one entry per vreg: physical reg index, or -1 if spilled */
+    int8_t *spill;    /* one entry per vreg: spill slot index, or -1 if in reg */
+    int     n_spill_slots;
+} IRAlloc;
+
+/* Phase 1: lower bytecode into IR + basic blocks. Returns NULL if the
+ * proto uses any opcode outside the supported set, signalling the
+ * caller to fall back to the template JIT. */
+IRFunc *ralow_lower(XSProto *proto);
+void    irfunc_free(IRFunc *f);
+
+/* Phase 2: compute liveness. Populates block use/def/live_in/live_out. */
+void ralow_liveness(IRFunc *f);
+
+/* Phase 3: linear-scan register allocation. */
+IRAlloc *ralow_alloc(IRFunc *f);
+void     iralloc_free(IRAlloc *a);
+
+/* Phase 4: emit x86-64 machine code using the allocation. Caller
+ * provides the JIT code buffer. Returns the entry address, or NULL on
+ * emission failure (buffer overflow, unsupported construct). */
+typedef struct XSJIT XSJIT;
+void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a);
+
+#endif /* XS_JIT_RA_IR_H */

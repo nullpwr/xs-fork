@@ -158,6 +158,13 @@ struct XSProto {
     int         n_params;
     int         is_generator;  /* 1 if declared with `fn*` */
     int         is_variadic;
+    /* Cached pointer to the proto's tier-2 JIT entry (int(*)(VM*)).
+     * Populated by jit_compile when lowering succeeds; read by the
+     * tier-2 inner-frame dispatcher (tier2_run_until) so recursive
+     * calls stay in native code instead of falling back to the
+     * interpreter. NULL when no tier-2 entry is available -- the
+     * dispatcher then interprets. */
+    void       *jit_entry;
 };
 
 XSProto *proto_new(const char *name, int arity);
