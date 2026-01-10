@@ -3290,12 +3290,20 @@ fn on_input(text) {
 ```bash
 xs script.xs                     -- tree-walker interpreter (default)
 xs --vm script.xs                -- bytecode VM (faster)
-xs --jit script.xs               -- JIT compilation
+xs --jit script.xs               -- JIT compilation (x86-64)
 xs build script.xs               -- compile to bytecode (.xsc)
 xs run script.xsc                -- run compiled bytecode
 ```
 
 Both the interpreter and VM produce identical results for correct programs. The VM is faster for compute-heavy code.
+
+The JIT backend is x86-64-only and has two tiers. Tier 2 is a
+register-allocating specialiser that lowers a subset of the bytecode
+opcodes (arithmetic, compares, loads/stores, branches, calls, returns)
+to x86-64 with SMI fast paths; anything outside the subset falls back
+to a template JIT (tier 1) and, if needed, to the VM. Tier 2 is on by
+default and can be disabled with `XS_JIT_TIER2=0`; see STATUS.md for
+the exact opcode list and observed speedups.
 
 The `build` command compiles to a `.xsc` file that can be distributed and run without the source.
 

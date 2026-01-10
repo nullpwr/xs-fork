@@ -4,10 +4,11 @@ What works, what's partial, and what's planned. Current release: v0.5.0.
 
 ## Bytecode VM
 
-The default backend since v0.5.0. Passes the full test suite and is
-~4-9x faster than the tree-walk interpreter on compute-heavy code.
-Programs that register `plugin.runtime.after_eval` hooks auto-fall
-back to the interpreter.
+The bytecode VM backend is opt-in via `--vm`. It passes the full test
+suite and is ~4-9x faster than the tree-walk interpreter on compute-
+heavy code. Programs that register `plugin.runtime.after_eval` hooks
+auto-fall back to the interpreter. The interpreter is still the default
+for bare `xs file.xs`; see the Known Footguns section for why.
 
 ## Tree-Walk Interpreter
 
@@ -41,7 +42,7 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Pipe operator | works |
 | Gradual typing (--check, --strict) | works |
 | Plugin system | works |
-| Standard library (14 modules) | works |
+| Standard library (36 modules) | works |
 | HTTPS via embedded BearSSL | works |
 | Universal literals (duration, color, date, size, angle) | works |
 | Temporal primitives (every, after, timeout, debounce) | works |
@@ -52,9 +53,9 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Named arguments | works |
 | Enum methods via impl | works |
 
-Full test run: 35 test_*.xs files + examples sweep + test_cli.sh all pass on Linux, macOS, and MinGW Windows.
+Full test run: 40 test_*.xs files + examples sweep + test_cli.sh all pass on Linux, macOS, and MinGW Windows.
 
-## Bytecode VM
+## Bytecode VM (feature matrix)
 
 Use `--vm` flag. Full feature parity with the interpreter (except reactive bindings, which evaluate once).
 
@@ -94,14 +95,69 @@ The VM test (`test_vm.xs`) is run through `--vm` automatically by `tests/run.sh`
 
 ## JIT Compiler
 
-x86-64 only. Early stage, handles basic arithmetic and function calls.
+x86-64 only. Two tiers, both opt-in via `--jit`:
+
+**Tier 1** is a template/copy-patch JIT over the bytecode dispatch: it
+emits a specialised version of the VM inner loop, but every opcode still
+fans out to a helper call. This is what you get for anything the newer
+tier 2 can't handle.
+
+**Tier 2** is a register-allocating specialiser: bytecode is lowered to
+a small linear IR (`src/jit/ra_ir.h`), basic blocks are split, per-block
+liveness is computed (`src/jit/ra_live.c`), a linear-scan allocator
+(`src/jit/ra_alloc.c`) maps virtual registers onto `rbx`, `r14`, and
+`r15`, and `src/jit/ra_codegen.c` emits x86-64 with SMI fast paths for
+arithmetic/compares, register-resident locals (no stack chase for
+`LOAD_LOCAL` on read-only slots), and inline truthy/decref in the
+conditional-branch path. Recursive calls stay in native code through
+a small dispatcher (`tier2_run_until`) that re-enters compiled inner
+protos via the new `XSProto.jit_entry` cache.
+
+Tier 2 supports a strict subset of opcodes; a proto that steps outside
+it transparently falls back to tier 1. The current set (from
+`op_supported` in `src/jit/ra_lower.c`):
+
+```
+NOP PUSH_CONST PUSH_NULL PUSH_TRUE PUSH_FALSE POP DUP
+LOAD_LOCAL STORE_LOCAL LOAD_GLOBAL
+ADD SUB MUL LT GT LTE GTE EQ NEQ
+JUMP LOOP JUMP_IF_FALSE JUMP_IF_TRUE
+RETURN CALL
+```
+
+Anything else (string concat, division, map/array ops, MAKE_CLOSURE,
+etc.) lands in tier 1 or the interpreter.
 
 | Feature | Status |
 |---------|--------|
-| Integer arithmetic | works |
-| Function calls | works |
-| Loops | works |
-| Everything else | falls back to VM |
+| Tier-1 template JIT (x86-64) | works |
+| Tier-2 IR + linear-scan allocator | works |
+| SMI fast paths for arithmetic and compares | works |
+| Tier-2 recursive calls via `jit_entry` cache | works |
+| Opcodes outside the supported subset | fall back to tier 1 |
+| ARM64 backend | stub only (`src/jit/arm64.c`) |
+
+Environment knobs:
+
+- `XS_JIT_TIER2=0` / `n` / `N` disables tier 2 and forces everything
+  through tier 1. Defaults on.
+- `XS_JIT_TIER2_DUMP=1` writes the emitted tier-2 code buffer to
+  `/tmp/tier2.bin` and logs `[tier2] <nbytes>B at <addr> (proto=... )`
+  for each successful compile. Useful for `objdump -D -b binary -m
+  i386:x86-64 /tmp/tier2.bin`.
+
+Tier 2 was added recently; observed numbers on a Linux x86-64 box:
+
+| Workload | VM | `--jit` tier 1 | `--jit` tier 2 |
+|----------|-----|----------------|-----------------|
+| 10M-iter `while` sum | 0.395s | 0.231s | 0.064s |
+| `bench_fibonacci.xs` | 1.00x | ~0.92x | ~0.92x |
+
+Tight arithmetic/branch loops see a 3-6x win over VM; call-bound
+workloads like fib are currently call-dispatch-limited and sit roughly
+at parity (there is follow-up work to land call fast paths). All 47
+test files pass with tier 2 enabled (`bash tests/run.sh`), and all 7
+test layers pass via `bash tests/run-all.sh`.
 
 ## C Transpiler
 
@@ -133,6 +189,7 @@ x86-64 only. Early stage, handles basic arithmetic and function calls.
 | Closures, arrow lambdas | works |
 | Arrays, maps | works |
 | Concurrency | partial |
+| Algebraic effects (perform/handle) | broken: emits `yield` inside a non-generator arrow, fails to parse in Node |
 | Everything else | rough |
 
 ## WebAssembly Transpiler
@@ -189,12 +246,15 @@ burns. Fix one, and this list gets shorter.
   bytecode VM and more conservative about call depth (500 frames,
   tunable via `XS_MAX_DEPTH`). For anything compute-heavy or
   long-running, pass `--vm`. Pre-v1.0, we will not flip the default.
-- **Effect handlers don't cross non-generator JS function calls.** The
-  JS transpiler wraps the `handle` body in a generator so a direct
-  `perform` works, but performs inside helper functions that are plain
-  `function` become `yield` in a non-generator and crash at load time.
-  If you need algebraic effects on the JS target, keep all performs in
-  the handle's body or in generator-marked helpers.
+- **Effect handlers are broken on the JS target.** The transpiler
+  wraps the `handle` body in a `function*()` IIFE but the statements
+  inside get nested inside a plain arrow `(() => { ... })()`, so the
+  emitted `yield { __effect: ... }` sits in a non-generator and the
+  output fails to parse under Node (`SyntaxError: Unexpected token
+  '{'`). This applies to direct performs in the `handle` body too, not
+  just helper-function performs. Do not rely on effects on the JS
+  target; use `--vm` or the interpreter until the handle lowering is
+  reworked.
 - **WASM backend only runs trivial programs.** Arithmetic and direct
   function calls are fine; anything touching GC, strings, closures,
   async, or effects does not yet work. Do not ship.
@@ -204,10 +264,12 @@ burns. Fix one, and this list gets shorter.
   cycle collector is on the roadmap.
 - **Regex is POSIX-extended, not PCRE.** No `\d`, `\w`, lookaround, or
   backreferences. Use `[0-9]`, `[a-zA-Z_]`, etc.
-- **`http.serve` is blocking and single-request.** The async router in
-  `src/net/http_server.c` is not wired up. `http.serve` handles one
-  request at a time and shuts down on `Ctrl+C`. Fine for demos and
-  internal tools; not a production server.
+- **`http.serve` is minimal.** There is a working HTTP/1.1 server in
+  `src/runtime/builtins.c` (`native_http_serve`) that threads out each
+  accepted connection and releases the GIL around socket I/O, so slow
+  handlers don't block subsequent connects. The richer async router
+  scaffolding in `src/net/http_server.c` is not wired up. Fine for
+  demos and internal tools; not a production server.
 - **Unicode is byte-oriented.** `.len()`, `.slice()`, indexing all work
   on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
   `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
@@ -216,15 +278,22 @@ burns. Fix one, and this list gets shorter.
   "no registry configured" unless `[registry]` is set in `xs.toml`.
   `xsi` can install from local paths today; the hosted registry at
   registry.xslang.org is not live yet.
-- **JIT is a toy.** x86-64 only, arithmetic + calls + loops; almost
-  everything else falls back to the VM. Use `--jit` if you want to
-  kick the tires, not if you want speed.
+- **JIT is x86-64 only and opcode-subsetted.** Tier 2 (the register-
+  allocating pipeline) handles the subset listed in the JIT Compiler
+  section above -- basic arithmetic, compares, loads/stores, branches,
+  returns, and direct calls. Anything outside the subset lands in
+  tier 1 or the interpreter. Tight arithmetic/branch loops get a
+  3-6x wall-clock win over VM; call-heavy workloads sit near VM
+  parity until the planned call-site fast paths land. ARM64 is a
+  stub.
 
 ## Known Limitations
 
 - Struct operator overloading only works when both operands are structs (not mixed struct+int)
 - C transpiler closures break when the same variable name is captured in multiple functions in one file
-- JIT is x86-64 only and very early; most paths still fall back to the VM
+- JIT is x86-64 only; ARM64 is a stub. Tier 2 lowers a fixed subset of
+  opcodes (see the JIT Compiler section); anything else falls back to
+  tier 1 or the interpreter.
 - WASM transpiler only handles basic programs
 - `xs publish` and `xs search` print "no registry configured" unless `[registry]` is set in `xs.toml`
 - VM effects use snapshot/restore (single-shot only, no nested effects)
@@ -232,5 +301,8 @@ burns. Fix one, and this list gets shorter.
 - Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
 - Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
 - `match` does not support map patterns yet: destructure tuples, arrays, structs, and enums, but build a struct wrapper if you need to match map-shaped data.
-- JS transpiler's `perform`/`handle` story is partial: direct `perform` inside a `handle` works, but performs buried in helper functions that aren't marked as JS generators will produce broken JS.
-- `http` module exposes client methods (`get`, `post`, ...) only. `src/net/http_server.c` has routing and middleware code but no XS bindings are wired up yet, so `http.serve(...)` does not exist.
+- JS transpiler's `perform`/`handle` story is currently broken: the emitted JS puts `yield` inside a non-generator arrow IIFE, so even a direct `perform` inside a `handle` fails to parse under Node (SyntaxError). Use `--vm` or the interpreter for effects until the handle lowering is reworked.
+- `http` module exposes client methods (`get`, `post`, ...) plus a
+  basic `http.serve(port, handler)` defined in `src/runtime/builtins.c`.
+  The richer async router in `src/net/http_server.c` is not wired up
+  yet; `http.serve` is the only server entry point.

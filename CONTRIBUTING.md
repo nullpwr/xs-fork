@@ -16,9 +16,11 @@ You need gcc or clang and GNU make. No other dependencies.
 ## Run the tests
 
 ```
-make test        # tests/run.sh: 35+ test_*.xs files + examples + CLI
+make test        # tests/run.sh: 40+ test_*.xs files + examples + CLI
 make test-asan   # the same suite under AddressSanitizer + UBSan
 make test-diff   # cross-backend diff: interp vs VM vs C vs Node (JS)
+make test-all    # 7-layer suite: unit, e2e, negative, property, golden, regression, conformance
+make test-unit   # just the C-level unit tests (tests/unit/*_test.c)
 ```
 
 Adversarial suite (deep recursion, huge strings, pathological patterns,
@@ -71,6 +73,22 @@ These are small, self-contained places to start:
 - Trim a deprecated code path the runtime no longer reaches.
 
 Grep `TODO` and `FIXME` in `src/` for 60+ starting points.
+
+## Where to look
+
+- **VM and bytecode**: `src/vm/` (compiler.c, vm.c, bytecode.h).
+- **Tier-1 JIT (template)**: `src/jit/jit.c`, copy-patch dispatch over
+  the bytecode opcodes.
+- **Tier-2 JIT (register-allocating)**: `src/jit/ra_ir.h` defines the
+  small SSA-ish IR, `ra_lower.c` turns bytecode into it,
+  `ra_live.c` does per-block liveness, `ra_alloc.c` does linear-scan
+  over `rbx`/`r14`/`r15`, and `ra_codegen.c` emits x86-64 with SMI fast
+  paths and register-resident locals. Growing tier 2's opcode coverage
+  is the fastest way to make `--jit` faster; start with `op_supported`
+  in `ra_lower.c`.
+- **Sema / type checker**: `src/semantic/`, `src/types/`.
+- **Transpilers**: `src/transpiler/`.
+- **Plugins**: `src/plugins/`.
 
 ## Opening a PR
 

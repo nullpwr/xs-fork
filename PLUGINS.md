@@ -149,7 +149,7 @@ If your plugin needs another plugin loaded first:
 plugin.requires("base_framework")
 ```
 
-This checks if a plugin with that name was already loaded (via its `plugin.meta.name`). If not, the load fails with an error. Order your `use plugin` statements accordingly.
+This checks if a plugin with that name was already loaded (via its `plugin.meta.name`). If not, the load fails with an error. Order your `load` statements accordingly.
 
 ---
 
@@ -685,7 +685,7 @@ println("{resp.status}: {resp.body}")  -- 200: Hello, World!
 
 **Plugin files run in a temporary interpreter.** The plugin code itself executes in an isolated interpreter. But the hooks it registers (globals, methods, syntax handlers, etc.) affect the host interpreter. Variables defined in the plugin file with `let`/`var` are still accessible from closures the plugin registers -- they live in the plugin's closure environment.
 
-**Load order matters.** Plugins load in the order you write `use plugin` statements. A later plugin can overwrite globals set by an earlier one. If plugin B depends on plugin A, load A first (or use `plugin.requires("A")`).
+**Load order matters.** Plugins load in the order you write `load` statements. A later plugin can overwrite globals set by an earlier one. If plugin B depends on plugin A, load A first (or use `plugin.requires("A")`).
 
 **If a plugin fails, the host doesn't execute.** Any error during plugin loading -- parse error, runtime error, failed `requires` -- stops everything. You won't get a half-initialized state.
 

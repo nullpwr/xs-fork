@@ -106,7 +106,7 @@ xs file.xs              # run a script (tree-walk interpreter, default)
 xs                      # interactive REPL
 xs -e 'println(42)'     # eval one-liner
 xs --vm file.xs         # bytecode VM backend (faster for compute, recommended)
-xs --jit file.xs        # JIT backend (x86-64, early stage)
+xs --jit file.xs        # JIT backend (x86-64, two tiers; see STATUS.md)
 xs --emit js file.xs    # transpile to JavaScript
 xs --emit c file.xs     # transpile to C
 xs --check file.xs      # static type check without running
@@ -144,7 +144,7 @@ xs --strict file.xs     # require type annotations everywhere
 **Backends:**
 - Tree-walk interpreter (default)
 - Bytecode VM (`--vm`, full feature parity, faster for compute-heavy code)
-- JIT compiler (x86-64, early stage)
+- JIT compiler (`--jit`, x86-64, two tiers: template dispatch + register-allocating specialiser; ARM64 stubbed)
 - Transpilers: JavaScript, C, WebAssembly
 
 **Tooling:**
@@ -196,9 +196,9 @@ let nums: [int] = [1, 2, "oops"]  -- runtime error: expected '[int]', got '[mixe
 ## Project layout
 
 ```
-src/            compiler and runtime (348 .c files across 27 subsystems)
+src/            compiler and runtime (353 .c files across 26 subsystems)
 src/tls/        bundled BearSSL for HTTPS
-tests/          35 test_*.xs files + test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh
+tests/          40 test_*.xs files + test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh
 examples/       15 .xs examples + examples/plugins/
 benchmarks/     benchmark programs
 editors/        VS Code extension (editors/vscode/)
@@ -217,11 +217,26 @@ warm caches. Treat as indicative, not authoritative.
 | `fib(25)` recursion   | ~21 ms | ~54 ms | ~101 ms | **~20 ms** |
 | `fib(30)` recursion   | ~160 ms | ~60 ms | ~2.2 s  | **~170 ms** |
 
-Startup time is the flagship number: `xs file.xs` spins up about **10x
-faster than Node** and **3-4x faster than Python**, which makes it
-practical for small CLI tools. For compute, the VM backend is roughly
-on par with CPython; the tree-walk interpreter is ~10x slower on hot
-recursion and should not be used for compute-heavy work.
+A tight numeric loop shows where `--jit` pays off relative to `--vm`:
+
+| Program                         | `--vm`  | `--jit` tier 1 | `--jit` tier 2 |
+|---------------------------------|---------|----------------|-----------------|
+| 10M-iter `while` sum            | 0.395s  | 0.231s         | **0.064s**      |
+| `bench_fibonacci.xs`            | 1.00x   | ~0.92x         | ~0.92x          |
+
+Tier 2 wins ~6x over VM and ~3.6x over tier 1 on branch/arithmetic
+loops; `fib` is call-bound, so it sits near VM parity until call-site
+fast paths land. See STATUS.md for the opcode subset tier 2 currently
+lowers, and the `XS_JIT_TIER2` / `XS_JIT_TIER2_DUMP` env knobs.
+
+Startup time is the flagship number: on this box `xs file.xs` runs in
+about **2.3 ms** median vs **51 ms** for `node -e 'console.log(1)'`
+and **14 ms** for `python3 -c 'print(1)'`, so roughly **~22x faster
+than Node** and **~6x faster than Python** on a hello-world. That's
+what makes it practical for small CLI tools. For compute, the VM
+backend is roughly on par with CPython; the tree-walk interpreter is
+~10x slower on hot recursion and should not be used for compute-heavy
+work.
 
 Reproduce with `benchmarks/bench_fibonacci.xs`, `benchmarks/bench_sort.xs`,
 `benchmarks/bench_strings.xs` and `xs bench` (runs each 10 times and
