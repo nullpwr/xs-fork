@@ -612,13 +612,89 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
             }
 
             case IR_LOAD_GLOBAL: {
-                /* vm_load_global_ic(vm, bc_off, const_idx) */
+                /* Inlined monomorphic IC check. The slow path
+                 *   vm_load_global_ic(vm, bc_off, const_idx)
+                 * is only called when chk->ic isn't allocated yet, the
+                 * cache entry is empty, or the stored version is stale.
+                 * On the hot path (repeated loads of an unchanged global)
+                 * the emitted sequence is just a handful of loads + an
+                 * inline incref with no C calls.
+                 *
+                 * &chk->ic and &chk->ic_version are stable addresses for
+                 * the proto's lifetime and live at least as long as the
+                 * JITed code, so we embed them as immediates. */
+                XSChunk *chk = &proto->chunk;
+                uint64_t ic_slot_addr  = (uint64_t)(uintptr_t)&chk->ic;
+                uint64_t icv_slot_addr = (uint64_t)(uintptr_t)&chk->ic_version;
+                int32_t  gv_off = (int32_t)offsetof(VM, global_version);
+
+                /* RAX = chk->ic  (load pointer through the stable slot) */
+                emit_mov_reg_imm64(&em, RAX, ic_slot_addr);
+                /* mov rax, [rax] */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x00);
+                emit_test_rr(&em, RAX, RAX);
+                size_t j_miss1 = emit_jcc_rel32_ph(&em, CC_Z);
+
+                /* RCX = chk->ic[bc_off] */
+                {
+                    int32_t off = (int32_t)bc_off * 8;
+                    if (off >= -128 && off <= 127) {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x48);
+                        emit_byte(&em, (uint8_t)(int8_t)off);
+                    } else {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x88);
+                        emit_i32(&em, off);
+                    }
+                }
+                /* test rcx, rcx */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xC9);
+                size_t j_miss2 = emit_jcc_rel32_ph(&em, CC_Z);
+
+                /* RDX = chk->ic_version (array base), then chk->ic_version[bc_off]. */
+                emit_mov_reg_imm64(&em, RDX, icv_slot_addr);
+                /* mov rdx, [rdx] */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x12);
+                {
+                    int32_t off = (int32_t)bc_off * 8;
+                    if (off >= -128 && off <= 127) {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x52);
+                        emit_byte(&em, (uint8_t)(int8_t)off);
+                    } else {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x92);
+                        emit_i32(&em, off);
+                    }
+                }
+
+                /* RSI = vm->global_version */
+                if (gv_off >= -128 && gv_off <= 127) {
+                    emit_byte(&em, 0x49); emit_byte(&em, 0x8B); emit_byte(&em, 0x74);
+                    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)(int8_t)gv_off);
+                } else {
+                    emit_byte(&em, 0x49); emit_byte(&em, 0x8B); emit_byte(&em, 0xB4);
+                    emit_byte(&em, 0x24); emit_i32(&em, gv_off);
+                }
+                /* cmp rdx, rsi */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xF2);
+                size_t j_miss3 = emit_jcc_rel32_ph(&em, CC_NZ);
+
+                /* Cache hit: the IC owns a +1 on rcx; borrow it and
+                 * add our own +1 so the caller gets a proper owned
+                 * value to store into the dst vreg. */
+                emit_mov_rr(&em, RAX, RCX);
+                emit_inline_incref_rax(&em);
+                size_t j_done_lg = emit_jmp_rel32_ph(&em);
+
+                /* Miss: vm_load_global_ic returns an incref'd value and
+                 * repopulates the cache with a fresh version tag. */
+                patch_rel32(&em, j_miss1, em.pos);
+                patch_rel32(&em, j_miss2, em.pos);
+                patch_rel32(&em, j_miss3, em.pos);
                 emit_mov_rr(&em, RDI, R12);
-                /* mov esi, imm */
                 emit_byte(&em, 0xBE); emit_u32(&em, (uint32_t)bc_off);
-                /* mov edx, imm */
                 emit_byte(&em, 0xBA); emit_u32(&em, (uint32_t)in->imm);
                 emit_call_abs(&em, (void *)(uintptr_t)vm_load_global_ic);
+
+                patch_rel32(&em, j_done_lg, em.pos);
                 emit_store_vreg(&em, in->dst, a, RAX);
                 break;
             }
@@ -682,6 +758,9 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
              * then joins the done label. */
 
             case IR_ADD: case IR_SUB: case IR_MUL:
+            case IR_DIV: case IR_MOD:
+            case IR_BAND: case IR_BOR: case IR_BXOR:
+            case IR_SHL:  case IR_SHR:
             case IR_LT:  case IR_GT:  case IR_LE:
             case IR_GE:  case IR_EQ:  case IR_NE: {
                 /* Load both operands. b -> rax, a -> rcx (matches tier-1 convention). */
@@ -697,7 +776,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 size_t jz_slow = emit_jcc_rel32_ph(&em, CC_Z);
 
                 /* --- SMI fast body. Result lands in rcx. --- */
-                int jo_slow_list[4]; int n_jo = 0;
+                int jo_slow_list[8]; int n_jo = 0;
                 switch (in->op) {
                 case IR_ADD: {
                     /* sub rcx, 1; add rcx, rax; jo slow */
@@ -722,6 +801,110 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     emit_byte(&em, 0x48); emit_byte(&em, 0x01); emit_byte(&em, 0xC9);
                     jo_slow_list[n_jo++] = (int)emit_jcc_rel32_ph(&em, CC_O);
                     emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xC9); emit_byte(&em, 0x01);
+                    break;
+                }
+                case IR_DIV: case IR_MOD: {
+                    /* SMI 0 is encoded as 0x1, so "divisor == 0" is a plain
+                     * cmp rax, 1. We keep the div-by-zero path in the
+                     * interpreter to reuse its runtime_error reporting. */
+                    /* cmp rax, 1 */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xF8); emit_byte(&em, 0x01);
+                    jo_slow_list[n_jo++] = (int)emit_jcc_rel32_ph(&em, CC_Z);
+                    /* sar rcx, 1 ; sar rax, 1 */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xD1); emit_byte(&em, 0xF9);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xD1); emit_byte(&em, 0xF8);
+                    /* Save divisor in r8 before clobbering rax/rdx with idiv. */
+                    /* mov r8, rax */
+                    emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0xC0);
+                    /* mov rax, rcx */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xC8);
+                    /* cqo  (sign-extend rax into rdx:rax) */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x99);
+                    /* idiv r8  (quotient in rax, remainder in rdx) */
+                    emit_byte(&em, 0x49); emit_byte(&em, 0xF7); emit_byte(&em, 0xF8);
+                    if (in->op == IR_DIV) {
+                        /* SMI range covers [-2^62, 2^62-1], so |q| <= 2^62
+                         * and retag via lea cannot overflow on quotients
+                         * of SMI-range operands. */
+                        /* lea rcx, [rax + rax + 1] */
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8D); emit_byte(&em, 0x4C);
+                        emit_byte(&em, 0x00); emit_byte(&em, 0x01);
+                    } else {
+                        /* Math modulo: if (rem != 0 && signs(rem, b) differ) rem += b. */
+                        /* mov rcx, rdx */
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xD1);
+                        /* test rcx, rcx ; jz .retag */
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xC9);
+                        /* jz +imm8 -- short jump over the adjustment block */
+                        emit_byte(&em, 0x74); size_t jz_retag = em.pos; emit_byte(&em, 0x00);
+                        /* mov r9, rcx ; xor r9, r8 ; test r9, r9 ; jns .retag */
+                        emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0xC9);
+                        emit_byte(&em, 0x4D); emit_byte(&em, 0x31); emit_byte(&em, 0xC1);
+                        emit_byte(&em, 0x4D); emit_byte(&em, 0x85); emit_byte(&em, 0xC9);
+                        emit_byte(&em, 0x79); size_t jns_retag = em.pos; emit_byte(&em, 0x00);
+                        /* add rcx, r8 */
+                        emit_byte(&em, 0x4C); emit_byte(&em, 0x01); emit_byte(&em, 0xC1);
+                        /* retag label: patch both forward-jumps to here */
+                        size_t retag_pos = em.pos;
+                        em.buf[jz_retag] = (uint8_t)(retag_pos - jz_retag - 1);
+                        em.buf[jns_retag] = (uint8_t)(retag_pos - jns_retag - 1);
+                        /* lea rcx, [rcx + rcx + 1] */
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8D); emit_byte(&em, 0x4C);
+                        emit_byte(&em, 0x09); emit_byte(&em, 0x01);
+                    }
+                    break;
+                }
+                case IR_BAND: {
+                    /* and rcx, rax -- both SMI-tagged so low bit stays 1 */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x21); emit_byte(&em, 0xC1);
+                    break;
+                }
+                case IR_BOR: {
+                    /* or rcx, rax */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x09); emit_byte(&em, 0xC1);
+                    break;
+                }
+                case IR_BXOR: {
+                    /* xor rcx, rax -- low bit goes to 0, retag with or rcx, 1 */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x31); emit_byte(&em, 0xC1);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xC9); emit_byte(&em, 0x01);
+                    break;
+                }
+                case IR_SHL: case IR_SHR: {
+                    /* Match interp: shift count is masked to low 6 bits
+                     * anyway via VAL_INT(b) & 63, so any b is "valid" -- but
+                     * we still bail if it's outside [0,62] to keep the
+                     * fast path simple (avoids retagging negative counts). */
+                    /* sar rax, 1 (untag b); cmp rax, 62; ja slow */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xD1); emit_byte(&em, 0xF8);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xF8); emit_byte(&em, 62);
+                    jo_slow_list[n_jo++] = (int)emit_jcc_rel32_ph(&em, 0x7);  /* JA */
+                    /* sar rcx, 1 (untag a) */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xD1); emit_byte(&em, 0xF9);
+                    /* mov r8, rcx  (save a) ; mov rcx, rax  (cl = count) */
+                    emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0xC8);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xC1);
+                    if (in->op == IR_SHL) {
+                        /* shl r8, cl */
+                        emit_byte(&em, 0x49); emit_byte(&em, 0xD3); emit_byte(&em, 0xE0);
+                        /* Overflow if the shifted value's top two bits differ from its sign:
+                         *   mov rax, r8 ; sar rax, 62 ; inc rax ; cmp rax, 1 ; ja slow.
+                         * After inc, valid values (rax in {-1,0}) become {0,1} so
+                         * unsigned >1 catches both overflow directions. */
+                        emit_byte(&em, 0x4C); emit_byte(&em, 0x89); emit_byte(&em, 0xC0);
+                        emit_byte(&em, 0x48); emit_byte(&em, 0xC1); emit_byte(&em, 0xF8); emit_byte(&em, 62);
+                        emit_byte(&em, 0x48); emit_byte(&em, 0xFF); emit_byte(&em, 0xC0);
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xF8); emit_byte(&em, 0x01);
+                        jo_slow_list[n_jo++] = (int)emit_jcc_rel32_ph(&em, 0x7); /* JA */
+                    } else {
+                        /* sar r8, cl */
+                        emit_byte(&em, 0x49); emit_byte(&em, 0xD3); emit_byte(&em, 0xF8);
+                    }
+                    /* lea rcx, [r8 + r8 + 1]  (retag). REX.W|X|B = 0x4B
+                     * because both the index and base registers extend
+                     * into R8. */
+                    emit_byte(&em, 0x4B); emit_byte(&em, 0x8D); emit_byte(&em, 0x4C);
+                    emit_byte(&em, 0x00); emit_byte(&em, 0x01);
                     break;
                 }
                 case IR_LT: case IR_GT: case IR_LE: case IR_GE:
@@ -786,6 +969,76 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 
                 /* done label */
                 patch_rel32(&em, jmp_done, em.pos);
+                break;
+            }
+
+            case IR_NEG:
+            case IR_BNOT: {
+                /* Single-operand SMI fast path. rcx holds src1 on entry;
+                 * if it's not tagged as SMI we go through vm_step_jit. */
+                emit_load_vreg(&em, in->src1, a, RCX);
+                /* test cl, 1 ; jz slow  (non-SMI) */
+                emit_byte(&em, 0xF6); emit_byte(&em, 0xC1); emit_byte(&em, 0x01);
+                size_t jz_unslow = emit_jcc_rel32_ph(&em, CC_Z);
+
+                int jo_un = -1;
+                if (in->op == IR_NEG) {
+                    /* neg rcx ; add rcx, 2 ; jo slow.  SMI encoding
+                     * stashes the tag in bit 0, so neg+add-2 is the
+                     * algebraic identity; overflow occurs only when the
+                     * input is SMI_MIN (-2^62). */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xF7); emit_byte(&em, 0xD9);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xC1); emit_byte(&em, 0x02);
+                    jo_un = (int)emit_jcc_rel32_ph(&em, CC_O);
+                } else {
+                    /* not rcx ; or rcx, 1  -- bitwise complement of the
+                     * SMI. Low bit flips during NOT; the OR puts the tag
+                     * back so the result is a valid SMI. No overflow. */
+                    emit_byte(&em, 0x48); emit_byte(&em, 0xF7); emit_byte(&em, 0xD1);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x83); emit_byte(&em, 0xC9); emit_byte(&em, 0x01);
+                }
+
+                /* Fast path: store result, jump to done. */
+                emit_store_vreg(&em, in->dst, a, RCX);
+                size_t jmp_done_un = emit_jmp_rel32_ph(&em);
+
+                /* Slow path. */
+                size_t slow_pos = em.pos;
+                patch_rel32(&em, jz_unslow, slow_pos);
+                if (jo_un >= 0) patch_rel32(&em, (size_t)jo_un, slow_pos);
+                emit_load_vreg(&em, in->src1, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_un = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_un);
+                emit_vmsp_pop_rax(&em);
+                emit_store_vreg(&em, in->dst, a, RAX);
+
+                patch_rel32(&em, jmp_done_un, em.pos);
+                break;
+            }
+
+            case IR_NOT: {
+                /* Logical not. Inlining the SMI + singleton case is
+                 * tempting, but the full semantics (truthy on arbitrary
+                 * heap values, produce an incref'd TRUE/FALSE singleton)
+                 * match what vm_step_jit already does, and NOT isn't
+                 * typically hot. Flush + step + pop. */
+                emit_load_vreg(&em, in->src1, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_not = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_not);
+                emit_vmsp_pop_rax(&em);
+                emit_store_vreg(&em, in->dst, a, RAX);
                 break;
             }
 
@@ -867,6 +1120,235 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 uint8_t cc = (in->op == IR_JIF_FALSE) ? CC_Z : CC_NZ;
                 size_t p = emit_jcc_rel32_ph(&em, cc);
                 ADD_FIXUP(p, in->imm);
+                break;
+            }
+
+            case IR_NOP:
+                /* Peephole residue from IR_CMP_BR fusion. Emits nothing;
+                 * keeps instruction indices stable for liveness / regalloc. */
+                break;
+
+            case IR_LOAD_UP: {
+                /* Inline pointer chase:
+                 *   frame->closure_val  -> [r13 + 0]
+                 *     ->cl              -> [rax + 8]   (v->cl)
+                 *     ->upvalues        -> [rax + 8]   (XSClosure::upvalues)
+                 *     [imm]             -> [rax + imm*8]
+                 *     ->ptr             -> [rax + 0]   (Upvalue::ptr)
+                 *     *ptr              -> [rax]       (the live Value*)
+                 * Then inline incref so SMIs skip the refcount write and
+                 * store the owned result into dst. */
+                emit_mov_reg_mem_r13(&em, RAX, 0);       /* rax = closure_val */
+                emit_mov_reg_mem(&em, RAX, RAX, 8);      /* rax = v->cl */
+                emit_mov_reg_mem(&em, RAX, RAX, 8);      /* rax = cl->upvalues */
+                {
+                    int32_t off = (int32_t)in->imm * 8;
+                    if (off >= -128 && off <= 127) {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x40);
+                        emit_byte(&em, (uint8_t)(int8_t)off);
+                    } else {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x80);
+                        emit_i32(&em, off);
+                    }
+                }
+                emit_mov_reg_mem(&em, RAX, RAX, 0);      /* rax = uv->ptr */
+                emit_mov_reg_mem(&em, RAX, RAX, 0);      /* rax = *uv->ptr */
+                emit_inline_incref_rax(&em);
+                emit_store_vreg(&em, in->dst, a, RAX);
+                break;
+            }
+
+            case IR_STORE_UP: {
+                /* Ownership transfer: src1 carries +1 (tier-2 vreg
+                 * convention). After this op that +1 lives in *uv->ptr,
+                 * and the Value previously stored there is decref'd.
+                 *
+                 *   new <- src1
+                 *   uv_ptr_cell = &uv->ptr (rsi); live Value** is [rsi]
+                 *   *uv_ptr_cell = new  (transferring src1's +1)
+                 *   decref old
+                 *
+                 * We spill the incoming value on rcx because decref
+                 * clobbers the scratch regs. */
+                emit_load_vreg(&em, in->src1, a, RCX);   /* rcx = new_value */
+                emit_mov_reg_mem_r13(&em, RAX, 0);
+                emit_mov_reg_mem(&em, RAX, RAX, 8);
+                emit_mov_reg_mem(&em, RAX, RAX, 8);
+                {
+                    int32_t off = (int32_t)in->imm * 8;
+                    if (off >= -128 && off <= 127) {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x40);
+                        emit_byte(&em, (uint8_t)(int8_t)off);
+                    } else {
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x80);
+                        emit_i32(&em, off);
+                    }
+                }
+                /* rax = Upvalue*.  rsi = uv->ptr (Value**). */
+                emit_mov_reg_mem(&em, RSI, RAX, 0);
+                /* rdi = *rsi = old Value* */
+                emit_mov_reg_mem(&em, RDI, RSI, 0);
+                /* *rsi = rcx  (store new value, ownership transfers) */
+                /* mov [rsi], rcx */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0x0E);
+
+                /* decref old if not NULL */
+                emit_test_rr(&em, RDI, RDI);
+                size_t j_skip_dec = emit_jcc_rel32_ph(&em, CC_Z);
+                emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                patch_rel32(&em, j_skip_dec, em.pos);
+                break;
+            }
+
+            case IR_MAKE_CLOSURE: {
+                /* Rare op; dispatch through vm_step_jit so the full
+                 * upvalue-capture dance lives in one place. The bytecode
+                 * doesn't consume any VM-stack inputs (all captures come
+                 * from frame->base and CL->upvalues) so we don't need to
+                 * flush operand vregs to vm->sp beforehand -- we only
+                 * pop the single new value off afterwards. */
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_mc = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_mc);
+                emit_vmsp_pop_rax(&em);
+                emit_store_vreg(&em, in->dst, a, RAX);
+                break;
+            }
+
+            case IR_CMP_BR: {
+                /* Fused compare-and-branch. On the SMI hot path the
+                 * existing CMP + JIF pair materialises a TRUE/FALSE heap
+                 * singleton, stores it to a vreg, then loads/decrefs it
+                 * in the branch -- wasted cycles. Here we skip the
+                 * singleton entirely and go straight from `cmp` to `jcc`.
+                 *
+                 * Slow path replicates the CMP slow path (vm_step_jit on
+                 * OP_LT etc.) followed by the inlined truthy + branch
+                 * from IR_JIF, so behaviour is byte-identical to the
+                 * unfused sequence. */
+                int packed = (int)in->call_args[0];
+                int kind = (packed >> 1) & 0x7;
+                int branch_if_false = packed & 1;
+
+                /* Load a -> rcx, b -> rax (same convention as IR_<CMP>). */
+                emit_load_vreg(&em, in->src1, a, RCX);
+                emit_load_vreg(&em, in->src2, a, RAX);
+
+                /* Both-SMI check: mov rdx, rcx; and rdx, rax; test dl, 1 */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xCA);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x21); emit_byte(&em, 0xC2);
+                emit_byte(&em, 0xF6); emit_byte(&em, 0xC2); emit_byte(&em, 0x01);
+                size_t jz_slow_cb = emit_jcc_rel32_ph(&em, CC_Z);
+
+                /* SMI fast path: cmp rcx, rax; then jcc to branch target. */
+                uint8_t cc_true;
+                switch (kind) {
+                case 0: cc_true = CC_L;  break; /* LT */
+                case 1: cc_true = CC_G;  break; /* GT */
+                case 2: cc_true = CC_LE; break; /* LE */
+                case 3: cc_true = CC_GE; break; /* GE */
+                case 4: cc_true = CC_Z;  break; /* EQ */
+                case 5: cc_true = CC_NZ; break; /* NE */
+                default: cc_true = CC_Z; break;
+                }
+                /* `branch_if_false` means "take the jump when the
+                 * relation is FALSE", so invert the condition. The
+                 * encodings are paired (cc ^ 1 flips sense for every
+                 * relation we use here). */
+                uint8_t cc_branch = branch_if_false ? (uint8_t)(cc_true ^ 1)
+                                                    : cc_true;
+                /* cmp rcx, rax */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xC1);
+                size_t p_fast = emit_jcc_rel32_ph(&em, cc_branch);
+                ADD_FIXUP(p_fast, in->imm);
+                /* Fall-through (fast path, branch not taken) jumps over
+                 * the slow path to the converged "done" point. */
+                size_t j_done_fast = emit_jmp_rel32_ph(&em);
+
+                /* --- slow path --- */
+                size_t slow_pos = em.pos;
+                patch_rel32(&em, jz_slow_cb, slow_pos);
+                /* Push a then b onto vm->sp, set ip, call vm_step_jit. */
+                emit_load_vreg(&em, in->src1, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_load_vreg(&em, in->src2, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_cb = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_cb);
+
+                /* Pop the bool result into rdi for inlined truthy test. */
+                emit_vmsp_pop_rax(&em);
+                emit_mov_rr(&em, RDI, RAX);
+
+                /* -- inlined truthy test, mirrors the IR_JIF_* body --
+                 * Produces ecx = 0/1 covering SMI, TRUE/FALSE singleton,
+                 * and the fully general value_truthy fallback. */
+
+                /* test dil, 1  (SMI tag?) */
+                emit_byte(&em, 0x40); emit_byte(&em, 0xF6);
+                emit_byte(&em, 0xC7); emit_byte(&em, 0x01);
+                size_t j_heap_cb = emit_jcc_rel32_ph(&em, CC_Z);
+                /* cmp rdi, 1 ; setnz cl ; movzx ecx, cl -- SMI 0 is falsy */
+                emit_byte(&em, 0x48); emit_byte(&em, 0x83);
+                emit_byte(&em, 0xFF); emit_byte(&em, 0x01);
+                emit_byte(&em, 0x0F); emit_byte(&em, 0x95); emit_byte(&em, 0xC1);
+                emit_byte(&em, 0x0F); emit_byte(&em, 0xB6); emit_byte(&em, 0xC9);
+                size_t j_test_smi_cb = emit_jmp_rel32_ph(&em);
+
+                /* Heap path: check XS_FALSE_VAL then XS_TRUE_VAL singletons. */
+                patch_rel32(&em, j_heap_cb, em.pos);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x00);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xC7);
+                size_t j_not_false_cb = emit_jcc_rel32_ph(&em, CC_NZ);
+                /* Matched FALSE: refcount-- on singleton (never frees), ecx=0. */
+                emit_byte(&em, 0x83); emit_byte(&em, 0x6F);
+                emit_byte(&em, (uint8_t)VAL_OFF_REFCOUNT); emit_byte(&em, 0x01);
+                emit_byte(&em, 0x31); emit_byte(&em, 0xC9);
+                size_t j_test_false_cb = emit_jmp_rel32_ph(&em);
+
+                patch_rel32(&em, j_not_false_cb, em.pos);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x00);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x39); emit_byte(&em, 0xC7);
+                size_t j_vtslow_cb = emit_jcc_rel32_ph(&em, CC_NZ);
+                emit_byte(&em, 0x83); emit_byte(&em, 0x6F);
+                emit_byte(&em, (uint8_t)VAL_OFF_REFCOUNT); emit_byte(&em, 0x01);
+                emit_byte(&em, 0xB9); emit_u32(&em, 1);
+                size_t j_test_true_cb = emit_jmp_rel32_ph(&em);
+
+                /* Full value_truthy + value_decref fallback. */
+                patch_rel32(&em, j_vtslow_cb, em.pos);
+                emit_push_reg(&em, RDI);
+                emit_sub_reg_imm32(&em, RSP, 8);
+                emit_call_abs(&em, (void *)(uintptr_t)value_truthy);
+                emit_byte(&em, 0x89); emit_byte(&em, 0xC1);
+                emit_add_reg_imm32(&em, RSP, 8);
+                emit_pop_reg(&em, RDI);
+                emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+
+                /* Converge truthy-test tails; test + branch. */
+                size_t test_pos_cb = em.pos;
+                patch_rel32(&em, j_test_smi_cb,   test_pos_cb);
+                patch_rel32(&em, j_test_false_cb, test_pos_cb);
+                patch_rel32(&em, j_test_true_cb,  test_pos_cb);
+                emit_byte(&em, 0x85); emit_byte(&em, 0xC9);  /* test ecx, ecx */
+                uint8_t cc_slow = branch_if_false ? CC_Z : CC_NZ;
+                size_t p_slow = emit_jcc_rel32_ph(&em, cc_slow);
+                ADD_FIXUP(p_slow, in->imm);
+
+                /* Done: fast-path (branch not taken) fall-through lands here.
+                 * Slow-path (branch not taken) also falls through to here. */
+                patch_rel32(&em, j_done_fast, em.pos);
                 break;
             }
 

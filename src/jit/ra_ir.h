@@ -28,22 +28,59 @@ typedef enum {
     IR_CONST,        /* dst = consts[imm] (incref'd copy pushed later) */
     IR_LOAD_LOCAL,   /* dst = frame->base[imm] (incref'd) */
     IR_LOAD_GLOBAL,  /* dst = global via IC; imm = const index of name */
+    IR_LOAD_UP,      /* dst = *(CL->upvalues[imm]->ptr), incref'd */
     IR_PUSH_NULL,
     IR_PUSH_TRUE,
     IR_PUSH_FALSE,
 
+    /* Create a new closure from an inner proto descriptor. imm is the
+     * const-index of an XS_INT whose value is the inner[] array index
+     * (matches the OP_MAKE_CLOSURE encoding). Slow-path dispatches to
+     * vm_step_jit; the JIT handles the "it's a rare op" case by just
+     * running the interpreter on that one instruction. */
+    IR_MAKE_CLOSURE,
+
     /* pure value consumption */
     IR_STORE_LOCAL,  /* frame->base[imm] = src1 (decref old) */
+    IR_STORE_UP,     /* *(CL->upvalues[imm]->ptr) = src1, decref old */
     IR_POP,          /* decref src1 */
 
     /* binops: dst = src1 op src2, SMI fast path + slow fallback */
     IR_ADD, IR_SUB, IR_MUL,
+    IR_DIV, IR_MOD,              /* integer div/mod with div-by-zero guard */
+    IR_BAND, IR_BOR, IR_BXOR,    /* bitwise on raw SMI bits (no untag needed) */
+    IR_SHL, IR_SHR,              /* shift by SMI count */
     IR_LT, IR_GT, IR_LE, IR_GE, IR_EQ, IR_NE,
+
+    /* unary ops on a single value */
+    IR_NEG,   /* arithmetic negate (SMI fast path + overflow-to-slow) */
+    IR_NOT,   /* logical not -- always slow path (truthy test) */
+    IR_BNOT,  /* bitwise complement */
 
     /* control flow */
     IR_JUMP,         /* unconditional jump to imm = block index */
     IR_JIF_FALSE,    /* if !src1 jump to imm else fall through */
     IR_JIF_TRUE,     /* if src1 jump to imm else fall through */
+
+    /* Fused compare-and-branch. Produced by the lowerer's peephole when
+     * a CMP's sole consumer is the JIF immediately after. Saves the
+     * TRUE/FALSE heap singleton round-trip on the SMI hot path.
+     *
+     *   op   = IR_CMP_BR
+     *   src1 = left operand
+     *   src2 = right operand
+     *   dst  = -1  (no produced value)
+     *   imm  = target block index (JIF's jump target)
+     *   call_args[0] = packed (cmp_kind << 1) | branch_if_false
+     *       cmp_kind: 0=LT 1=GT 2=LE 3=GE 4=EQ 5=NE
+     *       branch_if_false: 0 for JIF_TRUE origin, 1 for JIF_FALSE
+     */
+    IR_CMP_BR,
+
+    /* Emits no code; left behind by the CMP_BR peephole where the
+     * original JIF instruction used to sit, keeping instruction indices
+     * (and therefore block ranges) stable. */
+    IR_NOP,
 
     /* calls: src1 = callee, then srcs[] = args (argc of them) */
     IR_CALL,

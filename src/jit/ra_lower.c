@@ -14,6 +14,7 @@
 #include <string.h>
 
 static int ir_try_inline_self(IRFunc *f);
+static void ir_fuse_cmp_branch(IRFunc *f);
 
 /* --- small growable array for the IR instruction stream --- */
 
@@ -70,9 +71,22 @@ static int op_supported(Opcode op) {
         case OP_LOAD_LOCAL:
         case OP_STORE_LOCAL:
         case OP_LOAD_GLOBAL:
+        case OP_LOAD_UPVALUE:
+        case OP_STORE_UPVALUE:
+        case OP_MAKE_CLOSURE:
         case OP_ADD:
         case OP_SUB:
         case OP_MUL:
+        case OP_DIV:
+        case OP_MOD:
+        case OP_NEG:
+        case OP_NOT:
+        case OP_BAND:
+        case OP_BOR:
+        case OP_BXOR:
+        case OP_BNOT:
+        case OP_SHL:
+        case OP_SHR:
         case OP_LT:
         case OP_GT:
         case OP_LTE:
@@ -94,16 +108,33 @@ static int op_supported(Opcode op) {
 /* Map bytecode comparison opcode to its IR equivalent. */
 static IROp ir_binop_for(Opcode op) {
     switch (op) {
-        case OP_ADD: return IR_ADD;
-        case OP_SUB: return IR_SUB;
-        case OP_MUL: return IR_MUL;
-        case OP_LT:  return IR_LT;
-        case OP_GT:  return IR_GT;
-        case OP_LTE: return IR_LE;
-        case OP_GTE: return IR_GE;
-        case OP_EQ:  return IR_EQ;
-        case OP_NEQ: return IR_NE;
-        default:     return IR__MAX;
+        case OP_ADD:  return IR_ADD;
+        case OP_SUB:  return IR_SUB;
+        case OP_MUL:  return IR_MUL;
+        case OP_DIV:  return IR_DIV;
+        case OP_MOD:  return IR_MOD;
+        case OP_BAND: return IR_BAND;
+        case OP_BOR:  return IR_BOR;
+        case OP_BXOR: return IR_BXOR;
+        case OP_SHL:  return IR_SHL;
+        case OP_SHR:  return IR_SHR;
+        case OP_LT:   return IR_LT;
+        case OP_GT:   return IR_GT;
+        case OP_LTE:  return IR_LE;
+        case OP_GTE:  return IR_GE;
+        case OP_EQ:   return IR_EQ;
+        case OP_NEQ:  return IR_NE;
+        default:      return IR__MAX;
+    }
+}
+
+/* Unary op bytecode -> IR. */
+static IROp ir_unop_for(Opcode op) {
+    switch (op) {
+        case OP_NEG:  return IR_NEG;
+        case OP_NOT:  return IR_NOT;
+        case OP_BNOT: return IR_BNOT;
+        default:      return IR__MAX;
     }
 }
 
@@ -284,13 +315,40 @@ IRFunc *ralow_lower(XSProto *proto) {
                 vstack_push(&vs, d);
                 break;
             }
+            case OP_LOAD_UPVALUE: {
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_LOAD_UP, d, -1, -1, bx, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_STORE_UPVALUE: {
+                IRVReg v = vstack_pop(&vs);
+                ir_emit(f, IR_STORE_UP, -1, v, -1, bx, pc);
+                break;
+            }
+            case OP_MAKE_CLOSURE: {
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_MAKE_CLOSURE, d, -1, -1, bx, pc);
+                vstack_push(&vs, d);
+                break;
+            }
             case OP_ADD: case OP_SUB: case OP_MUL:
+            case OP_DIV: case OP_MOD:
+            case OP_BAND: case OP_BOR: case OP_BXOR:
+            case OP_SHL: case OP_SHR:
             case OP_LT:  case OP_GT:  case OP_LTE:
             case OP_GTE: case OP_EQ:  case OP_NEQ: {
                 IRVReg b = vstack_pop(&vs);
                 IRVReg a = vstack_pop(&vs);
                 IRVReg d = new_vreg(f);
                 ir_emit(f, ir_binop_for(op), d, a, b, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_NEG: case OP_NOT: case OP_BNOT: {
+                IRVReg a = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, ir_unop_for(op), d, a, -1, 0, pc);
                 vstack_push(&vs, d);
                 break;
             }
@@ -380,7 +438,96 @@ IRFunc *ralow_lower(XSProto *proto) {
             ir_try_inline_self(f);
     }
 
+    /* Fuse CMP + JIF pairs into IR_CMP_BR so the SMI hot path can go
+     * straight from `cmp` to `jcc` without materialising a TRUE/FALSE
+     * heap singleton. Runs AFTER the self-inliner so clone bodies get
+     * fused too. Toggled by XS_JIT_CMPBR (default on). */
+    {
+        const char *off = getenv("XS_JIT_CMPBR");
+        if (!off || (off[0] != '0' && off[0] != 'n' && off[0] != 'N'))
+            ir_fuse_cmp_branch(f);
+    }
+
     return f;
+}
+
+/* Is `op` one of the six comparison ops lowered from OP_LT .. OP_NEQ? */
+static int ir_is_cmp(IROp op) {
+    return op == IR_LT || op == IR_GT || op == IR_LE ||
+           op == IR_GE || op == IR_EQ || op == IR_NE;
+}
+
+/* Encode an IR cmp op as the 3-bit kind stored in IR_CMP_BR's
+ * call_args[0]. Matches the switch in ra_codegen.c. */
+static int ir_cmp_kind(IROp op) {
+    switch (op) {
+    case IR_LT: return 0;
+    case IR_GT: return 1;
+    case IR_LE: return 2;
+    case IR_GE: return 3;
+    case IR_EQ: return 4;
+    case IR_NE: return 5;
+    default:    return -1;
+    }
+}
+
+/* Peephole: rewrite an in-block pair
+ *
+ *     <CMP>   dst=t, src1=a, src2=b
+ *     JIF_*   src1=t, imm=target
+ *
+ * as
+ *
+ *     CMP_BR  src1=a, src2=b, imm=target, call_args[0]=packed
+ *     NOP
+ *
+ * The vreg `t` is produced by the CMP and consumed by the JIF. Under
+ * tier-2's per-block stack simulation (see ralow_lower) each CMP's dst
+ * is pushed and immediately popped by the following consumer, so it
+ * cannot be live across a block boundary. The JIF's presence after the
+ * CMP is therefore sufficient proof that `t` has no other consumer.
+ *
+ * We also require the pair to sit in the same block (same block range)
+ * and the JIF to be the block's terminator. Both invariants hold by
+ * construction of the lowerer: JIF_* always terminates its block. */
+static void ir_fuse_cmp_branch(IRFunc *f) {
+    if (!f) return;
+    for (int bi = 0; bi < f->n_blocks; bi++) {
+        IRBlock *b = &f->blocks[bi];
+        if (b->end - b->start < 2) continue;
+        for (int ii = b->start; ii + 1 < b->end; ii++) {
+            IRInst *cmp = &f->insts[ii];
+            IRInst *jif = &f->insts[ii + 1];
+            if (!ir_is_cmp(cmp->op)) continue;
+            if (jif->op != IR_JIF_FALSE && jif->op != IR_JIF_TRUE) continue;
+            if (cmp->dst < 0 || jif->src1 != cmp->dst) continue;
+
+            int kind = ir_cmp_kind(cmp->op);
+            int branch_if_false = (jif->op == IR_JIF_FALSE) ? 1 : 0;
+
+            IRInst merged;
+            memset(&merged, 0, sizeof merged);
+            merged.op = IR_CMP_BR;
+            merged.dst = -1;
+            merged.src1 = cmp->src1;
+            merged.src2 = cmp->src2;
+            merged.imm = jif->imm;
+            for (int k = 0; k < IR_MAX_CALL_ARGS; k++) merged.call_args[k] = -1;
+            merged.call_args[0] = (IRVReg)((kind << 1) | branch_if_false);
+            merged.bc_offset = cmp->bc_offset;
+            *cmp = merged;
+
+            IRInst nop;
+            memset(&nop, 0, sizeof nop);
+            nop.op = IR_NOP;
+            nop.dst = -1;
+            nop.src1 = -1;
+            nop.src2 = -1;
+            for (int k = 0; k < IR_MAX_CALL_ARGS; k++) nop.call_args[k] = -1;
+            nop.bc_offset = jif->bc_offset;
+            *jif = nop;
+        }
+    }
 }
 
 /* ================================================================
