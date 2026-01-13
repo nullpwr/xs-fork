@@ -944,10 +944,136 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 emit_store_vreg(&em, in->dst, a, RCX);
                 size_t jmp_done = emit_jmp_rel32_ph(&em);
 
+                /* --- float fast path (ADD/SUB/MUL/DIV and compares) ---
+                 * Routes the "both-SMI check failed" jump to here first
+                 * so numeric code over boxed XS_FLOAT pairs stays out of
+                 * the interpreter. Bitwise ops and MOD have no float
+                 * analogue we want to speculate on, and on those ops
+                 * `jz_slow` still goes straight to the interpreter. */
+                int is_float_arith = (in->op == IR_ADD || in->op == IR_SUB ||
+                                      in->op == IR_MUL || in->op == IR_DIV);
+                int is_float_cmp = (in->op == IR_LT || in->op == IR_GT ||
+                                    in->op == IR_LE || in->op == IR_GE ||
+                                    in->op == IR_EQ || in->op == IR_NE);
+                int has_float_path = is_float_arith || is_float_cmp;
+
+                size_t float_slow_jumps[8]; int n_fslow = 0;
+                int has_float_done_jump = 0;
+                size_t float_done_jump = 0;
+                if (has_float_path) {
+                    size_t float_entry = em.pos;
+                    patch_rel32(&em, jz_slow, float_entry);
+
+                    /* Reload operands so the float path is independent
+                     * of whatever the SMI fast body did to rcx/rax. */
+                    emit_load_vreg(&em, in->src1, a, RCX);
+                    emit_load_vreg(&em, in->src2, a, RAX);
+
+                    /* Reject NULL and non-FLOAT heap values. The tag
+                     * lives at offset 0 of the Value struct; XS_FLOAT=4. */
+                    emit_test_rr(&em, RCX, RCX);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    emit_test_rr(&em, RAX, RAX);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    /* cmp dword [rcx], 4 */
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x39); emit_byte(&em, 0x04);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    /* cmp dword [rax], 4 */
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, 0x04);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+
+                    /* movsd xmm0, [rcx + 8]; movsd xmm1, [rax + 8] */
+                    emit_byte(&em, 0xF2); emit_byte(&em, 0x0F); emit_byte(&em, 0x10);
+                    emit_byte(&em, 0x41); emit_byte(&em, 0x08);
+                    emit_byte(&em, 0xF2); emit_byte(&em, 0x0F); emit_byte(&em, 0x10);
+                    emit_byte(&em, 0x48); emit_byte(&em, 0x08);
+
+                    if (is_float_arith) {
+                        /* <op>sd xmm0, xmm1: opcode depends on the IR op. */
+                        uint8_t fop;
+                        switch (in->op) {
+                        case IR_ADD: fop = 0x58; break;
+                        case IR_SUB: fop = 0x5C; break;
+                        case IR_MUL: fop = 0x59; break;
+                        case IR_DIV: fop = 0x5E; break;
+                        default:     fop = 0x58; break;
+                        }
+                        emit_byte(&em, 0xF2); emit_byte(&em, 0x0F);
+                        emit_byte(&em, fop); emit_byte(&em, 0xC1);
+
+                        /* Box the xmm0 result: xs_float(double) takes
+                         * its arg in xmm0 and returns a fresh +1 Value*
+                         * in rax. */
+                        emit_call_abs(&em, (void *)(uintptr_t)xs_float);
+
+                        /* Preserve the boxed result across the two
+                         * operand decrefs. Pushes unalign rsp by 8, so
+                         * pair them with a sub 8 to stay 16-aligned at
+                         * each call. */
+                        emit_push_reg(&em, RAX);
+                        emit_sub_reg_imm32(&em, RSP, 8);
+                        emit_load_vreg(&em, in->src1, a, RDI);
+                        emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                        emit_load_vreg(&em, in->src2, a, RDI);
+                        emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                        emit_add_reg_imm32(&em, RSP, 8);
+                        emit_pop_reg(&em, RCX);
+                    } else {
+                        /* ucomisd xmm0, xmm1: sets ZF/PF/CF. PF=1 means
+                         * unordered (NaN). Bail to slow path on NaN so
+                         * we match the interpreter's NaN handling. */
+                        emit_byte(&em, 0x66); emit_byte(&em, 0x0F);
+                        emit_byte(&em, 0x2E); emit_byte(&em, 0xC1);
+                        /* jp slow  (parity = unordered) */
+                        float_slow_jumps[n_fslow++] =
+                            emit_jcc_rel32_ph(&em, 0xA); /* JP */
+                        /* Map compare → cc. ucomisd uses unsigned
+                         * semantics (CF/ZF): below=CF, equal=ZF,
+                         * above=neither. */
+                        uint8_t cc_f;
+                        switch (in->op) {
+                        case IR_LT: cc_f = 0x2; break; /* JB  */
+                        case IR_GT: cc_f = 0x7; break; /* JA  */
+                        case IR_LE: cc_f = 0x6; break; /* JBE */
+                        case IR_GE: cc_f = 0x3; break; /* JAE */
+                        case IR_EQ: cc_f = 0x4; break; /* JE  */
+                        case IR_NE: cc_f = 0x5; break; /* JNE */
+                        default:    cc_f = 0x4; break;
+                        }
+                        /* Materialise TRUE/FALSE singleton, matching
+                         * the SMI compare path so downstream code that
+                         * doesn't use CMP_BR still sees consistent
+                         * Value* output. */
+                        emit_byte(&em, (uint8_t)(0x70 | cc_f));
+                        emit_byte(&em, 12);
+                        emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_FALSE_VAL);
+                        emit_byte(&em, 0xEB); emit_byte(&em, 10);
+                        emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)&XS_TRUE_VAL);
+                        emit_byte(&em, 0x48); emit_byte(&em, 0x8B); emit_byte(&em, 0x00);
+                        emit_inline_incref_rax(&em);
+
+                        /* Save result across the operand decrefs. */
+                        emit_push_reg(&em, RAX);
+                        emit_sub_reg_imm32(&em, RSP, 8);
+                        emit_load_vreg(&em, in->src1, a, RDI);
+                        emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                        emit_load_vreg(&em, in->src2, a, RDI);
+                        emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                        emit_add_reg_imm32(&em, RSP, 8);
+                        emit_pop_reg(&em, RCX);
+                    }
+
+                    emit_store_vreg(&em, in->dst, a, RCX);
+                    float_done_jump = emit_jmp_rel32_ph(&em);
+                    has_float_done_jump = 1;
+                }
+
                 /* --- slow path --- */
                 size_t slow_pos = em.pos;
-                patch_rel32(&em, jz_slow, slow_pos);
+                if (!has_float_path) patch_rel32(&em, jz_slow, slow_pos);
                 for (int i = 0; i < n_jo; i++) patch_rel32(&em, (size_t)jo_slow_list[i], slow_pos);
+                for (int i = 0; i < n_fslow; i++)
+                    patch_rel32(&em, float_slow_jumps[i], slow_pos);
                 /* Push a then b onto vm->sp (transferring ownership). */
                 emit_load_vreg(&em, in->src1, a, RAX);
                 emit_vmsp_push_rax(&em);
@@ -969,6 +1095,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 
                 /* done label */
                 patch_rel32(&em, jmp_done, em.pos);
+                if (has_float_done_jump) patch_rel32(&em, float_done_jump, em.pos);
                 break;
             }
 
