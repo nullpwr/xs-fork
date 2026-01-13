@@ -15,6 +15,7 @@
 
 static int ir_try_inline_self(IRFunc *f);
 static void ir_fuse_cmp_branch(IRFunc *f);
+static void ir_elide_refcount_pairs(IRFunc *f);
 
 /* --- small growable array for the IR instruction stream --- */
 
@@ -733,6 +734,18 @@ IRFunc *ralow_lower(XSProto *proto) {
             ir_fuse_cmp_branch(f);
     }
 
+    /* Peephole: find adjacent incref-then-decref pairs that arise when
+     * a statement like `foo()` produces an unused value. Tier-2 emits
+     * an incref to materialise the call's result and an immediate
+     * decref via IR_POP; both are wasted work. Elide the pair by
+     * swapping both instructions for IR_NOP. Toggled by
+     * XS_JIT_REFOPT (default on). */
+    {
+        const char *off = getenv("XS_JIT_REFOPT");
+        if (!off || (off[0] != '0' && off[0] != 'n' && off[0] != 'N'))
+            ir_elide_refcount_pairs(f);
+    }
+
     return f;
 }
 
@@ -754,6 +767,73 @@ static int ir_cmp_kind(IROp op) {
     case IR_NE: return 5;
     default:    return -1;
     }
+}
+
+/* Tally vreg uses across the whole function so the peephole can tell
+ * whether a produced value has exactly one consumer. Returns a
+ * heap-allocated int[n_vregs] the caller must free. */
+static int *ir_vreg_use_counts(IRFunc *f) {
+    int *uses = xs_calloc((size_t)f->n_vregs, sizeof(int));
+    for (int i = 0; i < f->n_insts; i++) {
+        IRInst *in = &f->insts[i];
+        if (in->src1 >= 0 && in->src1 < f->n_vregs) uses[in->src1]++;
+        if (in->src2 >= 0 && in->src2 < f->n_vregs) uses[in->src2]++;
+        for (int k = 0; k < IR_MAX_CALL_ARGS; k++)
+            if (in->call_args[k] >= 0 && in->call_args[k] < f->n_vregs)
+                uses[in->call_args[k]]++;
+    }
+    return uses;
+}
+
+/* True if the IR op produces its dst as a freshly incref'd value with
+ * no other side effects, so that dropping both the producer and an
+ * immediate IR_POP is behaviour-preserving. Ops with external side
+ * effects (IR_LOAD_GLOBAL caches into chk->ic, IR_MAKE_CLOSURE
+ * allocates, calls have visible effects) are intentionally excluded. */
+static int ir_is_side_effect_free_producer(IROp op) {
+    return op == IR_CONST ||
+           op == IR_LOAD_LOCAL ||
+           op == IR_LOAD_UP ||
+           op == IR_DUP ||
+           op == IR_PUSH_NULL ||
+           op == IR_PUSH_TRUE ||
+           op == IR_PUSH_FALSE;
+}
+
+/* Peephole: collapse a side-effect-free producer immediately followed
+ * by IR_POP on its result when that vreg has no other readers. For
+ * SMIs this used to cost a load + a test-cl-1 + a jcc + a store + the
+ * mirror-image decref load / test / call; after elision the whole
+ * sequence is gone. Runs after the CMP_BR peephole so it can also eat
+ * any (now-unused) bool singleton fallouts the fuser left behind. */
+static void ir_elide_refcount_pairs(IRFunc *f) {
+    if (!f || f->n_insts < 2) return;
+    int *uses = ir_vreg_use_counts(f);
+
+    for (int bi = 0; bi < f->n_blocks; bi++) {
+        IRBlock *b = &f->blocks[bi];
+        for (int ii = b->start; ii + 1 < b->end; ii++) {
+            IRInst *prod = &f->insts[ii];
+            IRInst *pop  = &f->insts[ii + 1];
+            if (prod->dst < 0) continue;
+            if (!ir_is_side_effect_free_producer(prod->op)) continue;
+            if (pop->op != IR_POP) continue;
+            if (pop->src1 != prod->dst) continue;
+            if (uses[prod->dst] != 1) continue;  /* pop is the only reader */
+
+            memset(prod, 0, sizeof *prod);
+            prod->op = IR_NOP;
+            prod->dst = -1; prod->src1 = -1; prod->src2 = -1;
+            for (int k = 0; k < IR_MAX_CALL_ARGS; k++) prod->call_args[k] = -1;
+
+            memset(pop, 0, sizeof *pop);
+            pop->op = IR_NOP;
+            pop->dst = -1; pop->src1 = -1; pop->src2 = -1;
+            for (int k = 0; k < IR_MAX_CALL_ARGS; k++) pop->call_args[k] = -1;
+        }
+    }
+
+    free(uses);
 }
 
 /* Peephole: rewrite an in-block pair
