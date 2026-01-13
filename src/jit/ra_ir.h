@@ -40,6 +40,29 @@ typedef enum {
      * running the interpreter on that one instruction. */
     IR_MAKE_CLOSURE,
 
+    /* Containers, field access, methods, and literal construction. All
+     * of these dispatch through vm_step_jit -- the JIT just keeps them
+     * inside the tier-2 subset instead of bailing the whole proto to
+     * tier 1 on any aggregate op. imm is set for documentation (and to
+     * make future inline fast paths easy to wire up) but the codegen
+     * relies only on operand flushing + interpreter step + optional
+     * result pop:
+     *
+     *   IR_INDEX_GET   src1=container, src2=index   -> dst
+     *   IR_INDEX_SET   src1=container, src2=index, call_args[0]=value -> -
+     *   IR_LOAD_FIELD  src1=object     (imm = name const)  -> dst
+     *   IR_STORE_FIELD src1=object, src2=value (imm=name)  -> -
+     *   IR_MAKE_RANGE  src1=start,    src2=end     (imm = inclusive) -> dst
+     *   IR_MAKE_ARRAY  call_args[0..n-1] = items  (imm=n)  -> dst
+     *   IR_MAKE_TUPLE  call_args[0..n-1] = items  (imm=n)  -> dst
+     *   IR_MAKE_MAP    call_args[0..2n-1] = k0,v0,k1,v1,.. (imm=n pairs) -> dst
+     *   IR_METHOD_CALL src1=receiver, call_args[0..argc-1]=args (imm=argc) -> dst
+     */
+    IR_INDEX_GET, IR_INDEX_SET,
+    IR_LOAD_FIELD, IR_STORE_FIELD,
+    IR_MAKE_RANGE, IR_MAKE_ARRAY, IR_MAKE_TUPLE, IR_MAKE_MAP,
+    IR_METHOD_CALL,
+
     /* pure value consumption */
     IR_STORE_LOCAL,  /* frame->base[imm] = src1 (decref old) */
     IR_STORE_UP,     /* *(CL->upvalues[imm]->ptr) = src1, decref old */

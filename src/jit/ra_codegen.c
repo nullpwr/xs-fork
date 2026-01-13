@@ -1346,6 +1346,59 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 break;
             }
 
+            /* All the aggregate / container / field ops fall through a
+             * single template: flush the input vregs onto vm->sp in the
+             * order the interpreter expects, set frame->ip, invoke
+             * vm_step_jit to run exactly one opcode, propagate errors,
+             * then pop the produced result into dst (if any). The tier-2
+             * JIT only wants these inside its subset so surrounding
+             * arithmetic keeps the regalloc win -- the ops themselves
+             * still go through the interpreter.
+             *
+             * src1 is always pushed first (when present). For
+             * non-aggregate ops that's the only push. Aggregate ops
+             * (ARRAY / TUPLE / MAP / METHOD_CALL / INDEX_SET) then push
+             * each non-(-1) entry of call_args in order. src2 slots in
+             * between when it's set (IR_INDEX_GET, IR_MAKE_RANGE,
+             * IR_STORE_FIELD). IR_INDEX_SET pushes src1, src2, then
+             * call_args[0]. */
+            case IR_INDEX_GET:
+            case IR_INDEX_SET:
+            case IR_LOAD_FIELD:
+            case IR_STORE_FIELD:
+            case IR_MAKE_RANGE:
+            case IR_MAKE_ARRAY:
+            case IR_MAKE_TUPLE:
+            case IR_MAKE_MAP:
+            case IR_METHOD_CALL: {
+                if (in->src1 >= 0) {
+                    emit_load_vreg(&em, in->src1, a, RAX);
+                    emit_vmsp_push_rax(&em);
+                }
+                if (in->src2 >= 0) {
+                    emit_load_vreg(&em, in->src2, a, RAX);
+                    emit_vmsp_push_rax(&em);
+                }
+                for (int k = 0; k < IR_MAX_CALL_ARGS; k++) {
+                    if (in->call_args[k] < 0) break;
+                    emit_load_vreg(&em, in->call_args[k], a, RAX);
+                    emit_vmsp_push_rax(&em);
+                }
+
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_agg = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_agg);
+                if (in->dst >= 0) {
+                    emit_vmsp_pop_rax(&em);
+                    emit_store_vreg(&em, in->dst, a, RAX);
+                }
+                break;
+            }
+
             case IR_CMP_BR: {
                 /* Fused compare-and-branch. On the SMI hot path the
                  * existing CMP + JIF pair materialises a TRUE/FALSE heap

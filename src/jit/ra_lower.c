@@ -44,6 +44,7 @@ static IRVReg new_vreg(IRFunc *f) {
 typedef struct {
     IRVReg *v;
     int     len, cap;
+    int     underflow;  /* set if pop was ever called while empty */
 } VRegStack;
 
 static void vstack_push(VRegStack *s, IRVReg r) {
@@ -54,7 +55,9 @@ static void vstack_push(VRegStack *s, IRVReg r) {
     s->v[s->len++] = r;
 }
 static IRVReg vstack_pop(VRegStack *s) {
-    return s->len > 0 ? s->v[--s->len] : (IRVReg)-1;
+    if (s->len > 0) return s->v[--s->len];
+    s->underflow = 1;
+    return (IRVReg)-1;
 }
 
 /* --- supported-opcode check --- */
@@ -74,6 +77,15 @@ static int op_supported(Opcode op) {
         case OP_LOAD_UPVALUE:
         case OP_STORE_UPVALUE:
         case OP_MAKE_CLOSURE:
+        case OP_LOAD_FIELD:
+        case OP_STORE_FIELD:
+        case OP_INDEX_GET:
+        case OP_INDEX_SET:
+        case OP_MAKE_RANGE:
+        case OP_MAKE_ARRAY:
+        case OP_MAKE_TUPLE:
+        case OP_MAKE_MAP:
+        case OP_METHOD_CALL:
         case OP_ADD:
         case OP_SUB:
         case OP_MUL:
@@ -211,6 +223,18 @@ IRFunc *ralow_lower(XSProto *proto) {
         if (op == OP_CALL) {
             int argc = INSTR_C(proto->chunk.code[i]);
             if (argc > IR_MAX_CALL_ARGS) return NULL;
+        }
+        if (op == OP_METHOD_CALL) {
+            int argc = INSTR_A(proto->chunk.code[i]);
+            if (argc > IR_MAX_CALL_ARGS) return NULL;
+        }
+        if (op == OP_MAKE_ARRAY || op == OP_MAKE_TUPLE) {
+            int n = INSTR_C(proto->chunk.code[i]);
+            if (n > IR_MAX_CALL_ARGS) return NULL;
+        }
+        if (op == OP_MAKE_MAP) {
+            int n = INSTR_C(proto->chunk.code[i]);
+            if (n * 2 > IR_MAX_CALL_ARGS) return NULL;
         }
     }
 
@@ -390,6 +414,78 @@ IRFunc *ralow_lower(XSProto *proto) {
                 vstack_push(&vs, d);
                 break;
             }
+            case OP_INDEX_GET: {
+                IRVReg idx = vstack_pop(&vs);
+                IRVReg col = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_INDEX_GET, d, col, idx, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_INDEX_SET: {
+                IRVReg val = vstack_pop(&vs);
+                IRVReg idx = vstack_pop(&vs);
+                IRVReg col = vstack_pop(&vs);
+                int iidx = ir_emit(f, IR_INDEX_SET, -1, col, idx, 0, pc);
+                f->insts[iidx].call_args[0] = val;
+                break;
+            }
+            case OP_LOAD_FIELD: {
+                IRVReg obj = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_LOAD_FIELD, d, obj, -1, bx, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_STORE_FIELD: {
+                IRVReg val = vstack_pop(&vs);
+                IRVReg obj = vstack_pop(&vs);
+                ir_emit(f, IR_STORE_FIELD, -1, obj, val, bx, pc);
+                break;
+            }
+            case OP_MAKE_RANGE: {
+                IRVReg end = vstack_pop(&vs);
+                IRVReg start = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                /* A=inclusive; bytecode gives it via INSTR_A, stash in imm. */
+                int incl = (int)INSTR_A(ins);
+                ir_emit(f, IR_MAKE_RANGE, d, start, end, incl, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_MAKE_ARRAY:
+            case OP_MAKE_TUPLE: {
+                int n = c;
+                IRVReg items[IR_MAX_CALL_ARGS];
+                for (int i = n - 1; i >= 0; i--) items[i] = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                IROp oir = op == OP_MAKE_ARRAY ? IR_MAKE_ARRAY : IR_MAKE_TUPLE;
+                int idx = ir_emit(f, oir, d, -1, -1, n, pc);
+                for (int i = 0; i < n; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_MAKE_MAP: {
+                int npairs = c;
+                IRVReg entries[IR_MAX_CALL_ARGS];
+                for (int i = npairs * 2 - 1; i >= 0; i--) entries[i] = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_MAKE_MAP, d, -1, -1, npairs, pc);
+                for (int i = 0; i < npairs * 2; i++) f->insts[idx].call_args[i] = entries[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_METHOD_CALL: {
+                int argc = (int)INSTR_A(ins);
+                IRVReg args[IR_MAX_CALL_ARGS];
+                for (int i = argc - 1; i >= 0; i--) args[i] = vstack_pop(&vs);
+                IRVReg recv = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_METHOD_CALL, d, recv, -1, argc, pc);
+                for (int i = 0; i < argc; i++) f->insts[idx].call_args[i] = args[i];
+                vstack_push(&vs, d);
+                break;
+            }
             default:
                 /* Shouldn't reach here -- op_supported() filtered these. */
                 free(starts);
@@ -418,7 +514,20 @@ IRFunc *ralow_lower(XSProto *proto) {
         f->blocks[bi].end = f->n_insts;
     }
     free(starts);
+    int underflowed = vs.underflow;
     free(vs.v);
+
+    /* Per-block stack simulation assumes each block starts with an
+     * empty operand stack. Compiler patterns like `a and b` leak values
+     * across branches (the DUP before JUMP_IF_FALSE stays live on the
+     * interpreter stack into the merge block), so our per-block
+     * re-simulation hits a pop on an empty stack and manufactures a
+     * -1 vreg. Rather than lower that to garbage code, bail out
+     * cleanly so the template JIT handles the proto. */
+    if (underflowed) {
+        irfunc_free(f);
+        return NULL;
+    }
 
     /* Scan the lowered IR for STORE_LOCAL targets. Slots that are
      * never stored stay in "borrow" mode -- the codegen skips the

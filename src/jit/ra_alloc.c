@@ -33,12 +33,18 @@ typedef struct {
 } LiveRange;
 
 /* For each instruction, decide what vregs it reads and defines. */
+static int ra_op_uses_call_args(IROp op) {
+    return op == IR_CALL || op == IR_METHOD_CALL ||
+           op == IR_INDEX_SET ||
+           op == IR_MAKE_ARRAY || op == IR_MAKE_TUPLE || op == IR_MAKE_MAP;
+}
+
 static int inst_uses(const IRInst *in, IRVReg out[IR_MAX_CALL_ARGS + 2]) {
     int n = 0;
     if (in->src1 >= 0) out[n++] = in->src1;
     if (in->src2 >= 0) out[n++] = in->src2;
-    if (in->op == IR_CALL) {
-        for (int i = 0; i < in->imm; i++)
+    if (ra_op_uses_call_args(in->op)) {
+        for (int i = 0; i < IR_MAX_CALL_ARGS; i++)
             if (in->call_args[i] >= 0) out[n++] = in->call_args[i];
     }
     return n;

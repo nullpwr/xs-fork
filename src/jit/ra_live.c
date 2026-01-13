@@ -58,14 +58,20 @@ static int bs_equal(const uint64_t *a, const uint64_t *b, int n_bits) {
 /* For a single instruction, what vregs does it define, and what vregs
  * does it read? Fills `reads[]` and returns the number of reads. The
  * single def (if any) is in `*def_out` (set to -1 if no def). */
+static int op_uses_call_args_as_vregs(IROp op) {
+    return op == IR_CALL || op == IR_METHOD_CALL ||
+           op == IR_INDEX_SET ||
+           op == IR_MAKE_ARRAY || op == IR_MAKE_TUPLE || op == IR_MAKE_MAP;
+}
+
 static int ir_inst_reads(const IRInst *in, IRVReg reads[IR_MAX_CALL_ARGS + 2],
                          IRVReg *def_out) {
     int n = 0;
     *def_out = in->dst;
     if (in->src1 >= 0) reads[n++] = in->src1;
     if (in->src2 >= 0) reads[n++] = in->src2;
-    if (in->op == IR_CALL) {
-        for (int i = 0; i < in->imm; i++)
+    if (op_uses_call_args_as_vregs(in->op)) {
+        for (int i = 0; i < IR_MAX_CALL_ARGS; i++)
             if (in->call_args[i] >= 0) reads[n++] = in->call_args[i];
     }
     return n;
