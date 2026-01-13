@@ -525,16 +525,26 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
     Fixup *fixups = xs_malloc(1024 * sizeof(Fixup));
     int n_fixups = 0, cap_fixups = 1024;
 
-    /* Two shared exit epilogues:
-     *   err_exit -- locals still hold our +1 reference; decref each
-     *               before restoring callee-saved regs.
-     *   ok_exit  -- IR_RETURN already wrote locals back into the
-     *               frame and vm_return_fast disposed of them, so
-     *               skip the decref loop. */
+    /* Three shared exit epilogues:
+     *   err_exit   -- locals still hold our +1 reference; decref each
+     *                 before restoring callee-saved regs.
+     *   ok_exit    -- IR_RETURN already wrote locals back into the
+     *                 frame and vm_return_fast disposed of them, so
+     *                 skip the decref loop.
+     *   deopt_exit -- mid-body bailout for IR_VM_STEP_CF ops. Same
+     *                 writeback as IR_RETURN (local_vregs -> frame->
+     *                 base, decref-ing the old values), then falls into
+     *                 the ok_exit tail. Used when the interpreter
+     *                 step for THROW / TAIL_CALL / AWAIT / YIELD /
+     *                 SPAWN / EFFECT_* / DEFER_* left frame->ip at a
+     *                 place our compiled block structure can no
+     *                 longer follow. */
     size_t *err_exit_patches = xs_malloc(256 * sizeof(size_t));
     int n_err = 0;
     size_t *ok_exit_patches = xs_malloc(256 * sizeof(size_t));
     int n_ok = 0;
+    size_t *deopt_exit_patches = xs_malloc(256 * sizeof(size_t));
+    int n_deopt = 0;
 
     #define ADD_FIXUP(patch_off, tgt_block) do { \
         if (n_fixups == cap_fixups) { \
@@ -552,6 +562,10 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 
     #define ADD_OK_EXIT(patch_off) do { \
         ok_exit_patches[n_ok++] = (patch_off); \
+    } while (0)
+
+    #define ADD_DEOPT_EXIT(patch_off) do { \
+        deopt_exit_patches[n_deopt++] = (patch_off); \
     } while (0)
 
     /* ---- per-op emitters ---- */
@@ -1370,7 +1384,9 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
             case IR_MAKE_ARRAY:
             case IR_MAKE_TUPLE:
             case IR_MAKE_MAP:
-            case IR_METHOD_CALL: {
+            case IR_METHOD_CALL:
+            case IR_VM_STEP:
+            case IR_VM_STEP_CF: {
                 if (in->src1 >= 0) {
                     emit_load_vreg(&em, in->src1, a, RAX);
                     emit_vmsp_push_rax(&em);
@@ -1395,6 +1411,18 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 if (in->dst >= 0) {
                     emit_vmsp_pop_rax(&em);
                     emit_store_vreg(&em, in->dst, a, RAX);
+                }
+                /* For control-flow-changing ops (THROW, TAIL_CALL,
+                 * AWAIT/YIELD/SPAWN, EFFECT_*, DEFER_*) the interpreter
+                 * has already diverted frame->ip to a location our
+                 * emitted block structure doesn't know about, so we
+                 * bail out to the deopt trampoline which writes
+                 * locals back into the frame and returns from
+                 * jit_entry. tier2_run_until then picks up from
+                 * wherever the op left the frame. */
+                if (in->op == IR_VM_STEP_CF) {
+                    size_t j_deopt = emit_jmp_rel32_ph(&em);
+                    ADD_DEOPT_EXIT(j_deopt);
                 }
                 break;
             }
@@ -1720,6 +1748,38 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
     /* eax = [rbp - 48] */
     emit_byte(&em, 0x8B); emit_byte(&em, 0x45); emit_byte(&em, (uint8_t)(int8_t)-48);
 
+    /* deopt_exit: writeback locals (like IR_RETURN does) then emit a
+     * stand-alone epilogue that always returns 0. tier2_run_until
+     * resumes the interpreter from wherever the control-flow op
+     * parked frame->ip. Kept separate from ok_exit because ok_exit's
+     * return-code conversion reads the vm_step_jit rc held in eax,
+     * which our intervening value_decref calls would have clobbered. */
+    size_t deopt_exit_pos = em.pos;
+    for (int si = 0; si < f->n_locals; si++) {
+        if (!(f->local_written && f->local_written[si]))
+            continue;
+        IRVReg lv = f->local_vregs[si];
+        emit_mov_reg_mem_r13(&em, RSI, FRAME_OFF_BASE);
+        emit_mov_reg_mem(&em, RAX, RSI, si * 8);
+        emit_load_vreg(&em, lv, a, RCX);
+        emit_mov_mem_reg(&em, RSI, si * 8, RCX);
+        emit_test_rr(&em, RAX, RAX);
+        size_t jz_skip_dec = emit_jcc_rel32_ph(&em, CC_Z);
+        emit_mov_rr(&em, RDI, RAX);
+        emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+        patch_rel32(&em, jz_skip_dec, em.pos);
+    }
+    /* xor eax, eax */
+    emit_byte(&em, 0x31); emit_byte(&em, 0xC0);
+    emit_add_reg_imm32(&em, RSP, sub_amt);
+    emit_pop_reg(&em, R15);
+    emit_pop_reg(&em, R14);
+    emit_pop_reg(&em, R13);
+    emit_pop_reg(&em, R12);
+    emit_pop_reg(&em, RBX);
+    emit_pop_reg(&em, RBP);
+    emit_ret(&em);
+
     size_t ok_exit_pos = em.pos;
     /* Convert vm_step_jit's tri-state return code to the caller's
      * 0/1 convention (matches tier-1 epilogue): positive/zero rcs
@@ -1749,21 +1809,25 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
         int tb = fixups[i].target_block;
         if (tb < 0 || tb >= f->n_blocks || block_pos[tb] == (size_t)-1) {
             free(block_pos); free(fixups);
-            free(err_exit_patches); free(ok_exit_patches);
+            free(err_exit_patches); free(ok_exit_patches); free(deopt_exit_patches);
             return NULL;
         }
         patch_rel32(&em, fixups[i].patch, block_pos[tb]);
     }
-    /* Error exits walk through the decref loop; ok exits skip it. */
+    /* Error exits walk through the decref loop; ok exits skip it;
+     * deopt exits go through the local-writeback epilogue. */
     for (int i = 0; i < n_err; i++) {
         patch_rel32(&em, err_exit_patches[i], err_exit_pos);
     }
     for (int i = 0; i < n_ok; i++) {
         patch_rel32(&em, ok_exit_patches[i], ok_exit_pos);
     }
+    for (int i = 0; i < n_deopt; i++) {
+        patch_rel32(&em, deopt_exit_patches[i], deopt_exit_pos);
+    }
 
     free(block_pos); free(fixups);
-    free(err_exit_patches); free(ok_exit_patches);
+    free(err_exit_patches); free(ok_exit_patches); free(deopt_exit_patches);
 
     if (em.overflow) return NULL;
 

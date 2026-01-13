@@ -63,6 +63,24 @@ typedef enum {
     IR_MAKE_RANGE, IR_MAKE_ARRAY, IR_MAKE_TUPLE, IR_MAKE_MAP,
     IR_METHOD_CALL,
 
+    /* Generic interpreter-step dispatch. src1/src2/call_args supply
+     * the operands to flush onto vm->sp in order, and dst (if >= 0)
+     * receives the produced result. Used for any bytecode whose
+     * semantics are tied up in the interpreter (e.g. arithmetic dunder
+     * dispatch, class/enum/module construction, trace hooks) but which
+     * still advances frame->ip normally. */
+    IR_VM_STEP,
+
+    /* Same operand flushing as IR_VM_STEP, but emits a post-step check
+     * on frame->ip. If the interpreter's step left frame->ip at any
+     * address other than the natural next bytecode instruction --
+     * THROW unwinding, TAIL_CALL replacing the frame, YIELD / AWAIT /
+     * SPAWN / EFFECT_* suspending -- the emitted code jumps to a deopt
+     * trampoline that writes back local_vregs and returns from the
+     * jit_entry so tier2_run_until / the interpreter can pick up
+     * wherever the op left the frame. */
+    IR_VM_STEP_CF,
+
     /* pure value consumption */
     IR_STORE_LOCAL,  /* frame->base[imm] = src1 (decref old) */
     IR_STORE_UP,     /* *(CL->upvalues[imm]->ptr) = src1, decref old */

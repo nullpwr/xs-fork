@@ -111,6 +111,35 @@ static int op_supported(Opcode op) {
         case OP_JUMP_IF_TRUE:
         case OP_RETURN:
         case OP_CALL:
+        /* Zero-operand ops we can safely dispatch through vm_step_jit
+         * (or, for SWAP, rearrange on the virtual stack). */
+        case OP_SWAP:
+        case OP_CLOSE_UPVALUES:
+        case OP_TRY_BEGIN:
+        case OP_TRY_END:
+        case OP_CATCH:
+        case OP_TRACE_CALL:
+        case OP_TRACE_RETURN:
+        case OP_TRACE_STORE:
+        case OP_TRACE_IO:
+        /* Binary and unary ops with no tier-2 side-effects beyond the
+         * standard operand flush + pop. These dispatch through
+         * vm_step_jit which handles their semantics (including
+         * refcount discipline) entirely inside the interpreter step. */
+        case OP_POW:
+        case OP_CONCAT:
+        case OP_AND:
+        case OP_OR:
+        case OP_FLOOR_DIV:
+        case OP_SPACESHIP:
+        case OP_NULL_COALESCE:
+        case OP_PIPE:
+        case OP_IN:
+        case OP_IS:
+        case OP_MAP_MERGE:
+        case OP_SPREAD:
+        case OP_OPT_CHAIN:
+        case OP_TRY_OP:
             return 1;
         default:
             return 0;
@@ -486,6 +515,123 @@ IRFunc *ralow_lower(XSProto *proto) {
                 vstack_push(&vs, d);
                 break;
             }
+
+            /* OP_SWAP is a pure stack manipulation: exchange the top
+             * two vstack entries. No IR node is emitted because vregs
+             * themselves carry the values; the only change is which
+             * vreg the subsequent consumer will pop. */
+            case OP_SWAP: {
+                if (vs.len >= 2) {
+                    IRVReg t = vs.v[vs.len - 1];
+                    vs.v[vs.len - 1] = vs.v[vs.len - 2];
+                    vs.v[vs.len - 2] = t;
+                }
+                break;
+            }
+
+            /* --- generic dispatch ops: flush operands, run one step
+             * through vm_step_jit, pop result if any. "Safe" variant:
+             * frame->ip advances to the next instruction naturally, so
+             * tier-2 keeps running its compiled block after the call. */
+            case OP_STORE_GLOBAL: {
+                IRVReg v = vstack_pop(&vs);
+                ir_emit(f, IR_VM_STEP, -1, v, -1, 0, pc);
+                break;
+            }
+            case OP_POW:
+            case OP_CONCAT:
+            case OP_AND:
+            case OP_OR:
+            case OP_FLOOR_DIV:
+            case OP_SPACESHIP:
+            case OP_NULL_COALESCE:
+            case OP_PIPE:
+            case OP_IN:
+            case OP_IS:
+            case OP_MAP_MERGE:
+            case OP_ITER_GET: {
+                IRVReg b = vstack_pop(&vs);
+                IRVReg a = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_VM_STEP, d, a, b, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_SPREAD:
+            case OP_ITER_LEN:
+            case OP_OPT_CHAIN:
+            case OP_TRY_OP: {
+                IRVReg a = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_VM_STEP, d, a, -1, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_CLOSE_UPVALUES:
+            case OP_TRY_BEGIN:
+            case OP_TRY_END:
+            case OP_CATCH:
+            case OP_TRACE_CALL:
+            case OP_TRACE_RETURN:
+            case OP_TRACE_STORE:
+            case OP_TRACE_IO: {
+                /* Zero operands, no produced value. The interpreter
+                 * reads whatever state it needs (PEEK, try_stack,
+                 * tracer) without our involvement. */
+                ir_emit(f, IR_VM_STEP, -1, -1, -1, 0, pc);
+                break;
+            }
+
+            /* --- control-flow dispatch: after running the step, we
+             * exit tier-2 since frame->ip will have changed (throw
+             * unwind, tail-call frame replace, await/yield suspend,
+             * effect handler invocation, defer jump). tier2_run_until
+             * or the interpreter resumes from wherever the op left
+             * the frame. */
+            case OP_THROW:
+            case OP_AWAIT:
+            case OP_YIELD:
+            case OP_SPAWN: {
+                IRVReg a = vstack_pop(&vs);
+                ir_emit(f, IR_VM_STEP_CF, -1, a, -1, 0, pc);
+                break;
+            }
+            case OP_TAIL_CALL: {
+                int argc = c;
+                IRVReg args[IR_MAX_CALL_ARGS];
+                for (int i = argc - 1; i >= 0; i--) args[i] = vstack_pop(&vs);
+                IRVReg callee = vstack_pop(&vs);
+                int idx = ir_emit(f, IR_VM_STEP_CF, -1, callee, -1, argc, pc);
+                for (int i = 0; i < argc; i++) f->insts[idx].call_args[i] = args[i];
+                /* Tail call never returns to us; no push to vstack. */
+                break;
+            }
+            case OP_EFFECT_CALL: {
+                int argc = (int)INSTR_A(ins);
+                IRVReg args[IR_MAX_CALL_ARGS];
+                for (int i = argc - 1; i >= 0; i--) args[i] = vstack_pop(&vs);
+                int idx = ir_emit(f, IR_VM_STEP_CF, -1, -1, -1, argc, pc);
+                for (int i = 0; i < argc; i++) f->insts[idx].call_args[i] = args[i];
+                break;
+            }
+            case OP_EFFECT_RESUME: {
+                IRVReg a = vstack_pop(&vs);
+                ir_emit(f, IR_VM_STEP_CF, -1, a, -1, 0, pc);
+                break;
+            }
+            case OP_EFFECT_HANDLE: {
+                /* Handler install: no operands consumed directly by
+                 * this opcode itself; internals set up via handler_info. */
+                ir_emit(f, IR_VM_STEP_CF, -1, -1, -1, 0, pc);
+                break;
+            }
+            case OP_DEFER_PUSH:
+            case OP_DEFER_RUN: {
+                /* Both alter frame->ip -- DEFER_PUSH jumps past the
+                 * deferred block, DEFER_RUN jumps back into it. */
+                ir_emit(f, IR_VM_STEP_CF, -1, -1, -1, 0, pc);
+                break;
+            }
             default:
                 /* Shouldn't reach here -- op_supported() filtered these. */
                 free(starts);
@@ -537,6 +683,36 @@ IRFunc *ralow_lower(XSProto *proto) {
         IRInst *in = &f->insts[i];
         if (in->op == IR_STORE_LOCAL && in->imm >= 0 && in->imm < f->n_locals)
             f->local_written[in->imm] = 1;
+    }
+
+    /* Tier-2 runs locals through a shadow model: local_vreg holds the
+     * authoritative current value, while frame->base[slot] keeps its
+     * original until IR_RETURN writes it back. That breaks
+     * OP_MAKE_CLOSURE: a closure capturing a local by-reference
+     * (is_local=1) takes the address &frame->base[slot], and any later
+     * dereference -- through the closure while the enclosing frame is
+     * still alive -- sees the stale value rather than the one in
+     * local_vreg. Bail tier-2 whenever this combination appears and
+     * let the interpreter (which has no shadow) handle the frame. */
+    for (int i = 0; i < f->n_insts; i++) {
+        if (f->insts[i].op != IR_MAKE_CLOSURE) continue;
+        int ci = f->insts[i].imm;
+        if (ci < 0 || ci >= proto->chunk.nconsts) continue;
+        Value *nv = proto->chunk.consts[ci];
+        if (!nv || VAL_TAG(nv) != XS_INT) continue;
+        int inner_idx = (int)VAL_INT(nv);
+        if (inner_idx < 0 || inner_idx >= proto->n_inner) continue;
+        XSProto *inner_proto = proto->inner[inner_idx];
+        if (!inner_proto) continue;
+        for (int u = 0; u < inner_proto->n_upvalues; u++) {
+            UVDesc *d = &inner_proto->uv_descs[u];
+            if (!d->is_local) continue;
+            if (d->index < 0 || d->index >= f->n_locals) continue;
+            if (f->local_written && f->local_written[d->index]) {
+                irfunc_free(f);
+                return NULL;
+            }
+        }
     }
 
     /* Attempt one level of self-recursive inlining. Controlled by
