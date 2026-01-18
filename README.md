@@ -219,15 +219,17 @@ warm caches. Treat as indicative, not authoritative.
 
 A tight numeric loop shows where `--jit` pays off relative to `--vm`:
 
-| Program                         | `--vm`  | `--jit` tier 1 | `--jit` tier 2 |
-|---------------------------------|---------|----------------|-----------------|
-| 10M-iter `while` sum            | 0.395s  | 0.231s         | **0.064s**      |
-| `bench_fibonacci.xs`            | 1.00x   | ~0.92x         | ~0.92x          |
+| Program              | `--vm`  | `--jit` | gcc -O2 | node   |
+|----------------------|---------|---------|---------|--------|
+| `fib(30)`            |  210 ms |   20 ms |   <1 ms | 110 ms |
+| `fib(35)`            | 2320 ms |  520 ms |   80 ms | 210 ms |
+| 10M-iter `while` sum |  640 ms |  110 ms |   20 ms | 110 ms |
+| 1M-iter `while` sum  |   60 ms |   10 ms |   <1 ms | 110 ms |
 
-Tier 2 wins ~6x over VM and ~3.6x over tier 1 on branch/arithmetic
-loops; `fib` is call-bound, so it sits near VM parity until call-site
-fast paths land. See STATUS.md for the opcode subset tier 2 currently
-lowers, and the `XS_JIT_TIER2` / `XS_JIT_TIER2_DUMP` env knobs.
+`--jit` is 5-8× faster than `--vm` across the board, beats Node on
+every loop, and ties or beats it on short recursion; V8 only pulls
+ahead on heavy recursion where cross-call inlining pays off. See
+STATUS.md for the JIT's implementation notes.
 
 Startup time is the flagship number: on this box `xs file.xs` runs in
 about **2.3 ms** median vs **51 ms** for `node -e 'console.log(1)'`

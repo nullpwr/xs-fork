@@ -95,69 +95,51 @@ The VM test (`test_vm.xs`) is run through `--vm` automatically by `tests/run.sh`
 
 ## JIT Compiler
 
-x86-64 only. Two tiers, both opt-in via `--jit`:
+Opt-in via `--jit`. Single register-allocating tier, x86-64 and
+aarch64. Bytecode is lowered to a small linear IR (`src/jit/ra_ir.h`),
+basic blocks are split, per-block liveness is computed
+(`src/jit/ra_live.c`), a linear-scan allocator (`src/jit/ra_alloc.c`)
+maps virtual registers onto three callee-saved regs, and a per-arch
+code generator emits native code with SMI fast paths for arithmetic
+and compares, an XMM fast path for boxed `XS_FLOAT` binops, an inlined
+monomorphic IC for `LOAD_GLOBAL`, inline closure-upvalue access, a
+fused compare-and-branch peephole, and a refcount-pair elimination
+pass that drops redundant incref/decref around dead produced values.
+Recursive calls stay in native code through a small dispatcher
+(`tier2_run_until`) that re-enters compiled protos via the
+`XSProto.jit_entry` cache.
 
-**Tier 1** is a template/copy-patch JIT over the bytecode dispatch: it
-emits a specialised version of the VM inner loop, but every opcode still
-fans out to a helper call. This is what you get for anything the newer
-tier 2 can't handle.
-
-**Tier 2** is a register-allocating specialiser: bytecode is lowered to
-a small linear IR (`src/jit/ra_ir.h`), basic blocks are split, per-block
-liveness is computed (`src/jit/ra_live.c`), a linear-scan allocator
-(`src/jit/ra_alloc.c`) maps virtual registers onto `rbx`, `r14`, and
-`r15`, and `src/jit/ra_codegen.c` emits x86-64 with SMI fast paths for
-arithmetic/compares, register-resident locals (no stack chase for
-`LOAD_LOCAL` on read-only slots), and inline truthy/decref in the
-conditional-branch path. Recursive calls stay in native code through
-a small dispatcher (`tier2_run_until`) that re-enters compiled inner
-protos via the new `XSProto.jit_entry` cache.
-
-Tier 2 supports a strict subset of opcodes; a proto that steps outside
-it transparently falls back to tier 1. The current set (from
-`op_supported` in `src/jit/ra_lower.c`):
-
-```
-NOP PUSH_CONST PUSH_NULL PUSH_TRUE PUSH_FALSE POP DUP
-LOAD_LOCAL STORE_LOCAL LOAD_GLOBAL
-ADD SUB MUL LT GT LTE GTE EQ NEQ
-JUMP LOOP JUMP_IF_FALSE JUMP_IF_TRUE
-RETURN CALL
-```
-
-Anything else (string concat, division, map/array ops, MAKE_CLOSURE,
-etc.) lands in tier 1 or the interpreter.
+Supported opcodes (from `op_supported` in `src/jit/ra_lower.c`): the
+full bytecode set except generators and `OP_STORE_GLOBAL`-writes of
+locals captured by inner closures (shadow-model guard). Anything that
+falls outside the subset drops the whole proto back to the bytecode
+VM; no template-JIT middle tier.
 
 | Feature | Status |
 |---------|--------|
-| Tier-1 template JIT (x86-64) | works |
-| Tier-2 IR + linear-scan allocator | works |
+| Register-allocating JIT (x86-64) | works |
+| Register-allocating JIT (aarch64) | works |
 | SMI fast paths for arithmetic and compares | works |
-| Tier-2 recursive calls via `jit_entry` cache | works |
-| Opcodes outside the supported subset | fall back to tier 1 |
-| ARM64 backend | stub only (`src/jit/arm64.c`) |
+| XMM fast path for boxed floats | works |
+| Inlined monomorphic IC for LOAD_GLOBAL | works |
+| Closure upvalue ops in native | works |
+| Recursive call re-entry via `jit_entry` | works |
+| Refcount-pair peephole | works |
+| Control-flow ops (THROW, TAIL_CALL, AWAIT, YIELD, SPAWN, EFFECT_*, DEFER_*) | deopt trampoline |
 
-Environment knobs:
+Observed numbers on a Linux x86-64 box:
 
-- `XS_JIT_TIER2=0` / `n` / `N` disables tier 2 and forces everything
-  through tier 1. Defaults on.
-- `XS_JIT_TIER2_DUMP=1` writes the emitted tier-2 code buffer to
-  `/tmp/tier2.bin` and logs `[tier2] <nbytes>B at <addr> (proto=... )`
-  for each successful compile. Useful for `objdump -D -b binary -m
-  i386:x86-64 /tmp/tier2.bin`.
+| Workload              | `--vm`  | `--jit` | gcc -O2 | node  |
+|-----------------------|---------|---------|---------|-------|
+| fib(30)               |  210 ms |   20 ms |   <1 ms | 110 ms |
+| fib(35)               | 2320 ms |  520 ms |   80 ms | 210 ms |
+| 10M-iter `while` sum  |  640 ms |  110 ms |   20 ms | 110 ms |
+| 1M-iter `while` sum   |   60 ms |   10 ms |   <1 ms | 110 ms |
 
-Tier 2 was added recently; observed numbers on a Linux x86-64 box:
-
-| Workload | VM | `--jit` tier 1 | `--jit` tier 2 |
-|----------|-----|----------------|-----------------|
-| 10M-iter `while` sum | 0.395s | 0.231s | 0.064s |
-| `bench_fibonacci.xs` | 1.00x | ~0.92x | ~0.92x |
-
-Tight arithmetic/branch loops see a 3-6x win over VM; call-bound
-workloads like fib are currently call-dispatch-limited and sit roughly
-at parity (there is follow-up work to land call fast paths). All 47
-test files pass with tier 2 enabled (`bash tests/run.sh`), and all 7
-test layers pass via `bash tests/run-all.sh`.
+Tier-2 is 5–8× faster than `--vm`, beats Node on every loop, and
+matches or beats Node on short recursion; the V8 gap only opens up on
+heavy recursion where cross-call inlining pays off. All 47 test
+files pass (`bash tests/run.sh`).
 
 ## C Transpiler
 

@@ -70,13 +70,15 @@ xs --backend jit program.xs
 
 - `interp`: tree-walker interpreter (default)
 - `vm`: bytecode VM
-- `jit`: JIT compilation, x86-64 only. Two tiers: a template JIT over
-  the VM dispatch and a register-allocating specialiser (tier 2) that
-  lowers a subset of opcodes to x86-64 with SMI fast paths. The tier
-  choice is automatic per proto; tier 2 falls through to tier 1 for
-  unsupported opcodes. Tier 2 is gated by the `XS_JIT_TIER2` env var
-  (defaults on; set to `0`, `n`, or `N` to disable) and dumps emitted
-  code to `/tmp/tier2.bin` when `XS_JIT_TIER2_DUMP` is set. Requires
+- `jit`: JIT compilation on x86-64 and aarch64. A register-allocating
+  specialiser lowers bytecode through a small linear IR, runs liveness
+  and linear-scan allocation over three callee-saved regs, and emits
+  native code with SMI fast paths for integer arithmetic/compares, an
+  XMM fast path for boxed floats, an inlined monomorphic inline cache
+  for `LOAD_GLOBAL`, inline closure-upvalue access, a fused compare-
+  and-branch peephole, and a refcount-pair elimination pass. Protos
+  whose bytecode steps outside the supported subset drop to the
+  bytecode VM; there is no template-JIT middle tier. Requires
   `XSC_ENABLE_JIT` at build time.
 
 ---
@@ -652,8 +654,9 @@ These flags work with any subcommand or when running scripts directly.
 | Variable | Effect |
 |----------|--------|
 | `XS_MAX_DEPTH` | Interpreter call-depth cap (default 500). On overflow the interpreter throws a catchable `StackOverflow`. The VM has its own growable stack and ignores this. |
-| `XS_JIT_TIER2` | Tier-2 (register-allocating) JIT toggle. Defaults on; set to `0`, `n`, or `N` to force all protos through the tier-1 template JIT. |
-| `XS_JIT_TIER2_DUMP` | If set (any value), every successful tier-2 compile writes the emitted x86-64 buffer to `/tmp/tier2.bin` and prints a `[tier2]` summary line to stderr. |
+| `XS_JIT_CMPBR` | Compare+branch fusion peephole; defaults on. Set to `0`, `n`, or `N` to disable. |
+| `XS_JIT_INLINE` | Self-recursive inliner; defaults on. Same disable spelling as above. |
+| `XS_JIT_REFOPT` | Refcount-pair elimination peephole; defaults on. |
 
 **Flag placement:** Global flags like `--no-color`, `--vm`, and `--check` can
 appear anywhere in the argument list: before or after the filename or
