@@ -5,6 +5,7 @@
 #include "core/parser.h"
 #include "runtime/interp.h"
 #include "core/env.h"
+#include "core/limits.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +90,31 @@ void xs_context_free(XSContext *ctx) {
     if (!ctx) return;
     interp_free(ctx->interp);
     free(ctx);
+}
+
+void xs_set_instruction_limit(XSContext *ctx, uint64_t budget) {
+    (void)ctx;
+    xs_limits_set_instructions(budget);
+}
+
+void xs_set_wall_time_limit(XSContext *ctx, uint64_t ms) {
+    (void)ctx;
+    xs_limits_set_wall_time_ms(ms);
+}
+
+void xs_set_memory_limit(XSContext *ctx, uint64_t bytes) {
+    (void)ctx;
+    xs_limits_set_memory_bytes((size_t)bytes);
+}
+
+uint64_t xs_instructions_used(XSContext *ctx) {
+    (void)ctx;
+    return xs_limits_get_instructions_used();
+}
+
+uint64_t xs_rss_bytes(XSContext *ctx) {
+    (void)ctx;
+    return (uint64_t)xs_limits_get_memory_rss();
 }
 
 static XSResult run_source(XSContext *ctx, const char *src, const char *fname) {

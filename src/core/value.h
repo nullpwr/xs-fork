@@ -60,5 +60,6 @@ XSFunc *func_new_ex(const char *name, Node **params, int nparams, Node *body, En
 void    func_free(XSFunc *fn);
 
 void value_init_singletons(void);
+void value_free_singletons(void);
 
 #endif /* VALUE_H */

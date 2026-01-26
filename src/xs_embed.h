@@ -105,6 +105,19 @@ const char *xs_result_error(XSResult r);
 
 void xs_value_release(XSValue *v);
 
+/* ---- resource limits ----
+ *
+ * Caps apply to every subsequent xs_eval / xs_call on the current thread
+ * and are reset per-invocation. A value of 0 means "no limit". A
+ * program that exceeds its budget raises a catchable ResourceLimit
+ * runtime error. */
+
+void     xs_set_instruction_limit(XSContext *ctx, uint64_t budget);
+void     xs_set_wall_time_limit(XSContext *ctx, uint64_t ms);
+void     xs_set_memory_limit(XSContext *ctx, uint64_t bytes);
+uint64_t xs_instructions_used(XSContext *ctx);
+uint64_t xs_rss_bytes(XSContext *ctx);
+
 /* ---- legacy API (kept for compat) ---- */
 
 typedef struct XSState   XSState;

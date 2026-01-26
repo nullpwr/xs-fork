@@ -15,6 +15,11 @@
 #define VC_EXTRA_LEAN
 #include <windows.h>
 #include <time.h>
+/* Pull in MinGW's unistd.h first so its usleep/getcwd/etc. prototypes are
+ * visible before we start defining shim macros below. Without this, a
+ * later `#include <unistd.h>` in a TU (e.g. main.c) would see the usleep
+ * macro and mangle the prototype into a syntax error. */
+#include <unistd.h>
 
 #ifndef CLOCK_REALTIME
 #  define CLOCK_REALTIME  0

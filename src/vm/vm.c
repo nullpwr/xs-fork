@@ -3,6 +3,7 @@
 #include "core/value.h"
 #include "core/xs_bigint.h"
 #include "core/utf8.h"
+#include "core/limits.h"
 #include "runtime/builtins.h"
 #include "runtime/error.h"
 #include "optimizer/inline_cache.h"
@@ -1276,6 +1277,7 @@ static Value *vm_try_map_op(VM *vm, Value *a, const char *op, Value *b) {
 }
 
 int vm_run(VM *vm, XSProto *proto) {
+    xs_limits_reset();
     g_vm_for_invoke = vm;
     g_plugin_vm = vm;
     XSClosure *top_cl    = xs_malloc(sizeof *top_cl);
@@ -1306,6 +1308,11 @@ int vm_run(VM *vm, XSProto *proto) {
 static int vm_dispatch(VM *vm, int stop_frame) {
     CallFrame *frame = FRAME;
     for (;;) {
+        /* Per-opcode resource-limit tick. Bails out through the same
+           pending-throw path so try/catch can catch it. */
+        if (xs_limits_tick()) {
+            xs_limits_throw_if_exceeded();
+        }
         /* If xs_runtime_error queued a throw (e.g. from an arithmetic
            op or builtin), drain it before fetching the next opcode and
            run the same unwind logic OP_THROW would. */

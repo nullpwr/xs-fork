@@ -11,6 +11,8 @@
 #include "core/ast.h"
 #include "core/lexer.h"
 #include "core/parser.h"
+#include "core/limits.h"
+#include "core/gc.h"
 #include "diagnostic/diagnostic.h"
 #include "runtime/interp.h"
 #include "runtime/error.h"
@@ -86,7 +88,6 @@
 #include "jit/jit.h"
 #endif
 
-#include "core/gc.h"
 #include "optimizer/optimizer.h"
 #include "ir/ir.h"
 
@@ -780,6 +781,15 @@ static void sigint_handler(int sig) {
     exit(130);
 }
 
+static void xs_shutdown(void) {
+    /* Release process-lifetime allocations so leak checkers don't
+       flag the pinned value singletons, the GC nodemap, and the int
+       recycler freelist. Order matters: drop GC side-tables before
+       freeing the singletons they may point at. */
+    gc_shutdown();
+    value_free_singletons();
+}
+
 int main(int argc, char **argv) {
     signal(SIGINT, sigint_handler);
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -789,6 +799,7 @@ int main(int argc, char **argv) {
     /* Initialize the global interpreter lock; main thread holds it for
        the duration. spawned threads acquire on entry. */
     xs_gil_init();
+    atexit(xs_shutdown);
     int do_check    = 0;
     int lenient     = 0;
     int strict      = 0;
@@ -1917,6 +1928,26 @@ test_again: ;
         else if (strcmp(argv[i], "--gc-debug") == 0) gc_set_debug(1);
         else if (strcmp(argv[i], "--optimize") == 0) do_optimize = 1;
         else if (strcmp(argv[i], "--watch")    == 0) do_watch = 1;
+        else if (strcmp(argv[i], "--instr-limit") == 0 && i+1 < argc) {
+            xs_limits_set_instructions(strtoull(argv[++i], NULL, 10));
+        }
+        else if (strcmp(argv[i], "--time-limit") == 0 && i+1 < argc) {
+            xs_limits_set_wall_time_ms(strtoull(argv[++i], NULL, 10));
+        }
+        else if (strcmp(argv[i], "--memory-limit") == 0 && i+1 < argc) {
+            /* Parse with optional K/M/G suffix. */
+            char *end = NULL;
+            unsigned long long v = strtoull(argv[++i], &end, 10);
+            if (end && *end) {
+                switch (*end) {
+                    case 'k': case 'K': v *= 1024ULL; break;
+                    case 'm': case 'M': v *= 1024ULL*1024ULL; break;
+                    case 'g': case 'G': v *= 1024ULL*1024ULL*1024ULL; break;
+                    default: break;
+                }
+            }
+            xs_limits_set_memory_bytes((size_t)v);
+        }
         else if (strcmp(argv[i], "run")        == 0) { /* skip */ }
         else if (strcmp(argv[i], "--backend")  == 0 && i+1 < argc) {
             const char *be = argv[++i];

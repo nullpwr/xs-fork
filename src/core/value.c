@@ -70,6 +70,21 @@ void value_init_singletons(void) {
     XS_FALSE_VAL->refcount = 1000000;
 }
 
+/* Release the pinned singletons and drain the int-value freelist.
+   Called at process shutdown so leak checkers don't flag intentionally
+   long-lived values. */
+void value_free_singletons(void) {
+    if (XS_NULL_VAL)  { free(XS_NULL_VAL);  XS_NULL_VAL  = NULL; }
+    if (XS_TRUE_VAL)  { free(XS_TRUE_VAL);  XS_TRUE_VAL  = NULL; }
+    if (XS_FALSE_VAL) { free(XS_FALSE_VAL); XS_FALSE_VAL = NULL; }
+    while (g_val_freelist) {
+        Value *next = (Value *)g_val_freelist->fn;
+        free(g_val_freelist);
+        g_val_freelist = next;
+    }
+    g_val_freelist_len = 0;
+}
+
 Value *xs_null(void) { return value_incref(XS_NULL_VAL); }
 Value *xs_bool(int b) { return value_incref(b ? XS_TRUE_VAL : XS_FALSE_VAL); }
 

@@ -54,6 +54,7 @@ typedef struct {
 #define GC_NUM_GENERATIONS 3
 
 void     gc_init(void);
+void     gc_shutdown(void);
 void     gc_track(Value *v);
 void     gc_untrack(Value *v);
 int      gc_collect(void);

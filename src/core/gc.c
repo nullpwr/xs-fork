@@ -167,6 +167,45 @@ void gc_init(void) {
     memset(&gc_stats, 0, sizeof(gc_stats));
 }
 
+/* Release all process-lifetime GC state so leak checkers stop flagging
+   the GC internals. Called from main at exit; safe to call even if
+   gc_init was never invoked. */
+void gc_shutdown(void) {
+    /* free any lingering tracked GCNodes */
+    for (int g = 0; g < GC_NUM_GENERATIONS; g++) {
+        GCNode *node = gc_gens[g].head.gc_next;
+        while (node && node != &gc_gens[g].head) {
+            GCNode *next = node->gc_next;
+            free(node);
+            node = next;
+        }
+        gc_gens[g].head.gc_next = &gc_gens[g].head;
+        gc_gens[g].head.gc_prev = &gc_gens[g].head;
+        gc_gens[g].count = 0;
+    }
+
+    /* free finalizer registry */
+    while (finalizer_head) {
+        FinalizerEntry *e = finalizer_head;
+        finalizer_head = e->next;
+        free(e);
+    }
+
+    /* free weakref chain */
+    while (weakref_head) {
+        WeakRef *w = weakref_head;
+        weakref_head = w->next;
+        free(w);
+    }
+
+    /* free the Value*->GCNode* map */
+    if (node_map.keys) { free(node_map.keys); node_map.keys = NULL; }
+    if (node_map.vals) { free(node_map.vals); node_map.vals = NULL; }
+    node_map.cap = 0;
+    node_map.len = 0;
+    gc_initialized = 0;
+}
+
 /* ensure init has run (lazy) */
 static void ensure_init(void) {
     if (!gc_initialized) gc_init();

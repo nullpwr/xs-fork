@@ -330,8 +330,11 @@ static int strtab_add_with_len(StringTable *st, const char *s, int *out_len) {
 #define RT_VAL_NULLCOAL  (NUM_IMPORTS + 48)
 #define RT_I32_TO_STR    (NUM_IMPORTS + 49)
 #define RT_STR_LEN       (NUM_IMPORTS + 50)
+#define RT_STR_STARTS    (NUM_IMPORTS + 51)
+#define RT_STR_ENDS      (NUM_IMPORTS + 52)
+#define RT_STR_CONTAINS  (NUM_IMPORTS + 53)
 
-#define NUM_RT_FUNCS     51
+#define NUM_RT_FUNCS     54
 #define USER_FUNC_BASE   (NUM_IMPORTS + NUM_RT_FUNCS)
 
 /* ========================================================================
@@ -1452,10 +1455,8 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         }
         if (strcmp(method, "contains") == 0 && nargs == 1) {
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
-            buf_byte(code, OP_DROP);
-            emit_bool_val(code, 0); /* stub: always false */
+            emit_call(code, RT_STR_CONTAINS);
             break;
         }
         if (strcmp(method, "split") == 0 && nargs == 1) {
@@ -1475,18 +1476,14 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         }
         if (strcmp(method, "starts_with") == 0 && nargs == 1) {
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
-            buf_byte(code, OP_DROP);
-            emit_bool_val(code, 0);
+            emit_call(code, RT_STR_STARTS);
             break;
         }
         if (strcmp(method, "ends_with") == 0 && nargs == 1) {
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
-            buf_byte(code, OP_DROP);
-            emit_bool_val(code, 0);
+            emit_call(code, RT_STR_ENDS);
             break;
         }
         if (strcmp(method, "map") == 0 && nargs == 1) {
@@ -2452,7 +2449,27 @@ static void compile_pattern_cond(Node *pat, int subject_local, WasmBuf *code,
         emit_call(code, RT_VAL_TAG);
         emit_i32(code, TAG_STRUCT);
         buf_byte(code, OP_I32_EQ);
-        /* TODO: check type name if pat->pat_struct.path is set */
+
+        /* If the pattern names a specific struct, compare stored name */
+        if (pat->pat_struct.path && pat->pat_struct.path[0]) {
+            /* Load struct data_ptr, then name_str_val at offset 4 */
+            emit_local_get(code, subject_local);
+            emit_call(code, RT_VAL_I32);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD);
+            buf_leb128_u(code, 2);
+            buf_leb128_u(code, 0);
+            /* Expected name as a fresh string Value */
+            int nl = 0;
+            int noff = strtab_add_with_len(ctx->strtab, pat->pat_struct.path, &nl);
+            emit_i32(code, noff);
+            emit_i32(code, nl);
+            emit_call(code, RT_STR_NEW);
+            emit_call(code, RT_VAL_EQ);
+            emit_call(code, RT_VAL_TRUTHY);
+            buf_byte(code, OP_I32_AND);
+        }
         /* For each field pattern, check the field value */
         for (int i = 0; i < pat->pat_struct.fields.len; i++) {
             if (pat->pat_struct.fields.items[i].val) {
@@ -2599,11 +2616,63 @@ static void compile_pattern_bindings(Node *pat, int subject_local, WasmBuf *code
             emit_local_set(code, el);
             compile_pattern_bindings(pat->pat_slice.elems.items[i], el, code, locals, ctx);
         }
-        /* rest binding: collect remaining elements */
+        /* rest binding: collect remaining elements into a fresh array */
         if (pat->pat_slice.rest) {
             int rest_idx = locals_ensure(locals, pat->pat_slice.rest);
-            /* TODO: slice remaining elements into new array */
+            int nfixed = pat->pat_slice.elems.len;
+            int ri  = locals_add(locals, "__rst_i");
+            int rn  = locals_add(locals, "__rst_n");
+            int ra  = locals_add(locals, "__rst_a");
+            int rel = locals_add(locals, "__rst_e");
+
+            /* rn = subject.len */
+            emit_local_get(code, subject_local);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, rn);
+
+            /* ra = [] */
             emit_call(code, RT_ARR_NEW);
+            emit_local_set(code, ra);
+
+            /* i = nfixed */
+            emit_i32(code, nfixed);
+            emit_local_set(code, ri);
+
+            buf_byte(code, OP_BLOCK);
+            buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);
+            buf_byte(code, WASM_TYPE_VOID);
+
+            /* if (i >= rn) break */
+            emit_local_get(code, ri);
+            emit_local_get(code, rn);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF);
+            buf_leb128_u(code, 1);
+
+            /* el = subject[i]; ra.push(el) */
+            emit_local_get(code, subject_local);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, ri);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_local_set(code, rel);
+            emit_local_get(code, ra);
+            emit_local_get(code, rel);
+            emit_call(code, RT_ARR_PUSH);
+
+            /* i++ */
+            emit_local_get(code, ri);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, ri);
+            buf_byte(code, OP_BR);
+            buf_leb128_u(code, 0);
+
+            buf_byte(code, OP_END); /* loop */
+            buf_byte(code, OP_END); /* block */
+
+            emit_local_get(code, ra);
             emit_local_set(code, rest_idx);
         }
         break;
@@ -4514,8 +4583,8 @@ static void emit_rt_val_field_set(WasmBuf *body) {
 /* $struct_new(name_str, n_fields) -> i32 (struct value)
    Allocate struct with space for n_fields. */
 static void emit_rt_struct_new(WasmBuf *body) {
-    /* local 0 = name_str_val, local 1 = n_fields */
-    /* Allocate: 4 (n_fields) + 4 (name_ptr) + n_fields * 12 (name+value pairs) */
+    /* local 0 = name_str_val, local 1 = n_fields.
+       Layout: [n_fields i32][name_str_val i32][fields...] */
     emit_local_get(body, 1);
     emit_i32(body, 4);
     buf_byte(body, OP_I32_MUL);
@@ -4525,6 +4594,14 @@ static void emit_rt_struct_new(WasmBuf *body) {
     int dp = 2;
     emit_local_tee(body, dp);
     emit_local_get(body, 1);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2);
+    buf_leb128_u(body, 0);
+    /* store name_str_val at offset 4 so pattern matching can recover it */
+    emit_local_get(body, dp);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, 0);
     buf_byte(body, OP_I32_STORE);
     buf_leb128_u(body, 2);
     buf_leb128_u(body, 0);
@@ -4774,6 +4851,249 @@ static void emit_rt_str_len(WasmBuf *body) {
     emit_call(body, RT_VAL_NEW);
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
+}
+
+/* Helper: push the raw char* data pointer for a STRING value on the stack.
+   The header stores data_ptr at offset 4 via RT_VAL_I32. */
+static void emit_get_str_ptr_local(WasmBuf *body, int val_local, int ptr_out) {
+    emit_local_get(body, val_local);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ptr_out);
+}
+
+/* Helper: push the length i32 for a STRING value on the stack (stored at
+   val_ptr + 8 as a bare i32). */
+static void emit_get_str_len_local(WasmBuf *body, int val_local, int len_out) {
+    emit_local_get(body, val_local);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2);
+    buf_leb128_u(body, 0);
+    emit_local_set(body, len_out);
+}
+
+/* Emit a byte-compare loop that sets `mismatch_out` to 1 if any of the
+   first `count_local` bytes differ between (aptr+aoff) and bptr. The
+   offsets are current i32s on the stack (consumed). */
+static void emit_memcmp_loop(WasmBuf *body,
+                             int a_base_local, int a_off_local,
+                             int b_base_local,
+                             int count_local,
+                             int i_local, int mismatch_out) {
+    /* mismatch_out = 0 */
+    emit_i32(body, 0);
+    emit_local_set(body, mismatch_out);
+
+    /* i = 0 */
+    emit_i32(body, 0);
+    emit_local_set(body, i_local);
+
+    buf_byte(body, OP_BLOCK);
+    buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);
+    buf_byte(body, WASM_TYPE_VOID);
+
+    /* if (i >= count) break */
+    emit_local_get(body, i_local);
+    emit_local_get(body, count_local);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF);
+    buf_leb128_u(body, 1);
+
+    /* a_byte = mem[a_base + a_off + i] */
+    emit_local_get(body, a_base_local);
+    emit_local_get(body, a_off_local);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i_local);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0);
+    buf_leb128_u(body, 0);
+
+    /* b_byte = mem[b_base + i] */
+    emit_local_get(body, b_base_local);
+    emit_local_get(body, i_local);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0);
+    buf_leb128_u(body, 0);
+
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_i32(body, 1);
+    emit_local_set(body, mismatch_out);
+    buf_byte(body, OP_BR);
+    buf_leb128_u(body, 2); /* break outer block */
+    buf_byte(body, OP_END);
+
+    /* i++ */
+    emit_local_get(body, i_local);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i_local);
+    buf_byte(body, OP_BR);
+    buf_leb128_u(body, 0);
+
+    buf_byte(body, OP_END); /* loop */
+    buf_byte(body, OP_END); /* block */
+}
+
+/* $str_starts(a: i32, b: i32) -> i32
+   Returns a bool Value indicating whether string `a` begins with
+   string `b`. Non-string inputs yield false. */
+static void emit_rt_str_starts_with(WasmBuf *body) {
+    /* locals: 0=a, 1=b, 2=a_ptr, 3=a_len, 4=b_ptr, 5=b_len, 6=i, 7=mismatch */
+    const int a_ptr = 2, a_len = 3, b_ptr = 4, b_len = 5, i = 6, miss = 7;
+
+    emit_get_str_ptr_local(body, 0, a_ptr);
+    emit_get_str_len_local(body, 0, a_len);
+    emit_get_str_ptr_local(body, 1, b_ptr);
+    emit_get_str_len_local(body, 1, b_len);
+
+    /* if (b_len > a_len) return false */
+    emit_local_get(body, b_len);
+    emit_local_get(body, a_len);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_BOOL);
+    emit_i32(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+
+    /* Compare b_len bytes starting at offset 0 in a. */
+    emit_i32(body, 0);
+    emit_local_set(body, i); /* reuse i as a_off=0 temporarily */
+    emit_memcmp_loop(body, a_ptr, i, b_ptr, b_len, i, miss);
+
+    /* result = !mismatch */
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, miss);
+    buf_byte(body, OP_I32_EQZ);
+    emit_call(body, RT_VAL_NEW);
+
+    buf_byte(body, OP_END);
+}
+
+/* $str_ends(a, b) -> i32  (bool Value)
+   True iff a ends with b. */
+static void emit_rt_str_ends_with(WasmBuf *body) {
+    const int a_ptr = 2, a_len = 3, b_ptr = 4, b_len = 5, i = 6, miss = 7, aoff = 8;
+
+    emit_get_str_ptr_local(body, 0, a_ptr);
+    emit_get_str_len_local(body, 0, a_len);
+    emit_get_str_ptr_local(body, 1, b_ptr);
+    emit_get_str_len_local(body, 1, b_len);
+
+    emit_local_get(body, b_len);
+    emit_local_get(body, a_len);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_BOOL);
+    emit_i32(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+
+    /* aoff = a_len - b_len */
+    emit_local_get(body, a_len);
+    emit_local_get(body, b_len);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, aoff);
+
+    emit_memcmp_loop(body, a_ptr, aoff, b_ptr, b_len, i, miss);
+
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, miss);
+    buf_byte(body, OP_I32_EQZ);
+    emit_call(body, RT_VAL_NEW);
+
+    buf_byte(body, OP_END);
+}
+
+/* $str_contains(a, b) -> i32  (bool Value)
+   Naive O(n*m) search. Empty b returns true. */
+static void emit_rt_str_contains(WasmBuf *body) {
+    const int a_ptr = 2, a_len = 3, b_ptr = 4, b_len = 5,
+              i = 6, miss = 7, off = 8, found = 9;
+
+    emit_get_str_ptr_local(body, 0, a_ptr);
+    emit_get_str_len_local(body, 0, a_len);
+    emit_get_str_ptr_local(body, 1, b_ptr);
+    emit_get_str_len_local(body, 1, b_len);
+
+    /* if (b_len == 0) return true */
+    emit_local_get(body, b_len);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_BOOL);
+    emit_i32(body, 1);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+
+    /* if (b_len > a_len) return false */
+    emit_local_get(body, b_len);
+    emit_local_get(body, a_len);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_BOOL);
+    emit_i32(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+
+    /* found = 0; for off in 0..=(a_len - b_len): if memcmp == 0 found=1,break */
+    emit_i32(body, 0);
+    emit_local_set(body, found);
+    emit_i32(body, 0);
+    emit_local_set(body, off);
+
+    buf_byte(body, OP_BLOCK);
+    buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);
+    buf_byte(body, WASM_TYPE_VOID);
+
+    /* stop when off + b_len > a_len */
+    emit_local_get(body, off);
+    emit_local_get(body, b_len);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, a_len);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_BR_IF);
+    buf_leb128_u(body, 1);
+
+    emit_memcmp_loop(body, a_ptr, off, b_ptr, b_len, i, miss);
+
+    emit_local_get(body, miss);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_i32(body, 1);
+    emit_local_set(body, found);
+    buf_byte(body, OP_BR);
+    buf_leb128_u(body, 2);
+    buf_byte(body, OP_END);
+
+    /* off++ */
+    emit_local_get(body, off);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, off);
+    buf_byte(body, OP_BR);
+    buf_leb128_u(body, 0);
+
+    buf_byte(body, OP_END); /* loop */
+    buf_byte(body, OP_END); /* block */
+
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, found);
+    emit_call(body, RT_VAL_NEW);
+
+    buf_byte(body, OP_END); /* if (b_len > a_len) else */
+    buf_byte(body, OP_END); /* if (b_len == 0) else */
 }
 
 /* ========================================================================
@@ -5488,6 +5808,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         buf_leb128_u(&sec, 2);
         /* RT_STR_LEN: (i32) -> i32 = type 2 */
         buf_leb128_u(&sec, 2);
+        /* RT_STR_STARTS: (i32, i32) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
+        /* RT_STR_ENDS: (i32, i32) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
+        /* RT_STR_CONTAINS: (i32, i32) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
 
         /* User function type indices - use arity-based types */
         for (int i = 0; i < n_funcs; i++) {
@@ -5709,6 +6035,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         build_rt_func(&sec, 1, 5, emit_rt_i32_to_str);
         /* 50: $str_len */
         build_rt_func(&sec, 1, 0, emit_rt_str_len);
+        /* 51: $str_starts_with (2 params, 6 extras) */
+        build_rt_func(&sec, 2, 6, emit_rt_str_starts_with);
+        /* 52: $str_ends_with (2 params, 7 extras) */
+        build_rt_func(&sec, 2, 7, emit_rt_str_ends_with);
+        /* 53: $str_contains (2 params, 8 extras) */
+        build_rt_func(&sec, 2, 8, emit_rt_str_contains);
 
         /* User function bodies */
         for (int i = 0; i < total_user_funcs; i++) {

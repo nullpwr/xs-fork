@@ -6,16 +6,11 @@
 set -u
 cd "$(dirname "$0")/.."
 
-# When running under ASan+UBSan (sanitizers CI), LeakSanitizer's default
-# exit code (23) turns every clean test into a failure because the
-# interpreter never frees its one-shot lexer/parser/stdlib state before
-# `exit(0)` (the OS reclaims). Those are true leaks but they're
-# process-lifetime, not per-request, so reporting them is useful but
-# failing the suite over them isn't. The debug build keeps reporting
-# them to stderr; we just don't inherit the failing exit code. Stacked
-# runtime leaks (ones that grow per run) would still surface because
-# they'd push past whatever invocation happens to be noisy.
-export LSAN_OPTIONS="${LSAN_OPTIONS:-exitcode=0:print_suppressions=0}"
+# Run with real leak detection. Process-lifetime allocations that are
+# legitimately not freed (plugin keyword tables, diagnostic tables,
+# BearSSL trust anchors) are listed in tests/lsan.supp. Anything not
+# covered by that file is a real per-request leak and must be fixed.
+export LSAN_OPTIONS="${LSAN_OPTIONS:-suppressions=$PWD/tests/lsan.supp:print_suppressions=0}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}"
 
 pass=0
@@ -203,6 +198,18 @@ if [ -f tests/test_cli.sh ]; then
         pass=$((pass + 1)); echo "  ok    test_cli (${cli_pass:-0} checks)"
     else
         report_fail "FAIL" "test_cli" "$(echo "$cli_output" | grep FAIL)"
+    fi
+fi
+
+# 4. Resource-limit CLI tests
+if [ -f tests/test_limits.sh ]; then
+    lim_output=$(bash tests/test_limits.sh 2>&1)
+    lim_rc=$?
+    lim_pass=$(echo "$lim_output" | grep -oP '\d+ passed' | grep -oP '\d+')
+    if [ "$lim_rc" -eq 0 ]; then
+        pass=$((pass + 1)); echo "  ok    test_limits (${lim_pass:-0} checks)"
+    else
+        report_fail "FAIL" "test_limits" "$(echo "$lim_output" | grep FAIL)"
     fi
 fi
 

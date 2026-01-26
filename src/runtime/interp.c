@@ -7,6 +7,7 @@
 #include "core/parser.h"
 #include "core/xs_bigint.h"
 #include "core/xs_utils.h"
+#include "core/limits.h"
 #include "plugins/pipeline.h"
 #ifdef XSC_ENABLE_TRACER
 #include "tracer/tracer.h"
@@ -5495,6 +5496,13 @@ do_call: ;
         const char *my_label = n->while_loop.label;
         Value *result = value_incref(XS_NULL_VAL);
         while (1) {
+            fprintf(stderr, "DBG tick used=%lu budget=%lu\n", (unsigned long)xs_limits_get_instructions_used(), (unsigned long)xs_limits_get_instructions_budget());
+            /* Loop-head budget tick. Statement-level ticks miss pure
+               expression loops like `while true { ... }`. */
+            if (xs_limits_tick()) {
+                xs_limits_throw_if_exceeded();
+                if (i->cf.signal) break;
+            }
             Value *cond = EVAL(i, n->while_loop.cond);
             int ok = value_truthy(cond); value_decref(cond);
             if (i->coverage && n->while_loop.cond->span.line > 0)
@@ -9029,6 +9037,13 @@ static const char *apply_load_rename(const char *orig) {
 
 void interp_exec(Interp *i, Node *stmt) {
     if (!stmt || i->cf.signal) return;
+    /* Per-statement resource-limit tick. The interpreter does more work
+       per tick than the VM, so one tick per statement keeps budgets
+       roughly comparable when the same program runs on both backends. */
+    if (xs_limits_tick()) {
+        xs_limits_throw_if_exceeded();
+        if (i->cf.signal) return;
+    }
     i->current_span = stmt->span;
     if (i->coverage && stmt->span.line > 0)
         coverage_record_line(i->coverage, stmt->span.line);
@@ -10473,6 +10488,9 @@ static void hoist_functions(Interp *i, NodeList *stmts) {
 
 void interp_run(Interp *i, Node *program) {
     if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    /* Reset per-invocation counters but keep any caps set by the
+       embedder / CLI. */
+    xs_limits_reset();
     g_current_interp = i;
     g_plugin_interp = i;
     i->current_program = program;
