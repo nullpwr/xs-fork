@@ -17,6 +17,9 @@
 #include "jit/jit.h"
 #include "jit/ra_ir.h"
 #include "core/xs.h"
+#include "core/value.h"
+#include "vm/vm.h"
+#include "vm/bytecode.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +109,33 @@ void jit_free(XSJIT *j) {
 }
 
 #if JIT_ARCH_SUPPORTED && (JIT_HAS_MMAP || JIT_HAS_WIN)
+
+/* Drive any frames that an IR_CALL left on vm->frames down to the
+ * baseline (the frame_count we stashed before the call). If the callee
+ * has its own jit_entry we recurse into it; otherwise we step the
+ * interpreter one opcode at a time. Shared by the x86-64 and arm64
+ * codegens via a single extern declaration. */
+int tier2_run_until(VM *vm, int target_fc) {
+    int rc = 0;
+    int saved_ss = vm->single_step;
+    while (vm->frame_count > target_fc) {
+        CallFrame *top = &vm->frames[vm->frame_count - 1];
+        XSProto *proto = NULL;
+        if (top->closure_val && VAL_TAG(top->closure_val) == XS_CLOSURE
+            && top->closure_val->cl)
+            proto = top->closure_val->cl->proto;
+        if (proto && proto->jit_entry && top->ip == proto->chunk.code) {
+            int (*fn)(VM *) = (int (*)(VM *))proto->jit_entry;
+            rc = fn(vm);
+        } else {
+            vm->single_step = 1;
+            rc = vm_step_jit(vm);
+        }
+        if (rc != 0) break;
+    }
+    vm->single_step = saved_ss;
+    return rc;
+}
 
 /* Run the tier-2 pipeline on one proto. NULL result = lowerer / codegen
  * declined (unsupported op, cross-block stack leak, captured written

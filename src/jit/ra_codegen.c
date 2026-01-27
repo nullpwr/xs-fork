@@ -412,43 +412,8 @@ static void emit_refresh_r13(Emitter *e) {
     emit_byte(e, 0x08);  /* SIB: base=rax, index=rcx, scale=1 */
 }
 
-/* --- tier-2 mini dispatcher for inner frames (see file comment) ---
- * After OP_CALL pushes a frame, the emitted code calls this to drive
- * the pushed frame to completion. If the callee proto has its own
- * tier-2 entry we invoke that directly so recursive calls stay in
- * native code; otherwise we fall back to stepping through the
- * interpreter. Returns 0 on normal completion, nonzero on error /
- * top-level finish. */
-static int tier2_run_until(VM *vm, int target_fc) {
-    int rc = 0;
-    int saved_ss = vm->single_step;
-    while (vm->frame_count > target_fc) {
-        CallFrame *top = &vm->frames[vm->frame_count - 1];
-        XSProto *proto = NULL;
-        if (top->closure_val && VAL_TAG(top->closure_val) == XS_CLOSURE
-            && top->closure_val->cl)
-            proto = top->closure_val->cl->proto;
-        /* Only re-enter tier-2 native code when the frame is at its
-         * function start. Control-flow ops dispatched through
-         * IR_VM_STEP_CF (THROW to a catch, TAIL_CALL that didn't
-         * replace the proto, AWAIT / YIELD suspending etc.) can park
-         * frame->ip mid-body; the compiled code has no entry for
-         * arbitrary PCs, so we fall through to the interpreter step
-         * in those cases. Full mid-function OSR would need a prologue
-         * dispatcher that maps frame->ip to a block start and jumps
-         * there; this check is the conservative substitute. */
-        if (proto && proto->jit_entry && top->ip == proto->chunk.code) {
-            int (*fn)(VM *) = (int (*)(VM *))proto->jit_entry;
-            rc = fn(vm);
-        } else {
-            vm->single_step = 1;
-            rc = vm_step_jit(vm);
-        }
-        if (rc != 0) break;
-    }
-    vm->single_step = saved_ss;
-    return rc;
-}
+/* tier2_run_until lives in jit.c (declared in jit/jit.h) so the arm64
+ * codegen can share it. */
 
 /* ==============================================================
  *                       CODEGEN DRIVER

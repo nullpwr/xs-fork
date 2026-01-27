@@ -90,10 +90,28 @@ static int phys_to_arm(int phys) {
     }
 }
 
+/* Frame layout, positive offsets from x29 (= SP at function entry
+ * minus sub_amt). AArch64's convention is opposite to x86's rbp --
+ * the FP sits at the LOW address of the frame, so everything lives
+ * at positive offsets:
+ *
+ *   [x29 +  0] saved x29
+ *   [x29 +  8] saved x30 (LR)
+ *   [x29 + 16] saved x19   -- X_VM
+ *   [x29 + 24] saved x20   -- X_FRAME
+ *   [x29 + 32] saved x21   -- vreg phys 0
+ *   [x29 + 40] saved x22   -- vreg phys 1
+ *   [x29 + 48] saved x23   -- vreg phys 2
+ *   [x29 + 56] saved x24   -- unused (paired for STP)
+ *   [x29 + 64] RC stash    -- scratch word reused by IR_CALL etc.
+ *   [x29 + 72..] spill slots (8 B each)
+ *
+ * Earlier revisions mirrored the x86 layout blindly with negative
+ * offsets, which wrote spill data *below* our frame and corrupted
+ * the caller's stack; this is the fix. */
+#define RC_STASH_DISP 64
 static int32_t spill_disp(int slot) {
-    /* Spill slots live at [x29 - 48 - 8*slot], matching the x86 layout
-     * once a 16-byte alignment pad below saved regs is accounted for. */
-    return -48 - 8 * slot;
+    return 72 + 8 * slot;
 }
 
 typedef struct {
@@ -349,11 +367,10 @@ static void emit_load_vreg(Emitter *e, IRVReg v, IRAlloc *a, int dst) {
         int src = phys_to_arm(phys);
         if (src != dst) a_mov_reg(e, dst, src);
     } else {
-        int slot = a->spill[v];
-        /* LDUR xt, [x29, #disp]  (LDR unscaled for negative offsets). */
-        int32_t d = spill_disp(slot);
-        emit_u32(e, 0xF8400000u | ((uint32_t)((uint32_t)d & 0x1FF) << 12) |
-                     ((uint32_t)29u << 5) | (uint32_t)(dst & 31));
+        /* LDR xt, [x29, #disp]  -- 12-bit unsigned-imm scaled by 8,
+         * which reaches up to 32760 bytes. Spill slots all live above
+         * the saved-reg block so disp is always positive and aligned. */
+        a_ldr_off(e, dst, 29, spill_disp(a->spill[v]));
     }
 }
 
@@ -364,11 +381,7 @@ static void emit_store_vreg(Emitter *e, IRVReg v, IRAlloc *a, int src) {
         int dst = phys_to_arm(phys);
         if (dst != src) a_mov_reg(e, dst, src);
     } else {
-        int slot = a->spill[v];
-        int32_t d = spill_disp(slot);
-        /* STUR xt, [x29, #disp] */
-        emit_u32(e, 0xF8000000u | ((uint32_t)((uint32_t)d & 0x1FF) << 12) |
-                     ((uint32_t)29u << 5) | (uint32_t)(src & 31));
+        a_str_off(e, src, 29, spill_disp(a->spill[v]));
     }
 }
 
@@ -447,25 +460,28 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
     void *entry = (void *)(j->code + em.pos);
 
     int n_spill = a->n_spill_slots;
-    /* Frame: 16 bytes for FP/LR + 16 per pair of callee-saves (X19/X20
-     * and X21/X22 and X23/X24) + 8*spill_slots, rounded up to 16B. */
-    int32_t spill_bytes = 8 * n_spill;
-    int32_t sub_amt = 64 + spill_bytes;
+    /* 64 B saved regs + 8 B RC stash + 8 B per spill slot, padded to 16. */
+    int32_t sub_amt = 72 + 8 * n_spill;
     if (sub_amt & 15) sub_amt += 16 - (sub_amt & 15);
+    /* SUB sp, sp, #sub_amt takes a 12-bit imm; if we ever need more we
+     * could shift or materialise in x16, but keeping the simple form
+     * means bailing for very wide functions. */
+    if (sub_amt > 4080) {
+        free(NULL); return NULL;
+    }
 
-    /* Prologue: reserve frame, save FP/LR and callee-saved regs. */
-    /* STP x29, x30, [sp, #-sub_amt]! */
-    emit_u32(&em, 0xA9800000u | ((uint32_t)29u) | ((uint32_t)30u << 10) |
-                   ((uint32_t)31u << 5) |
-                   (uint32_t)(((uint32_t)(-sub_amt / 8)) & 0x7Fu) << 15);
-    /* MOV x29, sp */
-    a_mov_reg(&em, 29, 31);
+    /* SUB sp, sp, #sub_amt  (sp-form imm12, sh=0). */
+    emit_u32(&em, 0xD10003FFu | ((uint32_t)(sub_amt & 0xFFFu) << 10));
+    /* STP x29, x30, [sp, #0] */
+    emit_u32(&em, 0xA9000000u | 29u | (30u << 10) | (31u << 5));
     /* STP x19, x20, [sp, #16] */
     emit_u32(&em, 0xA9000000u | 19u | (20u << 10) | (31u << 5) | ((uint32_t)(16/8) << 15));
     /* STP x21, x22, [sp, #32] */
     emit_u32(&em, 0xA9000000u | 21u | (22u << 10) | (31u << 5) | ((uint32_t)(32/8) << 15));
     /* STP x23, x24, [sp, #48] */
     emit_u32(&em, 0xA9000000u | 23u | (24u << 10) | (31u << 5) | ((uint32_t)(48/8) << 15));
+    /* ADD x29, sp, #0   (MOV x29, sp but sp-form). */
+    emit_u32(&em, 0x910003FDu);
 
     /* X_VM = X0 (first arg) */
     a_mov_reg(&em, X_VM, 0);
@@ -784,9 +800,96 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 break;
             }
 
-            /* Calls / closure construction / container ops / generic
-             * dispatch — all take the flush-and-step path for now. */
-            case IR_CALL:
+            case IR_CALL: {
+                /* Mirror the x86 path: flush callee + args to vm->sp,
+                 * stash baseline frame_count in our scratch word, then
+                 * try vm_call_closure_fast. On success drive any pushed
+                 * inner frame to completion via tier2_run_until. On
+                 * failure fall back to vm_step_jit on OP_CALL (handles
+                 * natives, overloads, variadics). */
+                int argc = in->imm;
+                emit_load_vreg(&em, in->src1, a, 0);
+                emit_vmsp_push_x0(&em);
+                for (int k = 0; k < argc; k++) {
+                    emit_load_vreg(&em, in->call_args[k], a, 0);
+                    emit_vmsp_push_x0(&em);
+                }
+                /* w0 = vm->frame_count ; store to [x29 + RC_STASH_DISP] */
+                a_ldr_w_off(&em, 0, X_VM, VM_OFF_FRAME_COUNT);
+                emit_u32(&em, 0xB9000000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                               ((uint32_t)29u << 5) | 0u);
+                /* frame->ip = code_base + bc_off. */
+                a_mov_imm64(&em, 0, (uint64_t)(uintptr_t)(code_base + bc_off));
+                a_str_off(&em, 0, X_FRAME, FRAME_OFF_IP);
+                /* vm_call_closure_fast(vm, argc). */
+                a_mov_reg(&em, 0, X_VM);
+                a_mov_imm64(&em, 1, (uint64_t)(uint32_t)argc);
+                a_call_abs(&em, (void *)(uintptr_t)vm_call_closure_fast);
+                /* CBNZ w0, .slow */
+                size_t j_slow = em.pos;
+                emit_u32(&em, 0x35000000u | 0u);
+
+                /* Fast path: if a residual frame sits above our baseline
+                 * (callee had no jit_entry and fast-path only pushed),
+                 * drain it via tier2_run_until. */
+                {
+                    /* w1 = baseline ; w2 = current fc */
+                    emit_u32(&em, 0xB9400000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                                   ((uint32_t)29u << 5) | 1u);
+                    a_ldr_w_off(&em, 2, X_VM, VM_OFF_FRAME_COUNT);
+                    /* CMP w1, w2  (SUBS wzr, w1, w2) */
+                    emit_u32(&em, 0x6B00001Fu | ((uint32_t)2u << 16) |
+                                   ((uint32_t)1u << 5));
+                    size_t j_nd = a_bcond_ph(&em, CC_GE);
+                    a_mov_reg(&em, 0, X_VM);
+                    emit_u32(&em, 0xB9400000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                                   ((uint32_t)29u << 5) | 1u);
+                    a_call_abs(&em, (void *)(uintptr_t)tier2_run_until);
+                    size_t j_err1 = em.pos;
+                    emit_u32(&em, 0x35000000u | 0u);
+                    ADD_ERR_EXIT(j_err1);
+                    patch_bcond(&em, j_nd, em.pos);
+                }
+                emit_refresh_frame(&em);
+                emit_vmsp_pop_x0(&em);
+                emit_store_vreg(&em, in->dst, a, 0);
+                size_t j_join = a_b_ph(&em);
+
+                /* Slow path: full OP_CALL via vm_step_jit. */
+                patch_bcond(&em, j_slow, em.pos);
+                a_mov_reg(&em, 0, X_VM);
+                a_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                size_t j_err2 = em.pos;
+                emit_u32(&em, 0x35000000u | 0u);
+                ADD_ERR_EXIT(j_err2);
+                {
+                    emit_u32(&em, 0xB9400000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                                   ((uint32_t)29u << 5) | 1u);
+                    a_ldr_w_off(&em, 2, X_VM, VM_OFF_FRAME_COUNT);
+                    emit_u32(&em, 0x6B00001Fu | ((uint32_t)2u << 16) |
+                                   ((uint32_t)1u << 5));
+                    size_t j_nd2 = a_bcond_ph(&em, CC_GE);
+                    a_mov_reg(&em, 0, X_VM);
+                    emit_u32(&em, 0xB9400000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                                   ((uint32_t)29u << 5) | 1u);
+                    a_call_abs(&em, (void *)(uintptr_t)tier2_run_until);
+                    size_t j_err3 = em.pos;
+                    emit_u32(&em, 0x35000000u | 0u);
+                    ADD_ERR_EXIT(j_err3);
+                    patch_bcond(&em, j_nd2, em.pos);
+                }
+                emit_refresh_frame(&em);
+                emit_vmsp_pop_x0(&em);
+                emit_store_vreg(&em, in->dst, a, 0);
+
+                patch_b(&em, j_join, em.pos);
+                break;
+            }
+
+            /* Closure construction / container ops / generic dispatch —
+             * all take the flush-and-step path. No frame is pushed by
+             * these ops, so popping a result after vm_step_jit returns
+             * is safe. */
             case IR_MAKE_CLOSURE:
             case IR_INDEX_GET:
             case IR_INDEX_SET:
@@ -887,20 +990,22 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
             em.buf[cbz + 3] = (uint8_t)(w >> 24);
         }
     }
-    /* MOV w0, #0 ; restore; ret */
+    /* MOV w0, #0 ; restore; ret
+     * (err_exit flows into deopt_exit writeback then here, returning
+     * 0 -- the vm state carries the actual error via vm->error.) */
     a_mov_imm64(&em, 0, 0);
     /* LDP x23, x24, [sp, #48] */
     emit_u32(&em, 0xA9400000u | 23u | (24u << 10) | (31u << 5) | ((uint32_t)(48/8) << 15));
     emit_u32(&em, 0xA9400000u | 21u | (22u << 10) | (31u << 5) | ((uint32_t)(32/8) << 15));
     emit_u32(&em, 0xA9400000u | 19u | (20u << 10) | (31u << 5) | ((uint32_t)(16/8) << 15));
-    /* LDP x29, x30, [sp], #sub_amt */
-    emit_u32(&em, 0xA8C00000u | 29u | (30u << 10) | (31u << 5) |
-                   (uint32_t)(((uint32_t)(sub_amt / 8)) & 0x7Fu) << 15);
+    emit_u32(&em, 0xA9400000u | 29u | (30u << 10) | (31u << 5));
+    /* ADD sp, sp, #sub_amt */
+    emit_u32(&em, 0x910003FFu | ((uint32_t)(sub_amt & 0xFFFu) << 10));
     a_ret(&em);
 
     size_t ok_exit_pos = em.pos;
-    /* CMP w0, #0 ; CSET w0, LT ; normalize to 0/1 return. */
-    /* For simplicity: MOV w1, w0 ; MOV w0, #0 ; CMP w1, #0 ; CSET w0, LT. */
+    /* MOV w1, w0 ; MOV w0, #0 ; CMP w1, #0 ; CSET w0, LT.  Matches x86:
+     * negative rc -> 1, zero/positive -> 0. */
     a_mov_reg(&em, 1, 0);
     a_mov_imm64(&em, 0, 0);
     a_cmp_imm(&em, 1, 0);
@@ -908,8 +1013,8 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
     emit_u32(&em, 0xA9400000u | 23u | (24u << 10) | (31u << 5) | ((uint32_t)(48/8) << 15));
     emit_u32(&em, 0xA9400000u | 21u | (22u << 10) | (31u << 5) | ((uint32_t)(32/8) << 15));
     emit_u32(&em, 0xA9400000u | 19u | (20u << 10) | (31u << 5) | ((uint32_t)(16/8) << 15));
-    emit_u32(&em, 0xA8C00000u | 29u | (30u << 10) | (31u << 5) |
-                   (uint32_t)(((uint32_t)(sub_amt / 8)) & 0x7Fu) << 15);
+    emit_u32(&em, 0xA9400000u | 29u | (30u << 10) | (31u << 5));
+    emit_u32(&em, 0x910003FFu | ((uint32_t)(sub_amt & 0xFFFu) << 10));
     a_ret(&em);
 
     for (int i = 0; i < n_fixups; i++) {

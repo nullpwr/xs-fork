@@ -14,16 +14,22 @@ XSC_ENABLE_DAP     ?= 1
 # Platform detection
 ifeq ($(OS),Windows_NT)
   CFLAGS  += -D__USE_MINGW_ANSI_STDIO=1 -D_WIN32
-  LDFLAGS += -lws2_32 -static
+  LDFLAGS += -lws2_32 -lpsapi -static
   TARGET  = xs.exe
 else
   UNAME := $(shell uname -s)
   ifeq ($(UNAME),Linux)
-    ifneq ($(wildcard /usr/include/x86_64-linux-gnu),)
-      CFLAGS += -isystem /usr/include/x86_64-linux-gnu
-    endif
-    ifneq ($(wildcard /usr/include),)
-      CFLAGS += -isystem /usr/include
+    # Skip host multiarch paths when cross-compiling to a non-x86_64 target;
+    # the cross toolchain already knows its own sysroot / include layout.
+    HOST_ARCH := $(shell uname -m)
+    TARGET_ARCH := $(shell $(CC) -dumpmachine 2>/dev/null | sed 's/-.*//')
+    ifeq ($(HOST_ARCH),$(TARGET_ARCH))
+      ifneq ($(wildcard /usr/include/x86_64-linux-gnu),)
+        CFLAGS += -isystem /usr/include/x86_64-linux-gnu
+      endif
+      ifneq ($(wildcard /usr/include),)
+        CFLAGS += -isystem /usr/include
+      endif
     endif
     LDFLAGS += -ldl
   endif
@@ -43,7 +49,8 @@ CORE_SRCS = src/core/value.c \
             src/core/xs_bigint.c \
             src/core/gc.c \
             src/core/utf8.c \
-            src/core/strbuf.c
+            src/core/strbuf.c \
+            src/core/limits.c
 
 COMPILER_SRCS = src/compiler/match_compiler.c
 
@@ -221,7 +228,10 @@ else ifeq ($(UNAME),Linux)
   UNIT_LDFLAGS += -ldl
 endif
 
-UNIT_TESTS = tests/unit/lexer_test tests/unit/parser_test tests/unit/sema_test
+UNIT_TESTS = tests/unit/lexer_test tests/unit/parser_test tests/unit/sema_test \
+             tests/unit/value_test tests/unit/gc_test tests/unit/utf8_test \
+             tests/unit/bigint_test tests/unit/regex_test tests/unit/msgpack_test \
+             tests/unit/strbuf_test tests/unit/limits_test
 
 tests/unit/%_test: tests/unit/%_test.c $(UNIT_LINK_SRCS)
 	$(CC) $(UNIT_CFLAGS) -o $@ $< $(UNIT_LINK_SRCS) $(UNIT_LDFLAGS)

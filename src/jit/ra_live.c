@@ -102,33 +102,35 @@ void ralow_liveness(IRFunc *f) {
         }
     }
     /* Iterate to fixed point. Start each block's live_out as the
-     * union of its successors' live_in (initially empty). */
+     * union of its successors' live_in (initially empty). Always
+     * recompute live_in on each pass -- an earlier version only
+     * refreshed it when live_out changed, which silently dropped the
+     * USE set of any terminal block (e.g. the post-RETURN fall-through)
+     * and left the rest of the CFG unaware that those vregs were live
+     * upstream. The missing uses then collapsed live ranges and the
+     * register allocator handed out the same physical register to
+     * values that overlapped across a CALL, corrupting results. */
     uint64_t *tmp = bs_new(nv);
+    uint64_t *new_in = bs_new(nv);
     int changed = 1;
     while (changed) {
         changed = 0;
-        /* reverse order helps convergence for loops */
         for (int bi = f->n_blocks - 1; bi >= 0; bi--) {
             IRBlock *b = &f->blocks[bi];
-            /* new_live_out = union of successors' live_in */
             memset(tmp, 0, (size_t)bs_words(nv) * sizeof(uint64_t));
             for (int s = 0; s < b->n_succ; s++) {
                 IRBlock *sb = &f->blocks[b->succ[s]];
                 bs_or_into(tmp, sb->live_in, nv);
             }
-            if (!bs_equal(tmp, b->live_out, nv)) {
-                memcpy(b->live_out, tmp, (size_t)bs_words(nv) * sizeof(uint64_t));
-                /* recompute live_in = use ∪ (live_out - def) */
-                uint64_t *new_in = bs_new(nv);
-                bs_live_in(new_in, b->use, b->live_out, b->def, nv);
-                if (!bs_equal(new_in, b->live_in, nv)) {
-                    memcpy(b->live_in, new_in,
-                           (size_t)bs_words(nv) * sizeof(uint64_t));
-                    changed = 1;
-                }
-                free(new_in);
+            memcpy(b->live_out, tmp, (size_t)bs_words(nv) * sizeof(uint64_t));
+            bs_live_in(new_in, b->use, b->live_out, b->def, nv);
+            if (!bs_equal(new_in, b->live_in, nv)) {
+                memcpy(b->live_in, new_in,
+                       (size_t)bs_words(nv) * sizeof(uint64_t));
+                changed = 1;
             }
         }
     }
+    free(new_in);
     free(tmp);
 }

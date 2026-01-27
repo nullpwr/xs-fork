@@ -32,6 +32,11 @@ void  *jit_maybe_compile(XSJIT *j, int proto_index, XSProto *proto);
 JitFn  jit_get_compiled(XSJIT *j, int proto_index);
 int    jit_available(void);
 
+struct VM;
+/* Shared between the x86-64 and arm64 codegens: drive any frames an
+ * IR_CALL left on vm->frames down to the baseline. */
+int    tier2_run_until(struct VM *vm, int target_fc);
+
 #else
 
 typedef struct XSJIT XSJIT;
