@@ -576,6 +576,10 @@ char *value_str(Value *v) { return value_repr(v); }
 /* equality */
 int value_equal(Value *a, Value *b) {
     if (!a || !b) return a == b;
+    /* Identity shortcut must come *after* the NaN check: IEEE 754 says
+       NaN compares unequal to itself, including to the very same
+       Value. */
+    if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_FLOAT) return a->f == b->f;
     if (a == b) return 1;
     if (VAL_TAG(a) == XS_NULL && VAL_TAG(b) == XS_NULL) return 1;
     if (VAL_TAG(a) == XS_BOOL && VAL_TAG(b) == XS_BOOL) return VAL_INT(a) == VAL_INT(b);

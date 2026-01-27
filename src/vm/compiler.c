@@ -778,6 +778,20 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
 
     case NODE_BLOCK: {
         scope_begin(c);
+        /* Hoist named fn decls in nested scopes so the body can refer
+           to its own name (or sibling fns for mutual recursion) via a
+           local slot instead of falling through to STORE_GLOBAL, which
+           would have two calls to a factory clobber the same binding. */
+        if (c->current->enclosing) {
+            for (int i = 0; i < n->block.stmts.len; i++) {
+                Node *s = n->block.stmts.items[i];
+                if (!s || VAL_TAG(s) != NODE_FN_DECL) continue;
+                const char *fname = s->fn_decl.name;
+                if (!fname || !fname[0] || fname[0] == '<') continue;
+                if (local_resolve(c->current, fname) >= 0) continue;
+                local_add(c->current, fname);
+            }
+        }
         for (int i = 0; i < n->block.stmts.len; i++)
             compile_node(c, n->block.stmts.items[i], 0);
         if (n->block.expr)
@@ -877,14 +891,24 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_FN_DECL: {
-        int idx = compile_fn(c, n->fn_decl.name,
+        /* Nested fn decls bind to a local slot; the block-level hoist
+           above already reserved it. At top level (enclosing == NULL)
+           keep the historical global binding so other modules can
+           import and call the function. */
+        const char *fname = n->fn_decl.name;
+        int nested = c->current->enclosing != NULL;
+        int local_slot = -1;
+        if (nested && fname && fname[0] && fname[0] != '<')
+            local_slot = local_resolve(c->current, fname);
+        int idx = compile_fn(c, fname,
                              &n->fn_decl.params,
                              n->fn_decl.body);
         if (n->fn_decl.is_generator)
             c->current->proto->inner[idx]->is_generator = 1;
         emit_make_closure(c, idx);
         if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
-        compile_name_store(c, n->fn_decl.name);
+        if (local_slot >= 0) emit_a(c, OP_STORE_LOCAL, local_slot);
+        else                 compile_name_store(c, fname);
         return;
     }
 
@@ -1508,10 +1532,15 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         int fi_idx = emit_global_name(c, fname);
                         emit_a(c, OP_LOAD_FIELD, fi_idx);
                     }
-                    if (fpat && VAL_TAG(fpat) == NODE_PAT_IDENT) {
+                    if (!fpat) {
+                        /* shorthand `{ x }` binds the field value under
+                           its own name. Parser sets val=NULL here. */
+                        int slot = local_add(c->current, fname);
+                        emit_a(c, OP_STORE_LOCAL, slot);
+                    } else if (VAL_TAG(fpat) == NODE_PAT_IDENT) {
                         int slot = local_add(c->current, fpat->pat_ident.name);
                         emit_a(c, OP_STORE_LOCAL, slot);
-                    } else if (fpat && VAL_TAG(fpat) == NODE_PAT_LIT) {
+                    } else if (VAL_TAG(fpat) == NODE_PAT_LIT) {
                         switch (fpat->pat_lit.tag) {
                         case 0: emit_const(c, xs_int(fpat->pat_lit.ival)); break;
                         case 1: emit_const(c, xs_float(fpat->pat_lit.fval)); break;

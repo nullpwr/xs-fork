@@ -738,7 +738,29 @@ static Value *builtin_assert_eq(Interp *i, Value **args, int argc) {
         if (i) { i->cf.signal = CF_PANIC; i->cf.value = xs_str("assert_eq requires 2 arguments"); }
         return value_incref(XS_NULL_VAL);
     }
-    if (!value_equal(args[0], args[1])) {
+    int equal = value_equal(args[0], args[1]);
+    /* Float comparisons: allow a small relative/absolute tolerance so
+       chained arithmetic (e.g. 3.14*r*r summed across shapes) still
+       compares equal to a literal expected value. NaN stays unequal. */
+    if (!equal && argc == 2) {
+        double a_d, b_d; int have_a = 1, have_b = 1;
+        if (VAL_TAG(args[0]) == XS_FLOAT) a_d = args[0]->f;
+        else if (VAL_TAG(args[0]) == XS_INT) a_d = (double)VAL_INT(args[0]);
+        else have_a = 0;
+        if (VAL_TAG(args[1]) == XS_FLOAT) b_d = args[1]->f;
+        else if (VAL_TAG(args[1]) == XS_INT) b_d = (double)VAL_INT(args[1]);
+        else have_b = 0;
+        if (have_a && have_b &&
+            (VAL_TAG(args[0]) == XS_FLOAT || VAL_TAG(args[1]) == XS_FLOAT) &&
+            a_d == a_d && b_d == b_d) {
+            double diff = a_d - b_d; if (diff < 0) diff = -diff;
+            double scale = (a_d < 0 ? -a_d : a_d);
+            double b_abs = (b_d < 0 ? -b_d : b_d);
+            if (b_abs > scale) scale = b_abs;
+            if (diff <= 1e-9 + 1e-9 * scale) equal = 1;
+        }
+    }
+    if (!equal) {
         char *a = value_repr(args[0]);
         char *b = value_repr(args[1]);
         const char *msg = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
@@ -1130,23 +1152,51 @@ static Value *native_math_sum(Interp *ig, Value **a, int n) {
 }
 
 /* min(arr) */
-static Value *native_math_min_arr(Interp *ig, Value **a, int n) {
-    (void)ig;
-    if (n<1||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
-    XSArray *arr=a[0]->arr;
-    double r=math_to_double(arr->items[0]);
-    for (int j=1;j<arr->len;j++) { double v=math_to_double(arr->items[j]); if (v<r) r=v; }
-    return xs_float(r);
+/* Returns 1 if all numeric inputs were XS_INT, else 0 (so varargs
+   stay integer when all inputs were). */
+static int args_all_ints(Value **a, int n) {
+    for (int j = 0; j < n; j++) if (!a[j] || VAL_TAG(a[j]) != XS_INT) return 0;
+    return 1;
 }
 
-/* max(arr) */
+static Value *native_math_min_arr(Interp *ig, Value **a, int n) {
+    (void)ig;
+    if (n == 0) return value_incref(XS_NULL_VAL);
+    if (n == 1 && VAL_TAG(a[0]) == XS_ARRAY) {
+        XSArray *arr = a[0]->arr;
+        if (arr->len == 0) return value_incref(XS_NULL_VAL);
+        double r = math_to_double(arr->items[0]);
+        int all_int = VAL_TAG(arr->items[0]) == XS_INT;
+        for (int j = 1; j < arr->len; j++) {
+            double v = math_to_double(arr->items[j]);
+            if (v < r) r = v;
+            if (VAL_TAG(arr->items[j]) != XS_INT) all_int = 0;
+        }
+        return all_int ? xs_int((int64_t)r) : xs_float(r);
+    }
+    double r = math_to_double(a[0]);
+    for (int j = 1; j < n; j++) { double v = math_to_double(a[j]); if (v < r) r = v; }
+    return args_all_ints(a, n) ? xs_int((int64_t)r) : xs_float(r);
+}
+
 static Value *native_math_max_arr(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<1||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return value_incref(XS_NULL_VAL);
-    XSArray *arr=a[0]->arr;
-    double r=math_to_double(arr->items[0]);
-    for (int j=1;j<arr->len;j++) { double v=math_to_double(arr->items[j]); if (v>r) r=v; }
-    return xs_float(r);
+    if (n == 0) return value_incref(XS_NULL_VAL);
+    if (n == 1 && VAL_TAG(a[0]) == XS_ARRAY) {
+        XSArray *arr = a[0]->arr;
+        if (arr->len == 0) return value_incref(XS_NULL_VAL);
+        double r = math_to_double(arr->items[0]);
+        int all_int = VAL_TAG(arr->items[0]) == XS_INT;
+        for (int j = 1; j < arr->len; j++) {
+            double v = math_to_double(arr->items[j]);
+            if (v > r) r = v;
+            if (VAL_TAG(arr->items[j]) != XS_INT) all_int = 0;
+        }
+        return all_int ? xs_int((int64_t)r) : xs_float(r);
+    }
+    double r = math_to_double(a[0]);
+    for (int j = 1; j < n; j++) { double v = math_to_double(a[j]); if (v > r) r = v; }
+    return args_all_ints(a, n) ? xs_int((int64_t)r) : xs_float(r);
 }
 
 /* mean(arr) */

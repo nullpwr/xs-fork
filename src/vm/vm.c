@@ -98,7 +98,7 @@ static Value *vm_len(Interp *interp, Value **args, int argc) {
     Value *v = args[0];
     if (VAL_TAG(v) == XS_ARRAY || VAL_TAG(v) == XS_TUPLE) return xs_int(v->arr->len);
     if (VAL_TAG(v) == XS_MAP)   return xs_int(v->map->len);
-    if (VAL_TAG(v) == XS_STR)   return xs_int((int64_t)strlen(v->s));
+    if (VAL_TAG(v) == XS_STR)   return xs_int(utf8_strlen(v->s, (int)strlen(v->s)));
     if (VAL_TAG(v) == XS_RANGE && v->range) {
         int64_t n = v->range->end - v->range->start + (v->range->inclusive ? 1 : 0);
         return xs_int(n < 0 ? 0 : n);
@@ -239,7 +239,26 @@ static Value *vm_assert_eq(Interp *interp, Value **args, int argc) {
         fprintf(stderr, "xs: assert_eq requires 2 arguments\n");
         exit(1);
     }
-    if (!value_equal(args[0], args[1])) {
+    int eq = value_equal(args[0], args[1]);
+    if (!eq && argc == 2) {
+        double a_d, b_d; int have_a = 1, have_b = 1;
+        if (VAL_TAG(args[0]) == XS_FLOAT) a_d = args[0]->f;
+        else if (VAL_TAG(args[0]) == XS_INT) a_d = (double)VAL_INT(args[0]);
+        else have_a = 0;
+        if (VAL_TAG(args[1]) == XS_FLOAT) b_d = args[1]->f;
+        else if (VAL_TAG(args[1]) == XS_INT) b_d = (double)VAL_INT(args[1]);
+        else have_b = 0;
+        if (have_a && have_b &&
+            (VAL_TAG(args[0]) == XS_FLOAT || VAL_TAG(args[1]) == XS_FLOAT) &&
+            a_d == a_d && b_d == b_d) {
+            double diff = a_d - b_d; if (diff < 0) diff = -diff;
+            double scale = (a_d < 0 ? -a_d : a_d);
+            double b_abs = (b_d < 0 ? -b_d : b_d);
+            if (b_abs > scale) scale = b_abs;
+            if (diff <= 1e-9 + 1e-9 * scale) eq = 1;
+        }
+    }
+    if (!eq) {
         char *a = value_repr(args[0]);
         char *b = value_repr(args[1]);
         const char *msg = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
@@ -1055,6 +1074,7 @@ VM *vm_new(void) {
     memset(vm->frames, 0, vm->frames_cap * sizeof(CallFrame));
     vm->globals    = map_new();
     vm->n_tasks    = 0;
+    vm->pending_throw_frame = -1;
     vm_register_stdlib(vm);
     return vm;
 }
@@ -1557,14 +1577,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "/", b)) != NULL) {
             } else {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
-                if (bv == 0.0) {
-                    Span s = {0};
-                    xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
-                    r = value_incref(XS_NULL_VAL);
-                } else {
-                    double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                    r = xs_float(av / bv);
-                }
+                double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
+                /* Float division: IEEE 754 yields +/-inf or NaN on 0. */
+                r = xs_float(av / bv);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
         }
@@ -1577,10 +1592,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     xs_runtime_error(s, "modulo by zero", NULL, "cannot take modulo with zero divisor");
                     r = value_incref(XS_NULL_VAL);
                 } else {
-                    /* Math modulo (sign of divisor), matches interp. */
-                    int64_t m = VAL_INT(a) % VAL_INT(b);
-                    if (m != 0 && ((m ^ VAL_INT(b)) < 0)) m += VAL_INT(b);
-                    r = xs_int(m);
+                    /* Truncated modulo (sign of dividend), matches C. */
+                    r = xs_int(VAL_INT(a) % VAL_INT(b));
                 }
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__mod__", b)) != NULL) {
                 /* dunder */
@@ -1786,6 +1799,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 int64_t idx2 = atoll(name);
                 if (idx2 >= 0 && idx2 < obj->arr->len)
                     r = value_incref(obj->arr->items[idx2]);
+            } else if (VAL_TAG(obj) == XS_STRUCT_VAL && obj->st && obj->st->fields) {
+                Value *v = map_get(obj->st->fields, name);
+                if (v) r = value_incref(v);
+            } else if (VAL_TAG(obj) == XS_INST && obj->inst && obj->inst->fields) {
+                Value *v = map_get(obj->inst->fields, name);
+                if (v) r = value_incref(v);
             }
             if (!r) r = value_incref(XS_NULL_VAL);
             value_decref(obj); PUSH(r); break;
@@ -2121,6 +2140,54 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 if (frame->defer_depth > 0) {
                     frame->defer_depth--;
                     frame->ip = frame->defer_stack[frame->defer_depth].defer_ip;
+                } else if (vm->pending_throw_exc &&
+                           vm->pending_throw_frame == vm->frame_count - 1) {
+                    /* This frame was mid-throw; all defers have run.
+                       Drop the frame and resume the unwind with the
+                       parked exception value. */
+                    Value *exc = vm->pending_throw_exc;
+                    vm->pending_throw_exc = NULL;
+                    vm->pending_throw_frame = -1;
+                    frame->defer_return_ip = NULL;
+                    upvalue_close_all(&vm->open_upvalues, frame->base);
+                    while (vm->sp > frame->base) value_decref(POP());
+                    value_decref(frame->closure_val);
+                    vm->frame_count--;
+                    int handled = 0;
+                    while (vm->frame_count > 0) {
+                        CallFrame *cf = &vm->frames[vm->frame_count - 1];
+                        if (cf->try_depth > 0) {
+                            TryEntry *te = &cf->try_stack[--cf->try_depth];
+                            if (g_xs_in_try > 0) g_xs_in_try--;
+                            while (vm->sp > te->stack_top) value_decref(POP());
+                            PUSH(exc);
+                            frame = cf;
+                            frame->ip = te->catch_ip;
+                            handled = 1;
+                            break;
+                        }
+                        if (cf->defer_depth > 0) {
+                            vm->pending_throw_frame = vm->frame_count - 1;
+                            vm->pending_throw_exc = exc;
+                            cf->defer_return_ip = cf->ip;
+                            cf->defer_depth--;
+                            cf->ip = cf->defer_stack[cf->defer_depth].defer_ip;
+                            frame = cf;
+                            handled = 1;
+                            break;
+                        }
+                        upvalue_close_all(&vm->open_upvalues, cf->base);
+                        while (vm->sp > cf->base) value_decref(POP());
+                        value_decref(cf->closure_val);
+                        vm->frame_count--;
+                    }
+                    if (!handled) {
+                        char *s = value_str(exc);
+                        fprintf(stderr, "uncaught: %s\n", s);
+                        free(s);
+                        value_decref(exc);
+                        return 1;
+                    }
                 } else {
                     frame->ip = frame->defer_return_ip;
                     frame->defer_return_ip = NULL;
@@ -2806,7 +2873,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 const char *s = mc_obj->s;
                 int slen = (int)strlen(s);
                 if (strcmp(mc_name,"len")==0||strcmp(mc_name,"size")==0||strcmp(mc_name,"length")==0)
-                    mc_result = xs_int(slen);
+                    mc_result = xs_int(utf8_strlen(s, slen));
                 else if (strcmp(mc_name,"byte_len")==0)
                     mc_result = xs_int(slen);
                 else if (strcmp(mc_name,"char_len")==0)
@@ -3327,10 +3394,27 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     frame=FRAME;
                 } else if (strcmp(mc_name,"reduce")==0||strcmp(mc_name,"fold")==0) {
-                    Value *acc=(mc_argc>=2)?value_incref(mc_args[1]):value_incref(XS_NULL_VAL);
-                    Value *fn=(mc_argc>=1)?mc_args[0]:NULL;
-                    int start_j=(mc_argc>=2)?0:1;
-                    if(mc_argc<2&&mc_obj->arr->len>0){value_decref(acc);acc=value_incref(mc_obj->arr->items[0]);}
+                    /* Accept either (fn, init) or (init, fn); fold is
+                       always (init, fn). Pick whichever arg is callable. */
+                    int is_fn_0 = mc_argc>=1 && mc_args[0] &&
+                                  (VAL_TAG(mc_args[0])==XS_NATIVE ||
+                                   VAL_TAG(mc_args[0])==XS_CLOSURE);
+                    int is_fn_1 = mc_argc>=2 && mc_args[1] &&
+                                  (VAL_TAG(mc_args[1])==XS_NATIVE ||
+                                   VAL_TAG(mc_args[1])==XS_CLOSURE);
+                    Value *fn; Value *acc;
+                    int start_j = 0;
+                    if (strcmp(mc_name,"fold")==0 && mc_argc>=2) {
+                        acc = value_incref(mc_args[0]); fn = mc_args[1];
+                    } else if (mc_argc>=2 && is_fn_1 && !is_fn_0) {
+                        acc = value_incref(mc_args[0]); fn = mc_args[1];
+                    } else if (mc_argc>=2) {
+                        fn = mc_args[0]; acc = value_incref(mc_args[1]);
+                    } else {
+                        fn = mc_argc>=1 ? mc_args[0] : NULL;
+                        if (mc_obj->arr->len>0) { acc=value_incref(mc_obj->arr->items[0]); start_j=1; }
+                        else acc = value_incref(XS_NULL_VAL);
+                    }
                     if(fn&&(VAL_TAG(fn)==XS_NATIVE||VAL_TAG(fn)==XS_CLOSURE)){
                         for(int j=start_j;j<mc_obj->arr->len;j++){
                             Value *pair[2]={acc,mc_obj->arr->items[j]};
@@ -3739,6 +3823,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(mc_name,"abs")==0) {
                     if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj)<0?-VAL_INT(mc_obj):VAL_INT(mc_obj));
                     else mc_result=xs_float(fabs(mc_obj->f));
+                } else if (strcmp(mc_name,"floor")==0) {
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj));
+                    else mc_result=xs_int((int64_t)floor(mc_obj->f));
+                } else if (strcmp(mc_name,"ceil")==0) {
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj));
+                    else mc_result=xs_int((int64_t)ceil(mc_obj->f));
+                } else if (strcmp(mc_name,"round")==0) {
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj));
+                    else mc_result=xs_int((int64_t)round(mc_obj->f));
+                } else if (strcmp(mc_name,"trunc")==0) {
+                    if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj));
+                    else mc_result=xs_int((int64_t)trunc(mc_obj->f));
                 } else if (strcmp(mc_name,"sign")==0) {
                     if(VAL_TAG(mc_obj)==XS_INT) mc_result=xs_int(VAL_INT(mc_obj)>0?1:(VAL_INT(mc_obj)<0?-1:0));
                     else mc_result=xs_int(mc_obj->f>0.0?1:(mc_obj->f<0.0?-1:0));
@@ -3754,10 +3850,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         mc_result=xs_float(v);
                     }
                 } else if (strcmp(mc_name,"to_str")==0||strcmp(mc_name,"to_string")==0) {
-                    char buf[64];
-                    if(VAL_TAG(mc_obj)==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)VAL_INT(mc_obj));
-                    else snprintf(buf,sizeof(buf),"%g",mc_obj->f);
-                    mc_result=xs_str(buf);
+                    if(VAL_TAG(mc_obj)==XS_BIGINT) {
+                        char *s = value_str(mc_obj);
+                        mc_result = xs_str(s);
+                        free(s);
+                    } else {
+                        char buf[64];
+                        if(VAL_TAG(mc_obj)==XS_INT) snprintf(buf,sizeof(buf),"%lld",(long long)VAL_INT(mc_obj));
+                        else snprintf(buf,sizeof(buf),"%g",mc_obj->f);
+                        mc_result=xs_str(buf);
+                    }
                 } else if (strcmp(mc_name,"to_char")==0) {
                     char buf[2]={(char)(num_i&0xFF),0};
                     mc_result=xs_str(buf);
@@ -4003,6 +4105,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     PUSH(exc);
                     frame = cf;
                     frame->ip = te->catch_ip;
+                    handled = 1;
+                    break;
+                }
+                /* No catch on this frame: drain pending defers first,
+                   parking the exception on the VM so OP_RETURN's defer
+                   completion path can pick it up and keep unwinding. */
+                if (cf->defer_depth > 0) {
+                    vm->pending_throw_frame = vm->frame_count - 1;
+                    if (vm->pending_throw_exc) value_decref(vm->pending_throw_exc);
+                    vm->pending_throw_exc = exc;
+                    cf->defer_return_ip = cf->ip;
+                    cf->defer_depth--;
+                    cf->ip = cf->defer_stack[cf->defer_depth].defer_ip;
+                    frame = cf;
                     handled = 1;
                     break;
                 }

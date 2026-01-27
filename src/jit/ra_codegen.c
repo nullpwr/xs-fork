@@ -830,24 +830,10 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                         emit_byte(&em, 0x48); emit_byte(&em, 0x8D); emit_byte(&em, 0x4C);
                         emit_byte(&em, 0x00); emit_byte(&em, 0x01);
                     } else {
-                        /* Math modulo: if (rem != 0 && signs(rem, b) differ) rem += b. */
+                        /* Truncated modulo (sign of dividend, matches C):
+                         * idiv already put a % b in rdx; just retag. */
                         /* mov rcx, rdx */
                         emit_byte(&em, 0x48); emit_byte(&em, 0x89); emit_byte(&em, 0xD1);
-                        /* test rcx, rcx ; jz .retag */
-                        emit_byte(&em, 0x48); emit_byte(&em, 0x85); emit_byte(&em, 0xC9);
-                        /* jz +imm8 -- short jump over the adjustment block */
-                        emit_byte(&em, 0x74); size_t jz_retag = em.pos; emit_byte(&em, 0x00);
-                        /* mov r9, rcx ; xor r9, r8 ; test r9, r9 ; jns .retag */
-                        emit_byte(&em, 0x49); emit_byte(&em, 0x89); emit_byte(&em, 0xC9);
-                        emit_byte(&em, 0x4D); emit_byte(&em, 0x31); emit_byte(&em, 0xC1);
-                        emit_byte(&em, 0x4D); emit_byte(&em, 0x85); emit_byte(&em, 0xC9);
-                        emit_byte(&em, 0x79); size_t jns_retag = em.pos; emit_byte(&em, 0x00);
-                        /* add rcx, r8 */
-                        emit_byte(&em, 0x4C); emit_byte(&em, 0x01); emit_byte(&em, 0xC1);
-                        /* retag label: patch both forward-jumps to here */
-                        size_t retag_pos = em.pos;
-                        em.buf[jz_retag] = (uint8_t)(retag_pos - jz_retag - 1);
-                        em.buf[jns_retag] = (uint8_t)(retag_pos - jns_retag - 1);
                         /* lea rcx, [rcx + rcx + 1] */
                         emit_byte(&em, 0x48); emit_byte(&em, 0x8D); emit_byte(&em, 0x4C);
                         emit_byte(&em, 0x09); emit_byte(&em, 0x01);
@@ -969,8 +955,17 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     emit_load_vreg(&em, in->src1, a, RCX);
                     emit_load_vreg(&em, in->src2, a, RAX);
 
-                    /* Reject NULL and non-FLOAT heap values. The tag
-                     * lives at offset 0 of the Value struct; XS_FLOAT=4. */
+                    /* Reject SMI (low bit = tag 1), NULL, and non-FLOAT
+                     * heap values. The tag lives at offset 0 of the
+                     * Value struct; XS_FLOAT=4. SMIs must be ruled out
+                     * before we dereference [rcx]/[rax], otherwise the
+                     * cmp reads from an odd address and segfaults. */
+                    /* test cl, 1 ; jnz slow  (rcx is a SMI) */
+                    emit_byte(&em, 0xF6); emit_byte(&em, 0xC1); emit_byte(&em, 0x01);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    /* test al, 1 ; jnz slow  (rax is a SMI) */
+                    emit_byte(&em, 0xA8); emit_byte(&em, 0x01);
+                    float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
                     emit_test_rr(&em, RCX, RCX);
                     float_slow_jumps[n_fslow++] = emit_jcc_rel32_ph(&em, CC_Z);
                     emit_test_rr(&em, RAX, RAX);

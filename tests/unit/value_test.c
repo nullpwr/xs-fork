@@ -118,7 +118,9 @@ TEST(map_set_get) {
 
 TEST(incref_refcount_bumps) {
     ensure_singletons();
-    Value *v = xs_int(7);
+    /* Small ints fit in a tagged SMI (no heap, no refcount), so refcount
+       checks have to use a heap-boxed value -- strings are a natural fit. */
+    Value *v = xs_str("refcount-test");
     int r0 = v->refcount;
     value_incref(v);
     ASSERT_EQ_INT(v->refcount, r0 + 1);

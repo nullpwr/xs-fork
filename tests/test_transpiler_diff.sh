@@ -92,7 +92,7 @@ one_diff "match with guard" \
 println(describe(-5))'
 
 one_diff "closure" \
-'let make_adder = fn(n) { return fn(x) { x + n } }
+'let make_adder = fn(n) { fn(x) { x + n } }
 let add5 = make_adder(5)
 println(add5(3))'
 

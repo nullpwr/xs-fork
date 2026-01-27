@@ -97,6 +97,14 @@ typedef struct VM {
        repeated hashmap lookup without losing correctness when a program
        actually reassigns a global. */
     uint64_t    global_version;
+    /* Exception unwinding state. When OP_THROW encounters a frame with
+       pending defers but no try, it has to run those defers before the
+       frame is popped; pending_throw_exc parks the in-flight value
+       across the defer run so OP_RETURN's defer-drain completion can
+       pick it up and continue unwinding. Lives on the VM rather than
+       on CallFrame so the JIT's hardcoded FRAME_SIZE stays stable. */
+    int         pending_throw_frame;
+    Value      *pending_throw_exc;
 } VM;
 
 VM  *vm_new(void);

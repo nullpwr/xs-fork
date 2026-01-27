@@ -3,8 +3,8 @@
 -- with VM/interp on five arithmetic operators that the C runtime
 -- modeled differently:
 --   *  **      pow promoted ints to floats unconditionally
---   *  //      C truncating-toward-zero instead of floor division
---   *  %       C remainder instead of math modulo
+--   *  //      floor division (toward -inf)
+--   *  %       truncated remainder (sign follows dividend)
 --   *  <=>     never emitted (placeholder XS_NULL)
 --   *  &&, ||  never emitted (placeholder XS_NULL)
 --   *  is      never emitted
@@ -12,7 +12,7 @@
 -- xs_pow / xs_is helpers to the C runtime.
 assert_eq(2 ** 10, 1024)
 assert_eq(-7 // 2, -4)
-assert_eq(-7 % 2, 1)        -- math modulo
+assert_eq(-7 % 2, -1)       -- truncated remainder
 assert_eq(5 <=> 3, 1)
 assert_eq(3 <=> 5, -1)
 assert_eq(5 <=> 5, 0)

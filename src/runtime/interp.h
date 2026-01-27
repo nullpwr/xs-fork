@@ -48,11 +48,13 @@ struct Interp {
     int     yield_limit;     /* max yields before stopping, 0 = unlimited */
     /* Lazy-generator handoff. When lazy_yield_chan is set, every
        NODE_YIELD sends the value on it and then blocks on
-       lazy_resume_chan until the consumer calls .next() again. The
-       worker thread that runs a generator body sets these on entry
-       and clears them on exit. */
-    Value  *lazy_yield_chan;
-    Value  *lazy_resume_chan;
+       lazy_resume_chan until the consumer calls .next() again. These
+       used to live on the Interp but since multiple generator workers
+       share the one Interp over the GIL, they had to move to
+       thread-local storage (see xs_gen_tls_{get,set}) so one worker's
+       channels don't get overwritten by another's. */
+    Value  *lazy_yield_chan_unused_;
+    Value  *lazy_resume_chan_unused_;
 
     /* effects */
     EffectFrame *effect_stack;

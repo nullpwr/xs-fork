@@ -7,10 +7,13 @@ fn* range3() {
     yield 3
 }
 
+-- .next() on a generator returns the iterator-protocol {value, done}
+-- result so a for-loop can see end-of-stream. Unwrap to .value for
+-- these direct-drive checks.
 let g = range3()
-assert_eq(g.next(), 1)
-assert_eq(g.next(), 2)
-assert_eq(g.next(), 3)
+assert_eq(g.next().value, 1)
+assert_eq(g.next().value, 2)
+assert_eq(g.next().value, 3)
 
 -- Iterate via for-in over a generator
 fn* squares(n) {
@@ -28,8 +31,8 @@ assert_eq(total, 30)
 -- Generators are independent instances
 let a = range3()
 let b = range3()
-assert_eq(a.next(), 1)
-assert_eq(b.next(), 1)
-assert_eq(a.next(), 2)
+assert_eq(a.next().value, 1)
+assert_eq(b.next().value, 1)
+assert_eq(a.next().value, 2)
 
 println("CONFORMANCE OK")

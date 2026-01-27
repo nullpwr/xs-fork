@@ -1965,8 +1965,17 @@ static Node *parse_handle(Parser *p) {
     Token *kw = pp_expect(p, TK_HANDLE, "expected 'handle'");
     Span span = kw->span;
 
-    /* handle expr { arms } */
+    /* handle expr { arms }                         -- old-style arms
+       handle expr with Effect { fn op(args){body} } -- effect-scoped */
     Node *expr = parse_expr(p, 0);
+    char *with_effect = NULL;
+    if (pp_match(p, TK_WITH)) {
+        Token *et = pp_peek(p, 0);
+        if (et->kind == TK_IDENT) {
+            with_effect = xs_strdup(et->sval ? et->sval : "");
+            pp_advance(p);
+        }
+    }
     pp_expect(p, TK_LBRACE, "expected '{' after handle expression");
 
     EffectArmList arms = effectarmlist_new();
@@ -1974,6 +1983,58 @@ static Node *parse_handle(Parser *p) {
     while (!pp_check2(p, TK_RBRACE, TK_EOF)) {
         skip_semis(p);
         if (pp_check2(p, TK_RBRACE, TK_EOF)) break;
+
+        /* In `with Effect { ... }` form each arm is written as
+           `fn op(params) { body }` and inherits the effect name from
+           the outer `with`. Otherwise the arms use the older
+           `Effect.op(params) => body` shape. */
+        if (with_effect && pp_check(p, TK_FN)) {
+            pp_advance(p); /* consume 'fn' */
+            Token *on_tok = pp_peek(p, 0);
+            char *op_name = on_tok->kind == TK_IDENT
+                ? xs_strdup(on_tok->sval ? on_tok->sval : "")
+                : xs_strdup("__op__");
+            if (on_tok->kind == TK_IDENT) pp_advance(p);
+
+            ParamList params = paramlist_new();
+            if (pp_match(p, TK_LPAREN)) {
+                while (!pp_check2(p, TK_RPAREN, TK_EOF)) {
+                    Token *pt = pp_peek(p, 0);
+                    Param pm = {0};
+                    pm.span = pt->span;
+                    if (pt->kind == TK_IDENT) {
+                        pp_advance(p);
+                        pm.name = xs_strdup(pt->sval ? pt->sval : "");
+                        Node *pn = node_new(NODE_PAT_IDENT, pt->span);
+                        pn->pat_ident.name = xs_strdup(pm.name);
+                        pn->pat_ident.mutable = 0;
+                        pm.pattern = pn;
+                    } else {
+                        pp_advance(p);
+                    }
+                    /* Optional ': type' annotation on the parameter. */
+                    if (pp_match(p, TK_COLON)) parse_type_expr(p);
+                    paramlist_push(&params, pm);
+                    if (!pp_match(p, TK_COMMA)) break;
+                }
+                pp_expect(p, TK_RPAREN, "expected ')' after handler params");
+            }
+            /* Optional '-> type' return annotation, just consume. */
+            if (pp_match(p, TK_ARROW)) parse_type_expr(p);
+            Node *body = pp_check(p, TK_LBRACE) ? parse_block(p) : parse_expr(p, 0);
+
+            EffectArm arm;
+            arm.effect_name = xs_strdup(with_effect);
+            arm.op_name     = op_name;
+            arm.params      = params;
+            arm.body        = body;
+            arm.span        = span;
+            effectarmlist_push(&arms, arm);
+
+            pp_match(p, TK_COMMA);
+            skip_semis(p);
+            continue;
+        }
 
         /* Effect.op(params) => { body } */
         Token *eff_tok = pp_peek(p, 0);
@@ -3852,6 +3913,35 @@ static Node *parse_stmt(Parser *p) {
 
     /* Declarations */
     if (tok->kind == TK_FN) {
+        /* A bare `fn(...) { ... }` in statement position is actually an
+           anonymous function *expression* -- the natural case being
+           `fn(n) { fn(x) { x + n } }` where the inner fn is the outer
+           block's trailing value. Distinguish by the token right after
+           `fn`: if it's not an identifier / operator name, nothing
+           binds this function, so it has to be an expression. Route
+           those through the normal expression path so parse_block's
+           trailing-expression logic picks them up. */
+        Token *nt1 = pp_peek(p, 1);
+        int looks_anon = 0;
+        TokenKind after = nt1->kind;
+        if (after == TK_STAR) {
+            /* fn*(...) generator or fn* name(...) */
+            after = pp_peek(p, 2)->kind;
+        }
+        if (after == TK_LPAREN || after == TK_LT) looks_anon = 1;
+        if (looks_anon && !is_pub && !fn_is_test && !fn_deprecated_msg) {
+            free(fn_deprecated_msg);
+            if (attr_derives) {
+                for (int di = 0; di < attr_n_derives; di++) free(attr_derives[di]);
+                free(attr_derives);
+            }
+            Node *expr = parse_expr(p, 0);
+            int has_semi = (pp_match(p, TK_SEMICOLON) != NULL);
+            Node *n = node_new(NODE_EXPR_STMT, span);
+            n->expr_stmt.expr = expr;
+            n->expr_stmt.has_semicolon = has_semi;
+            return n;
+        }
         Node *fn_node = parse_fn_decl(p, is_pub, is_async, fn_is_pure);
         if (fn_node) {
             fn_node->fn_decl.is_test = fn_is_test;
@@ -4278,10 +4368,17 @@ static Node *parse_stmt(Parser *p) {
         return n;
     }
 
-    /* defer { block } */
+    /* defer { block } or defer <stmt> (single statement form) */
     if (tok->kind == TK_DEFER) {
         pp_advance(p);
-        Node *body = parse_block(p);
+        Node *body;
+        if (pp_peek(p, 0)->kind == TK_LBRACE) {
+            body = parse_block(p);
+        } else {
+            Node *s = parse_stmt(p);
+            body = node_new(NODE_BLOCK, span);
+            nodelist_push(&body->block.stmts, s);
+        }
         Node *n = node_new(NODE_DEFER, span);
         n->defer_.body = body;
         return n;

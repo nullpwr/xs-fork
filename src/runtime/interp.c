@@ -1818,7 +1818,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     if (VAL_TAG(obj) == XS_STR) {
         const char *s = obj->s;
         int slen = (int)strlen(s);
-        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) return xs_int(slen);
+        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0)
+            return xs_int(utf8_strlen(s, slen));
         if (strcmp(method, "upper") == 0 || strcmp(method, "to_upper") == 0) {
             int olen;
             char *r = utf8_str_upper(s, slen, &olen);
@@ -2289,19 +2290,27 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return res;
         }
         if (strcmp(method, "reduce") == 0 || strcmp(method, "fold") == 0) {
-            /* reduce(fn): use first element as init, reduce remaining
-               reduce(fn, init): args[0]=fn, args[1]=init
-               fold(init, fn)  : args[0]=init, args[1]=fn  */
+            /* reduce / fold accept either order: (init, fn) or (fn, init).
+               Detect by looking at which arg is callable. reduce(fn) with
+               one arg uses the first element as the initial accumulator. */
             if (argc<1) return value_incref(XS_NULL_VAL);
             Value *fn_val, *init;
             int start_idx = 0;
-            if (strcmp(method, "fold") == 0) {
-                if (argc < 2) return value_incref(XS_NULL_VAL);
+            int is_fn_0 = argc >= 1 && args[0] &&
+                          (VAL_TAG(args[0]) == XS_FUNC ||
+                           VAL_TAG(args[0]) == XS_NATIVE ||
+                           VAL_TAG(args[0]) == XS_CLOSURE);
+            int is_fn_1 = argc >= 2 && args[1] &&
+                          (VAL_TAG(args[1]) == XS_FUNC ||
+                           VAL_TAG(args[1]) == XS_NATIVE ||
+                           VAL_TAG(args[1]) == XS_CLOSURE);
+            if (strcmp(method, "fold") == 0 && argc >= 2) {
+                init = args[0]; fn_val = args[1];
+            } else if (argc >= 2 && is_fn_1 && !is_fn_0) {
                 init = args[0]; fn_val = args[1];
             } else if (argc >= 2) {
                 fn_val = args[0]; init = args[1];
             } else {
-                /* reduce(fn): 1 arg: use first element as accumulator */
                 fn_val = args[0];
                 if (arr->len == 0) return value_incref(XS_NULL_VAL);
                 init = arr->items[0];
@@ -2910,9 +2919,20 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         map_set(result->map, "done", dv); value_decref(dv);
                         return result;
                     }
+                    /* The generator worker runs on a separate thread but
+                       shares our interp. While it has the GIL its body
+                       eval walks through push_env / call frames and
+                       leaves i->env pointing into the generator's own
+                       scope when it suspends on the yield channel. If
+                       we don't snapshot + restore, the caller -- and
+                       any subsequent for-loop -- runs with a stale env
+                       and can't find its own locals. */
+                    Env *saved_env = i->env ? env_incref(i->env) : NULL;
                     Value *go = value_incref(XS_NULL_VAL);
                     xs_chan_send(rch, go); value_decref(go);
                     Value *v = xs_chan_recv(ych, i);
+                    if (i->env) env_decref(i->env);
+                    i->env = saved_env;
                     int eos = 0;
                     if (v && VAL_TAG(v) == XS_MAP) {
                         Value *e = map_get(v->map, "_gen_eos");
@@ -4022,6 +4042,30 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             else           n2 = (span < 0) ? (-span + (-step) - 1) / (-step) : 0;
             return xs_int(n2);
         }
+        if (strcmp(method, "start") == 0) return xs_int(obj->range->start);
+        if (strcmp(method, "end") == 0)   return xs_int(obj->range->end);
+        if (strcmp(method, "is_empty") == 0) {
+            int64_t step = obj->range->step ? obj->range->step : 1;
+            int64_t s = obj->range->start, e = obj->range->end;
+            int empty;
+            if (obj->range->inclusive) empty = (step > 0 ? s > e : s < e);
+            else                        empty = (step > 0 ? s >= e : s <= e);
+            return value_incref(empty ? XS_TRUE_VAL : XS_FALSE_VAL);
+        }
+        if (strcmp(method, "contains") == 0 && argc >= 1 && VAL_TAG(args[0]) == XS_INT) {
+            int64_t v2 = VAL_INT(args[0]);
+            int64_t step = obj->range->step ? obj->range->step : 1;
+            int64_t s = obj->range->start, e = obj->range->end;
+            int in;
+            if (step > 0) {
+                in = v2 >= s && (obj->range->inclusive ? v2 <= e : v2 < e) &&
+                     ((v2 - s) % step == 0);
+            } else {
+                in = v2 <= s && (obj->range->inclusive ? v2 >= e : v2 > e) &&
+                     ((s - v2) % (-step) == 0);
+            }
+            return value_incref(in ? XS_TRUE_VAL : XS_FALSE_VAL);
+        }
         if (strcmp(method, "step") == 0) {
             return xs_int(obj->range->step ? obj->range->step : 1);
         }
@@ -4235,9 +4279,8 @@ static Value *eval_binop(Interp *i, Node *n) {
         }
         if (op[0]=='%' && op[1]=='\0') {
             if (!b) { xs_runtime_error(n->span, "modulo by zero", NULL, "cannot take remainder with divisor zero"); result=value_incref(XS_NULL_VAL); goto done; }
-            int64_t r = a % b;
-            if (r != 0 && ((r ^ b) < 0)) r += b; /* math modulo */
-            result=xs_int(r); goto done;
+            /* Truncated modulo (sign follows the dividend), matching C. */
+            result=xs_int(a % b); goto done;
         }
         if (op[0]=='*' && op[1]=='*') {
             if (b < 0) { result=xs_float(pow((double)a,(double)b)); goto done; }
@@ -4275,6 +4318,17 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='>' && op[1]=='=') { result=cmp>=0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
     }
 
+    /* Lexicographic array/tuple comparisons: delegate to value_cmp, which
+       already handles the shorter-side-is-less rule. */
+    if ((VAL_TAG(left) == XS_ARRAY || VAL_TAG(left) == XS_TUPLE) &&
+        VAL_TAG(left) == VAL_TAG(right)) {
+        int cmp = value_cmp(left, right);
+        if (op[0]=='<' && op[1]=='\0') { result=cmp<0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
+        if (op[0]=='>' && op[1]=='\0') { result=cmp>0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
+        if (op[0]=='<' && op[1]=='=') { result=cmp<=0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
+        if (op[0]=='>' && op[1]=='=') { result=cmp>=0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
+    }
+
     if ((VAL_TAG(left)==XS_INT||VAL_TAG(left)==XS_FLOAT||VAL_TAG(left)==XS_BIGINT) &&
         (VAL_TAG(right)==XS_INT||VAL_TAG(right)==XS_FLOAT||VAL_TAG(right)==XS_BIGINT)) {
         double a = VAL_TAG(left)==XS_FLOAT ? left->f : (VAL_TAG(left)==XS_BIGINT ? bigint_to_double(left->bigint) : (double)VAL_INT(left));
@@ -4283,7 +4337,7 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='-') { result=xs_float(a-b2); goto done; }
         if (op[0]=='*' && op[1]=='\0') { result=xs_float(a*b2); goto done; }
         if (op[0]=='/' && op[1]=='\0') {
-            if (b2==0.0) { xs_runtime_error(n->span, "division by zero", NULL, "cannot divide by zero"); result=value_incref(XS_NULL_VAL); goto done; }
+            /* Float division: IEEE 754 yields +/-inf or NaN; no trap. */
             result=xs_float(a/b2); goto done;
         }
         if (op[0]=='%') { result=xs_float(fmod(a,b2)); goto done; }
@@ -4509,6 +4563,15 @@ static Value *eval_binop(Interp *i, Node *n) {
         goto done;
     }
 
+    /* Arithmetic / numeric operator applied to types where we have no
+       sensible interpretation (e.g. "x" - "y"). Emit a catchable runtime
+       error rather than silently returning null, so try/catch sees a
+       real exception. */
+    if (op[0] == '+' || op[0] == '-' || op[0] == '*' || op[0] == '/' ||
+        op[0] == '%' || op[0] == '<' || op[0] == '>') {
+        xs_runtime_error(n->span, "type mismatch", NULL,
+                         "operator '%s' is not defined for these operands", op);
+    }
     result = value_incref(XS_NULL_VAL);
 
 done:
@@ -5754,14 +5817,25 @@ do_call: ;
         }
         Value *val = n->yield_.value ? EVAL(i, n->yield_.value) : value_incref(XS_NULL_VAL);
         if (i->cf.signal) { value_decref(val); return value_incref(XS_NULL_VAL); }
-        if (i->lazy_yield_chan && i->lazy_resume_chan) {
+        Value *ych = xs_gen_tls_yield_chan();
+        Value *rch = xs_gen_tls_resume_chan();
+        if (ych && rch) {
             /* Lazy mode: hand the value to the consumer and block until
                they ask for the next one. The chan funcs release the GIL
-               during the wait so the consumer can actually run. */
-            xs_chan_send(i->lazy_yield_chan, val);
+               during the wait so the consumer can actually run. While
+               we're suspended the main thread mutates i->env for its own
+               work; snapshot ours so we come back to the generator scope
+               we yielded from rather than inheriting whatever frame the
+               consumer happened to leave behind. The channels come from
+               TLS so a sibling generator can't swap them out from under
+               us between yields. */
+            Env *gen_env = i->env ? env_incref(i->env) : NULL;
+            xs_chan_send(ych, val);
             value_decref(val);
-            Value *go = xs_chan_recv(i->lazy_resume_chan, i);
+            Value *go = xs_chan_recv(rch, i);
             if (go) value_decref(go);
+            if (i->env) env_decref(i->env);
+            i->env = gen_env;
         } else if (i->yield_collect) {
             /* legacy eager mode: push value into collector array */
             array_push(i->yield_collect->arr, val);
@@ -6181,11 +6255,10 @@ do_call: ;
         int saved_in_handler = i->in_handler;
         i->in_handler = 1;
 
-        Value *_ = EVAL(i, frame->handler_body);
-        value_decref(_);
+        Value *body_val = EVAL(i, frame->handler_body);
 
-        if (i->cf.signal == CF_RESUME)
-            CF_CLEAR(i);
+        int resumed = (i->cf.signal == CF_RESUME);
+        if (resumed) CF_CLEAR(i);
 
         Value *resume_val = i->resume_value;
         i->resume_value   = saved_resume;
@@ -6195,7 +6268,19 @@ do_call: ;
         i->env = saved_env;
         env_decref(handler_call_env);
 
-        return resume_val;
+        if (resumed) {
+            /* Handler called resume: drop the body's value and feed
+               resume's value back into the perform expression. */
+            value_decref(body_val);
+            return resume_val;
+        }
+        /* Handler short-circuited: abort the enclosing function with the
+           handler's body value so `handle ... with ...` evaluates to it. */
+        if (resume_val) value_decref(resume_val);
+        if (i->cf.value) value_decref(i->cf.value);
+        i->cf.signal = CF_RETURN;
+        i->cf.value  = body_val;
+        return value_incref(XS_NULL_VAL);
     }
 
     case NODE_RESUME: {

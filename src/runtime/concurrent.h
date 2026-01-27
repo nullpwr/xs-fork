@@ -36,10 +36,18 @@ void xs_sleep_seconds(double secs);
 
 /* Spawn a lazy-generator worker thread. The worker waits for the
    first .next() (which sends a token on resume_chan), then runs the
-   closure with parent->lazy_yield_chan/lazy_resume_chan installed.
+   closure with the thread-local yield/resume channel slots installed.
    When the closure returns, the worker sends an EOS sentinel map
    {_gen_eos: true} on yield_chan and exits. */
 void xs_spawn_generator(struct Interp *parent, Value *closure,
                         Value *yield_chan, Value *resume_chan);
+
+/* Per-thread generator handoff channels. NODE_YIELD reads these; the
+   worker thread sets them on entry and restores them on exit. They
+   have to be thread-local because all generator workers share the
+   single Interp pointer under the GIL. */
+Value *xs_gen_tls_yield_chan(void);
+Value *xs_gen_tls_resume_chan(void);
+void   xs_gen_tls_set(Value *yield_chan, Value *resume_chan);
 
 #endif

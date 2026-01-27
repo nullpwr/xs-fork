@@ -294,6 +294,23 @@ void xs_sleep_seconds(double secs) {
 }
 
 /* --- lazy generator worker thread --------------------------------- */
+
+/* Thread-local yield/resume channel slots. Every generator worker runs
+   on its own OS thread, so keeping the channels here instead of on the
+   Interp prevents worker-A from being handed worker-B's channels after
+   a context switch (which we hit as deadlocks once more than one
+   generator was alive at a time). */
+static _Thread_local Value *tls_yield_chan  = NULL;
+static _Thread_local Value *tls_resume_chan = NULL;
+
+Value *xs_gen_tls_yield_chan(void)  { return tls_yield_chan;  }
+Value *xs_gen_tls_resume_chan(void) { return tls_resume_chan; }
+
+void xs_gen_tls_set(Value *yield_chan, Value *resume_chan) {
+    tls_yield_chan  = yield_chan;
+    tls_resume_chan = resume_chan;
+}
+
 typedef struct GenArg {
     Interp *parent;
     Value  *closure;
@@ -318,17 +335,19 @@ static void *gen_worker_entry(void *arg_) {
     if (first) value_decref(first);
 
     /* Install the lazy-handoff channels so NODE_YIELD routes through
-       them instead of accumulating into i->yield_collect. We restore
-       on exit; we are running on a separate thread but the GIL ensures
-       we're alone in the interpreter. */
-    Value *saved_yield_chan  = ip->lazy_yield_chan;
-    Value *saved_resume_chan = ip->lazy_resume_chan;
-    Value *saved_collect     = ip->yield_collect;
-    int    saved_limit       = ip->yield_limit;
-    ip->lazy_yield_chan  = ych;
-    ip->lazy_resume_chan = rch;
-    ip->yield_collect    = NULL;
-    ip->yield_limit      = 0;
+       them instead of accumulating into i->yield_collect. We use TLS
+       rather than interp fields so concurrent generator workers don't
+       trample each other's channel pointers. We also snapshot i->env
+       because call_value is going to replace it with the generator
+       body's scope, and main would otherwise pick up the stale pointer
+       after the body finishes. */
+    Value *saved_collect = ip->yield_collect;
+    int    saved_limit   = ip->yield_limit;
+    Env   *saved_env     = ip->env ? env_incref(ip->env) : NULL;
+    tls_yield_chan    = ych;
+    tls_resume_chan   = rch;
+    ip->yield_collect = NULL;
+    ip->yield_limit   = 0;
 
     Value *body = call_value(ip, closure, NULL, 0, "gen");
     if (body) value_decref(body);
@@ -337,10 +356,12 @@ static void *gen_worker_entry(void *arg_) {
         ip->cf.signal = 0; ip->cf.value = NULL;
     }
 
-    ip->lazy_yield_chan  = saved_yield_chan;
-    ip->lazy_resume_chan = saved_resume_chan;
-    ip->yield_collect    = saved_collect;
-    ip->yield_limit      = saved_limit;
+    tls_yield_chan    = NULL;
+    tls_resume_chan   = NULL;
+    ip->yield_collect = saved_collect;
+    ip->yield_limit   = saved_limit;
+    if (ip->env) env_decref(ip->env);
+    ip->env = saved_env;
 
     /* End-of-stream sentinel. The for-loop / .next() consumer sees
        _gen_eos=true and stops. */
