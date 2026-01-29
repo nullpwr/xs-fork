@@ -48,6 +48,10 @@ run_group() {
         else
             actual="$("$XS" --no-color "$f" 2>&1 || true)"
         fi
+        # Strip CRs so golden fixtures (LF-only) compare cleanly on
+        # Windows, where the runtime can emit CRLF through the msys2
+        # stdio layer.
+        actual="${actual//$'\r'/}"
         actual="$(echo "$actual" | normalize "$f")"
 
         if [ ! -f "$exp" ]; then
@@ -72,7 +76,16 @@ run_group() {
             else
                 fail=$((fail + 1))
                 echo "  FAIL  $group/$name"
-                diff <(cat "$exp") <(echo "$actual") | head -12 | sed 's/^/        /'
+                # diff isn't a hard dep; fall back to raw dump when the
+                # environment (e.g. bare msys2) doesn't ship diffutils.
+                if command -v diff > /dev/null 2>&1; then
+                    diff <(cat "$exp") <(echo "$actual") | head -12 | sed 's/^/        /'
+                else
+                    echo "        --- expected ---"
+                    cat "$exp" | head -6 | sed 's/^/        /'
+                    echo "        --- actual ---"
+                    echo "$actual" | head -6 | sed 's/^/        /'
+                fi
             fi
         fi
     done

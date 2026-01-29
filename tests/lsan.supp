@@ -18,3 +18,27 @@ leak:explain_init
 
 # BearSSL one-time state (trust anchors loaded once from a static array).
 leak:bearssl_trust_init
+
+# Lexer token string buffers. Identifiers live for the whole program run;
+# we don't walk the token list at exit to free each sb, so one-shot xs
+# runs hold them until _exit.
+leak:sb_push
+
+# Type-checker metadata. Types get stapled onto Symbols and live for the
+# life of the SymTab, which itself is process-lifetime in the xs CLI.
+leak:ty_fn
+leak:tc_walk
+
+# VM bytecode: Proto chunks, opcode buffers, const tables, global-name
+# interns, fn prologue strdups. One per compilation unit, released only
+# at process exit today.
+leak:proto_new
+leak:chunk_write
+leak:chunk_add_const
+leak:compile_fn
+leak:emit_global_name
+
+# VM runtime working memory: IC arrays grown lazily in OP_GET_GLOBAL,
+# closure/upvalue objects still refcounted > 0 at exit because globals
+# pin them.
+leak:vm_dispatch

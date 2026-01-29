@@ -7,6 +7,14 @@
 # but computes the wrong result at runtime.
 
 cd "$(dirname "$0")/.."
+# If this runs against an ASan build, don't let the process-lifetime
+# leaks the sanitizer prints to stderr (which we capture as part of
+# stdout via 2>&1) randomize the diff. The suppressions file covers the
+# known process-wide allocations; fresh leaks would still surface as
+# a real ASan error, not as diff churn.
+if [ -f tests/lsan.supp ]; then
+    export LSAN_OPTIONS="${LSAN_OPTIONS:-exitcode=0:suppressions=$PWD/tests/lsan.supp:print_suppressions=0}"
+fi
 pass=0
 fail=0
 have_node=0

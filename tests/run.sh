@@ -65,7 +65,7 @@ report_fail() {
     fail=$((fail + 1))
     fails="$fails\n  $kind: $name"
     echo "  FAIL  $name ($kind)"
-    [ -n "$extra" ] && echo "$extra" | head -6 | sed 's/^/        /'
+    [ -n "$extra" ] && echo "$extra" | head -40 | sed 's/^/        /'
 }
 
 run_one() {
@@ -114,20 +114,32 @@ run_one() {
         fi
     fi
 
+    # Build a combined stdout+stderr blob for the failure reports so the
+    # actual diagnostic message is visible in CI. Non-zero exits with
+    # silent stderr (e.g. a Windows-only shutdown abort) are unreadable
+    # otherwise.
+    dump_fail() {
+        local out="$1" errfile="$2"
+        printf '%s\n' "$out"
+        if [ -s "$errfile" ]; then
+            printf -- '--- stderr ---\n'
+            cat "$errfile"
+        fi
+    }
     if [ $rc_interp -ne 0 ] && [ $rc_vm -ne 0 ]; then
-        report_fail "BOTH" "$name" "$out_interp"
+        report_fail "BOTH" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt)"
         return
     fi
     if [ $rc_interp -ne 0 ]; then
-        report_fail "INTERP" "$name" "$out_interp"
+        report_fail "INTERP" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt)"
         return
     fi
     if [ $rc_vm -ne 0 ]; then
-        report_fail "VM" "$name" "$out_vm"
+        report_fail "VM" "$name" "$(dump_fail "$out_vm" /tmp/xs_err_v.txt)"
         return
     fi
     if [ $run_jit -eq 1 ] && [ $rc_jit -ne 0 ]; then
-        report_fail "JIT" "$name" "$out_jit"
+        report_fail "JIT" "$name" "$(dump_fail "$out_jit" /tmp/xs_err_j.txt)"
         return
     fi
 
