@@ -70,11 +70,15 @@ typedef enum {
 typedef struct {
     TokenKind kind;
     Span      span;
-    union {
-        int64_t  ival;   /* TK_INT, TK_BOOL */
-        double   fval;   /* TK_FLOAT */
-        char    *sval;   /* TK_STRING, TK_IDENT, TK_CHAR, etc. */
-    };
+    /* Used to be a union. Too many call sites read sval to print a
+       diagnostic on the token they got (often the wrong kind after a
+       parse error) and the union made sval read back the numeric bits
+       of ival / fval, crashing strlen. Keeping the three slots separate
+       costs a few bytes per token and closes a class of fuzz-found
+       SEGVs. */
+    int64_t  ival;   /* TK_INT, TK_BOOL */
+    double   fval;   /* TK_FLOAT */
+    char    *sval;   /* TK_STRING, TK_IDENT, TK_CHAR, etc. */
 } Token;
 
 typedef struct {

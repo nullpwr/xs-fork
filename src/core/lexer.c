@@ -325,6 +325,11 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
         char *raw = result;
         int rlen = (int)strlen(raw);
 
+        /* Empty body (e.g. a malformed `"""""""""`) has no indentation
+           to compute; skip. Prevents i2 from underflowing to -1 and
+           reading raw[-1]. */
+        if (rlen == 0) goto triple_done;
+
         /* Find indentation of the closing """ (last line's leading whitespace) */
         int indent = 0;
         int i2 = rlen - 1;
@@ -366,6 +371,7 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
         }
         free(raw);
         return dedented;
+    triple_done:;
     }
 
     return result;

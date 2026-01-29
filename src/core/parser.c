@@ -185,6 +185,22 @@ static Token *pp_match(Parser *p, TokenKind k) {
     return NULL;
 }
 
+/* Token.sval sits in a union with ival/fval, so dereferencing it on a
+   numeric token (TK_INT/TK_FLOAT/TK_BOOL/TK_NULL) reads the number's
+   bits as a pointer and crashes on any print path. Only the kinds that
+   actually wrote sval can be trusted; everything else falls back to the
+   token kind's static display name. Use this when surfacing a token's
+   text to the user (diagnostics, suggestions, captured type text). */
+static const char *safe_tok_text(const Token *t) {
+    int sval_ok = (t->kind == TK_STRING || t->kind == TK_RAW_STRING ||
+                   t->kind == TK_CHAR   || t->kind == TK_IDENT      ||
+                   t->kind == TK_BIGINT || t->kind == TK_MACRO_BANG ||
+                   t->kind == TK_UNKNOWN ||
+                   ((int)t->kind >= TK_PLUGIN_BASE &&
+                    (int)t->kind <  TK_PLUGIN_MAX));
+    return (sval_ok && t->sval) ? t->sval : token_kind_name(t->kind);
+}
+
 /* contextual keyword: match 'where' as an identifier, not a reserved word */
 static int pp_match_where(Parser *p) {
     Token *t = pp_peek(p, 0);
@@ -254,8 +270,9 @@ static Token *pp_expect_ex(Parser *p, TokenKind k, const char *msg, int open_lin
 
     Token *t = pp_peek(p, 0);
     const char *expected_name = token_display_name(k);
-    const char *got_name = t->sval ? t->sval : token_display_name(t->kind);
-    const char *hint_str = pp_suggest(k, t->kind, t->sval);
+    const char *got_name      = safe_tok_text(t);
+    const char *hint_str      = pp_suggest(k, t->kind,
+        (t->kind == TK_IDENT) ? t->sval : NULL);
 
     p->panic_mode = 1;
     p->had_error  = 1;
@@ -1377,7 +1394,7 @@ static Node *parse_primary(Parser *p) {
             p->pos = saved_pos;
             t = pp_peek(p, 0);
         }
-        const char *tname = t->sval ? t->sval : token_kind_name(t->kind);
+        const char *tname = safe_tok_text(t);
         const char *suggestion = (t->kind == TK_IDENT && t->sval)
                                ? suggest_keyword(t->sval) : NULL;
         if (suggestion)
@@ -2892,16 +2909,13 @@ static char *capture_type_text(Parser *p) {
     /* Build string from tokens between start..end */
     int buflen = 0;
     for (int i = start; i < end; i++) {
-        Token *t = &p->tokens[i];
-        const char *s = t->sval ? t->sval : token_kind_name(t->kind);
+        const char *s = safe_tok_text(&p->tokens[i]);
         buflen += (int)strlen(s) + 1; /* +1 for possible separator */
     }
     char *buf = xs_malloc(buflen + 1);
     buf[0] = '\0';
     for (int i = start; i < end; i++) {
-        Token *t = &p->tokens[i];
-        const char *s = t->sval ? t->sval : token_kind_name(t->kind);
-        strcat(buf, s);
+        strcat(buf, safe_tok_text(&p->tokens[i]));
     }
     if (buf[0] == '\0') { free(buf); return xs_strdup("?"); }
     return buf;
