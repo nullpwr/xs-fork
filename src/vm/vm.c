@@ -4258,9 +4258,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 CallFrame *cf = &vm->frames[fi];
                 if (cf->try_depth > 0) {
                     TryEntry *te = &cf->try_stack[--cf->try_depth];
-                    /* don't unwind stack: keep it intact for resume */
-                    /* just jump to handler within the handler frame */
-                    vm->sp = te->stack_top;
+                    /* DON'T truncate sp to te->stack_top: the memory
+                       between there and sp_off is the suspended nested
+                       frames' live local slots. Overwriting them (the
+                       handler's PUSHes start at the new sp and grow) and
+                       then restoring via memcpy on resume leaves those
+                       frames seeing handler-pushed values in their
+                       local slots, which cascades into OP_STORE_LOCAL
+                       decref'ing the wrong old value and ultimately a
+                       use-after-free on a compiler const.
+                       Instead, leave sp alone, drop eff_val above the
+                       suspended frames' locals (where handler's STORE_
+                       LOCAL will pick it up), and let OP_EFFECT_RESUME
+                       rewind cleanly via sp_off. */
+                    (void)te; /* te->stack_top no longer used here */
                     PUSH(eff_val);
                     vm->frame_count = fi + 1;
                     frame = cf;
