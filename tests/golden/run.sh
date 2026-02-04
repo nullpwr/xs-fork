@@ -48,9 +48,10 @@ run_group() {
         else
             actual="$("$XS" --no-color "$f" 2>&1 || true)"
         fi
-        # Strip CRs so golden fixtures (LF-only) compare cleanly on
-        # Windows, where the runtime can emit CRLF through the msys2
-        # stdio layer.
+        # Strip CRs so golden fixtures compare cleanly on Windows.
+        # Both sides need scrubbing: msys stdout may come back CRLF,
+        # and git's autocrlf on Windows may check out .expected files
+        # with CRLF endings.
         actual="${actual//$'\r'/}"
         actual="$(echo "$actual" | normalize "$f")"
 
@@ -66,7 +67,11 @@ run_group() {
             continue
         fi
 
-        if [ "$actual" = "$(cat "$exp")" ]; then
+        local expected
+        expected="$(cat "$exp")"
+        expected="${expected//$'\r'/}"
+
+        if [ "$actual" = "$expected" ]; then
             pass=$((pass + 1))
         else
             if [ "${UPDATE_GOLDEN:-0}" = "1" ]; then
@@ -79,12 +84,12 @@ run_group() {
                 # diff isn't a hard dep; fall back to raw dump when the
                 # environment (e.g. bare msys2) doesn't ship diffutils.
                 if command -v diff > /dev/null 2>&1; then
-                    diff <(cat "$exp") <(echo "$actual") | head -12 | sed 's/^/        /'
+                    diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | head -12 | sed 's/^/        /'
                 else
                     echo "        --- expected ---"
-                    cat "$exp" | head -6 | sed 's/^/        /'
+                    printf '%s\n' "$expected" | head -6 | sed 's/^/        /'
                     echo "        --- actual ---"
-                    echo "$actual" | head -6 | sed 's/^/        /'
+                    printf '%s\n' "$actual" | head -6 | sed 's/^/        /'
                 fi
             fi
         fi

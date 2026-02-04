@@ -38,6 +38,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     if (prog) node_free(prog);
 
     token_array_free(&ta);
+    /* lexer accumulates a comment list during tokenize; the main xs
+       binary owns and releases it via comment_list_free, so the fuzz
+       harness has to do the same or libFuzzer's leak check fires on
+       every input. */
+    comment_list_free(&lex.comments);
     free(buf);
     return 0;
 }

@@ -16,6 +16,11 @@ cd "$(dirname "$0")/.."
 # the easy ones; expand it as they get fixed.
 export LSAN_OPTIONS="${LSAN_OPTIONS:-exitcode=0:suppressions=$PWD/tests/lsan.supp:print_suppressions=0}"
 
+# Ask xs to print a one-line exit reason whenever it returns non-zero,
+# so CI logs surface the actual cause when stderr is otherwise silent.
+# Tests that assert specific stderr lines ignore this trailing line.
+export XS_DEBUG_EXIT="${XS_DEBUG_EXIT:-1}"
+
 pass=0
 fail=0
 diverge=0
