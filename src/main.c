@@ -2445,6 +2445,13 @@ run_file:;
         /* Any xs_runtime_error() call during execution must surface as a
            non-zero exit even if the VM chose to continue with a null. */
         if (rc == 0 && g_xs_runtime_error_count > 0) rc = 1;
+        if (rc != 0) {
+            const char *trace = getenv("XS_DEBUG_EXIT");
+            if (trace && trace[0] && trace[0] != '0') {
+                fprintf(stderr, "xs: --vm exit %d (runtime_errors=%d)\n",
+                        rc, g_xs_runtime_error_count);
+            }
+        }
         return rc;
     }
 #endif

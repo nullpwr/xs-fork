@@ -3358,7 +3358,16 @@ static Node *parse_enum_decl(Parser *p) {
     while (!pp_check2(p, TK_RBRACE, TK_EOF)) {
         skip_semis(p);
         if (pp_check2(p, TK_RBRACE, TK_EOF)) break;
+        /* When the body token isn't an identifier, pp_expect returns the
+           current token without advancing and sets panic_mode. Without
+           forcing progress here the fuzzer can loop on the same token
+           and grow the variant list until we OOM. */
+        int pos_before = p->pos;
         Token *vn = pp_expect(p, TK_IDENT, "expected variant name");
+        if (vn->kind != TK_IDENT) {
+            if (p->pos == pos_before) pp_advance(p);
+            break;
+        }
         EnumVariant v = {0};
         v.name = xs_strdup(vn->sval ? vn->sval : "");
         v.span = vn->span;
@@ -3401,7 +3410,10 @@ static Node *parse_enum_decl(Parser *p) {
             }
             pp_expect(p, TK_RBRACE, "expected '}'");
         }
-        if (pp_match(p, TK_ASSIGN)) parse_expr(p, 0); /* skip discriminant */
+        if (pp_match(p, TK_ASSIGN)) {
+            Node *disc = parse_expr(p, 0); /* skip discriminant */
+            if (disc) node_free(disc);
+        }
         pp_match(p, TK_COMMA);
         enumvariantlist_push(&variants, v);
     }

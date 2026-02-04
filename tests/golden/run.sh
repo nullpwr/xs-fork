@@ -20,6 +20,10 @@ if [ ! -x "$XS" ]; then echo "no xs binary at $XS" >&2; exit 2; fi
 
 normalize() {
     # Replace the full file path (and its relative forms) with <FILE>.
+    # On Windows the binary prints paths like D:/a/xs/xs/tests/...
+    # so matching the sandbox-specific $src isn't enough. The second
+    # sed swap grabs any non-space run ending in the test basename,
+    # which covers POSIX, Windows drive, and relative variants.
     local src="$1"
     local abs rel base
     abs="$src"
@@ -28,7 +32,7 @@ normalize() {
     sed -E \
         -e "s|$abs|<FILE>|g" \
         -e "s|$rel|<FILE>|g" \
-        -e "s|$base|<FILE>|g"
+        -e "s#[^ [:space:]\"'\`]*$base#<FILE>#g"
 }
 
 run_group() {
