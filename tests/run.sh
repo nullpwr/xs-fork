@@ -124,27 +124,31 @@ run_one() {
     # silent stderr (e.g. a Windows-only shutdown abort) are unreadable
     # otherwise.
     dump_fail() {
-        local out="$1" errfile="$2"
+        local out="$1" errfile="$2" rc="$3"
+        printf 'rc=%s\n' "$rc"
         printf '%s\n' "$out"
         if [ -s "$errfile" ]; then
             printf -- '--- stderr ---\n'
             cat "$errfile"
+        else
+            printf -- '--- stderr empty (file=%s, size=%s) ---\n' \
+                "$errfile" "$([ -f "$errfile" ] && wc -c < "$errfile" || echo missing)"
         fi
     }
     if [ $rc_interp -ne 0 ] && [ $rc_vm -ne 0 ]; then
-        report_fail "BOTH" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt)"
+        report_fail "BOTH" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt $rc_interp)"
         return
     fi
     if [ $rc_interp -ne 0 ]; then
-        report_fail "INTERP" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt)"
+        report_fail "INTERP" "$name" "$(dump_fail "$out_interp" /tmp/xs_err_i.txt $rc_interp)"
         return
     fi
     if [ $rc_vm -ne 0 ]; then
-        report_fail "VM" "$name" "$(dump_fail "$out_vm" /tmp/xs_err_v.txt)"
+        report_fail "VM" "$name" "$(dump_fail "$out_vm" /tmp/xs_err_v.txt $rc_vm)"
         return
     fi
     if [ $run_jit -eq 1 ] && [ $rc_jit -ne 0 ]; then
-        report_fail "JIT" "$name" "$(dump_fail "$out_jit" /tmp/xs_err_j.txt)"
+        report_fail "JIT" "$name" "$(dump_fail "$out_jit" /tmp/xs_err_j.txt $rc_jit)"
         return
     fi
 

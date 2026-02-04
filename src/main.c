@@ -2446,11 +2446,8 @@ run_file:;
            non-zero exit even if the VM chose to continue with a null. */
         if (rc == 0 && g_xs_runtime_error_count > 0) rc = 1;
         if (rc != 0) {
-            const char *trace = getenv("XS_DEBUG_EXIT");
-            if (trace && trace[0] && trace[0] != '0') {
-                fprintf(stderr, "xs: --vm exit %d (runtime_errors=%d)\n",
-                        rc, g_xs_runtime_error_count);
-            }
+            fprintf(stderr, "xs: --vm exit %d (runtime_errors=%d)\n",
+                    rc, g_xs_runtime_error_count);
         }
         return rc;
     }
@@ -2635,16 +2632,10 @@ run_file:;
         int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
                         || interp->had_unhandled_exception
                         || g_xs_runtime_error_count > 0;
-        /* Opt-in exit trace for CI diagnostics: set XS_DEBUG_EXIT=1 and
-           a non-zero exit prints which internal flag tripped it. Off by
-           default so it can't interfere with stderr-sensitive tests. */
         if (had_error) {
-            const char *trace = getenv("XS_DEBUG_EXIT");
-            if (trace && trace[0] && trace[0] != '0') {
-                fprintf(stderr, "xs: exit 1 (cf.signal=%d unhandled=%d runtime_errors=%d)\n",
-                        interp->cf.signal, interp->had_unhandled_exception,
-                        g_xs_runtime_error_count);
-            }
+            fprintf(stderr, "xs: exit 1 (cf.signal=%d unhandled=%d runtime_errors=%d)\n",
+                    interp->cf.signal, interp->had_unhandled_exception,
+                    g_xs_runtime_error_count);
         }
         interp_free(interp);
         diag_context_free(dctx);
