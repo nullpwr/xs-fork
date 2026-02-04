@@ -540,6 +540,7 @@ static Node *parse_string_literal(Parser *p, Token *tok) {
             parser_init(&sub_p, &sub_ta, span.file);
             Node *expr_node = parse_expr(&sub_p, 0);
             token_array_free(&sub_ta);
+            comment_list_free(&sub_lex.comments);
             free(expr_src);
 
             if (expr_node) nodelist_push(&n->lit_string.parts, expr_node);
@@ -2030,14 +2031,14 @@ static Node *parse_handle(Parser *p) {
                         pp_advance(p);
                     }
                     /* Optional ': type' annotation on the parameter. */
-                    if (pp_match(p, TK_COLON)) parse_type_expr(p);
+                    if (pp_match(p, TK_COLON)) typeexpr_free(parse_type_expr(p));
                     paramlist_push(&params, pm);
                     if (!pp_match(p, TK_COMMA)) break;
                 }
                 pp_expect(p, TK_RPAREN, "expected ')' after handler params");
             }
             /* Optional '-> type' return annotation, just consume. */
-            if (pp_match(p, TK_ARROW)) parse_type_expr(p);
+            if (pp_match(p, TK_ARROW)) typeexpr_free(parse_type_expr(p));
             Node *body = pp_check(p, TK_LBRACE) ? parse_block(p) : parse_expr(p, 0);
 
             EffectArm arm;
@@ -2126,6 +2127,7 @@ static Node *parse_handle(Parser *p) {
     Node *n = node_new(NODE_HANDLE, span);
     n->handle.expr = expr;
     n->handle.arms = arms;
+    free(with_effect);
     return n;
 }
 

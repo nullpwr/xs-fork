@@ -360,6 +360,12 @@ void node_free(Node *n) {
         nodepairlist_free(&n->struct_decl.fields);
         for (int i = 0; i < n->struct_decl.n_type_params; i++) free(n->struct_decl.type_params[i]);
         free(n->struct_decl.type_params);
+        for (int i = 0; i < n->struct_decl.n_field_types; i++)
+            typeexpr_free(n->struct_decl.field_types[i]);
+        free(n->struct_decl.field_types);
+        for (int i = 0; i < n->struct_decl.n_derives; i++)
+            free(n->struct_decl.derives[i]);
+        free(n->struct_decl.derives);
         break;
     case NODE_ENUM_DECL:
         free(n->enum_decl.name);
@@ -561,6 +567,14 @@ void node_free(Node *n) {
     case NODE_SEND_EXPR:
         node_free(n->send_expr.target);
         node_free(n->send_expr.message);
+        break;
+    case NODE_DO_EXPR:
+        node_free(n->do_expr.body);
+        break;
+    case NODE_WITH:
+        node_free(n->with_.expr);
+        free(n->with_.name);
+        node_free(n->with_.body);
         break;
     }
     free(n);

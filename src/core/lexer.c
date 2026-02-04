@@ -443,6 +443,10 @@ static char *lex_raw_string(Lexer *l) {
         char *raw = sb_finish(&sb);
         int rlen = (int)strlen(raw);
 
+        /* Empty body: nothing to dedent. Guard so rlen-1 doesn't make
+           i2 negative and read raw[-1]. */
+        if (rlen == 0) { return raw; }
+
         /* Find indentation of the closing ``` (last line's leading whitespace) */
         int indent = 0;
         int i2 = rlen - 1;
@@ -1172,14 +1176,14 @@ void lexer_free(Lexer *l) {
 }
 
 void token_array_free(TokenArray *ta) {
+    /* sval now lives in its own slot (see Token in lexer.h) so any
+       token with a non-NULL sval owns that buffer and has to release
+       it. Every keyword, contextual keyword, suffix / unit token and
+       raw string went through a xs_strdup or sb_finish during lex,
+       so leaking per kind (as the old kind-whitelist did) tripped
+       LSan on basically every input. */
     for (int i = 0; i < ta->len; i++) {
-        Token *t = &ta->items[i];
-        if (t->kind == TK_STRING || t->kind == TK_RAW_STRING ||
-            t->kind == TK_CHAR   || t->kind == TK_IDENT      ||
-            t->kind == TK_BIGINT ||
-            t->kind == TK_MACRO_BANG || t->kind == TK_UNKNOWN ||
-            ((int)t->kind >= TK_PLUGIN_BASE && (int)t->kind < TK_PLUGIN_MAX))
-            free(t->sval);
+        free(ta->items[i].sval);
     }
     free(ta->items);
     ta->items = NULL; ta->len = ta->cap = 0;
