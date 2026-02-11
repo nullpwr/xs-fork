@@ -705,8 +705,8 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     long len = ftell(f);
     fseek(f, 0, SEEK_SET);
     char *src = xs_malloc((size_t)len + 1);
-    fread(src, 1, (size_t)len, f);
-    src[len] = '\0';
+    size_t got = fread(src, 1, (size_t)len, f);
+    src[got] = '\0';
     fclose(f);
 
     Lexer lex; lexer_init(&lex, src, path);

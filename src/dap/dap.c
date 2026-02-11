@@ -1561,7 +1561,6 @@ static void dap_handle_completions(DapState *st, int req_seq, const char *msg) {
 
     if (st->interp && text) {
         /* find the prefix to complete: last word fragment */
-        const char *prefix = text;
         int prefix_len = (int)strlen(text);
         /* walk backward from cursor to find word start */
         int start = col - 1;

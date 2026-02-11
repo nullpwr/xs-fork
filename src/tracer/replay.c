@@ -234,12 +234,11 @@ static void print_rich_prov_inline(const char *json, const char *indent) {
     if (!json) return;
 
     char origin[64] = {0}, detail[128] = {0};
-    int value = 0, line = 0;
-    int has_value = 0, has_line = 0;
+    int line = 0;
+    int has_line = 0;
 
     json_find_str(json, "origin", origin, sizeof(origin));
     json_find_str(json, "detail", detail, sizeof(detail));
-    has_value = json_find_int(json, "value", &value);
     has_line = json_find_int(json, "line", &line);
 
     printf("%s%s%s%s: %s%s%s", indent, c_cyan(), origin, c_rst(), c_bold(), detail, c_rst());

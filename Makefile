@@ -198,6 +198,13 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# BearSSL is upstream constant-time crypto. Under -flto the optimiser
+# inlines the interleave helpers and loses track of the caller's
+# scratch-array initialisation, producing spurious maybe-uninitialized
+# warnings. The code is fine; silence the bearssl directory only.
+src/tls/bearssl/%.o: src/tls/bearssl/%.c
+	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -c -o $@ $<
+
 debug: CFLAGS = -g -O0 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
                 -fsanitize=address -fsanitize=undefined -DDEBUG \
                 $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
@@ -207,7 +214,11 @@ debug: clean $(TARGET)
 release: CFLAGS = -O3 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
                   -DNDEBUG -flto \
                   $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
-release: LDFLAGS += -flto -s
+# LTO re-runs maybe-uninitialized analysis across TUs; the bearssl
+# AES path trips a false positive once the interleave helpers get
+# inlined. The compile-time suppression is in the per-file rule above;
+# mirror it at link time so LTO stays quiet too.
+release: LDFLAGS += -flto -s -Wno-maybe-uninitialized
 release: clean $(TARGET)
 
 test: $(TARGET)

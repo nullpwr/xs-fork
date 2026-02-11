@@ -2056,6 +2056,7 @@ static void compile_dot_product(ARM64Code *c) {
 }
 
 /* suppress unused-function warnings for the SIMD helpers */
+__attribute__((unused))
 static void arm64_simd_use_all(void) {
     (void)arm64_vadd_4s; (void)arm64_vadd_2d;
     (void)arm64_vsub_4s; (void)arm64_vsub_2d;

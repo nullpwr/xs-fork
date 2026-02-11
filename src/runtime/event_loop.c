@@ -157,7 +157,8 @@ static void signal_handler(int signum) {
         g_signal_received[signum] = 1;
     if (g_signal_loop && g_signal_loop->signal_pipe[1] >= 0) {
         char c = (char)signum;
-        (void)write(g_signal_loop->signal_pipe[1], &c, 1);
+        ssize_t written = write(g_signal_loop->signal_pipe[1], &c, 1);
+        (void)written;
     }
 }
 

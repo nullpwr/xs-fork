@@ -99,16 +99,19 @@ static void write_str(FILE *f, const char *s) {
     if (len) fwrite(s, 1, len, f);
 }
 
-static uint8_t  read_u8(FILE *f)  { uint8_t v = 0;  fread(&v, 1, 1, f); return v; }
-static uint16_t read_u16(FILE *f) { uint16_t v = 0; fread(&v, 2, 1, f); return v; }
-static uint32_t read_u32(FILE *f) { uint32_t v = 0; fread(&v, 4, 1, f); return v; }
-static int64_t  read_i64(FILE *f) { int64_t v = 0;  fread(&v, 8, 1, f); return v; }
-static double   read_f64(FILE *f) { double v = 0;   fread(&v, 8, 1, f); return v; }
+/* Short reads leave v at zero; corrupt bytecode surfaces as a null/0 slot
+   rather than a crash. Callers that care (proto_read_file) also verify
+   the magic header before trusting anything. */
+static uint8_t  read_u8(FILE *f)  { uint8_t v = 0;  (void)!fread(&v, 1, 1, f); return v; }
+static uint16_t read_u16(FILE *f) { uint16_t v = 0; (void)!fread(&v, 2, 1, f); return v; }
+static uint32_t read_u32(FILE *f) { uint32_t v = 0; (void)!fread(&v, 4, 1, f); return v; }
+static int64_t  read_i64(FILE *f) { int64_t v = 0;  (void)!fread(&v, 8, 1, f); return v; }
+static double   read_f64(FILE *f) { double v = 0;   (void)!fread(&v, 8, 1, f); return v; }
 static char *read_str(FILE *f) {
     uint16_t len = read_u16(f);
     if (!len) return NULL;
     char *s = xs_malloc(len + 1);
-    fread(s, 1, len, f);
+    (void)!fread(s, 1, len, f);
     s[len] = 0;
     return s;
 }
@@ -208,8 +211,9 @@ XSProto *proto_read_file(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     char magic[4] = {0};
-    fread(magic, 1, 4, f);
-    if (memcmp(magic, "XSC", 4) != 0) { fclose(f); return NULL; }
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "XSC", 4) != 0) {
+        fclose(f); return NULL;
+    }
     uint16_t ver = read_u16(f);
     if (ver != 1) { fclose(f); return NULL; }
     XSProto *p = proto_read(f);

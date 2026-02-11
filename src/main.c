@@ -811,12 +811,9 @@ int main(int argc, char **argv) {
     /* Default backend is the bytecode VM. Programs that register AST-level
        runtime hooks (plugin.runtime.after_eval etc.) are detected and
        silently fall back to the tree-walk interpreter. --interp forces
-       the tree-walk path explicitly. */
+       the tree-walk path explicitly via do_vm=0. */
     int do_vm         = 1;
-    int do_interp     = 0;
     int emit_bytecode = 0;
-#else
-    int do_interp     = 1;
 #endif
 #ifdef XSC_ENABLE_JIT
     int do_jit = 0;
@@ -1953,7 +1950,7 @@ test_again: ;
             const char *be = argv[++i];
             if (strcmp(be, "vm") == 0) {
 #ifdef XSC_ENABLE_VM
-                do_vm = 1; do_interp = 0;
+                do_vm = 1;
 #else
                 fprintf(stderr, "xs: VM backend not built (rebuild with XSC_ENABLE_VM=1)\n");
                 return 1;
@@ -1966,7 +1963,6 @@ test_again: ;
                 return 1;
 #endif
             } else if (strcmp(be, "interp") == 0) {
-                do_interp = 1;
 #ifdef XSC_ENABLE_VM
                 do_vm = 0;
 #endif
@@ -1974,14 +1970,13 @@ test_again: ;
         }
         else if (strcmp(argv[i], "--vm")       == 0) {
 #ifdef XSC_ENABLE_VM
-            do_vm = 1; do_interp = 0;
+            do_vm = 1;
 #else
             fprintf(stderr, "xs: VM not built (rebuild with XSC_ENABLE_VM=1)\n"); return 1;
 #endif
         }
         else if (strcmp(argv[i], "--interp")   == 0) {
             /* Explicit opt-in to the tree-walking interpreter. */
-            do_interp = 1;
 #ifdef XSC_ENABLE_VM
             do_vm = 0;
 #endif
@@ -2036,7 +2031,6 @@ test_again: ;
 #ifdef XSC_ENABLE_VM
             do_vm = 0;
 #endif
-            do_interp = 1;
 #else
             fprintf(stderr, "xs: tracer not built (rebuild with XSC_ENABLE_TRACER=1)\n"); i++; return 1;
 #endif
@@ -2343,7 +2337,7 @@ run_file:;
         ) && program_uses_plugin_runtime_hook(program)) {
         /* AST-level runtime hooks require the tree-walk interpreter. Fall
            back silently so the program still runs. */
-        do_vm = 0; do_interp = 1;
+        do_vm = 0;
 #ifdef XSC_ENABLE_JIT
         do_jit = 0;
 #endif

@@ -223,10 +223,16 @@ static void collect_idents(Node *n, const char **out, int *nout, int max) {
     case NODE_BINOP: collect_idents(n->binop.left, out, nout, max);
                      collect_idents(n->binop.right, out, nout, max); break;
     case NODE_UNARY: collect_idents(n->unary.expr, out, nout, max); break;
-    case NODE_CALL: collect_idents(n->call.callee, out, nout, max);
-                    for (int i=0;i<n->call.args.len;i++) collect_idents(n->call.args.items[i], out, nout, max); break;
-    case NODE_METHOD_CALL: collect_idents(n->method_call.obj, out, nout, max);
-                           for (int i=0;i<n->method_call.args.len;i++) collect_idents(n->method_call.args.items[i], out, nout, max); break;
+    case NODE_CALL: {
+        collect_idents(n->call.callee, out, nout, max);
+        for (int i=0;i<n->call.args.len;i++) collect_idents(n->call.args.items[i], out, nout, max);
+        break;
+    }
+    case NODE_METHOD_CALL: {
+        collect_idents(n->method_call.obj, out, nout, max);
+        for (int i=0;i<n->method_call.args.len;i++) collect_idents(n->method_call.args.items[i], out, nout, max);
+        break;
+    }
     case NODE_INDEX: collect_idents(n->index.obj, out, nout, max);
                      collect_idents(n->index.index, out, nout, max); break;
     case NODE_FIELD: collect_idents(n->field.obj, out, nout, max); break;
@@ -236,8 +242,11 @@ static void collect_idents(Node *n, const char **out, int *nout, int max) {
     case NODE_IF: collect_idents(n->if_expr.cond, out, nout, max);
                   collect_idents(n->if_expr.then, out, nout, max);
                   collect_idents(n->if_expr.else_branch, out, nout, max); break;
-    case NODE_BLOCK: for (int i=0;i<n->block.stmts.len;i++) collect_idents(n->block.stmts.items[i], out, nout, max);
-                     collect_idents(n->block.expr, out, nout, max); break;
+    case NODE_BLOCK: {
+        for (int i=0;i<n->block.stmts.len;i++) collect_idents(n->block.stmts.items[i], out, nout, max);
+        collect_idents(n->block.expr, out, nout, max);
+        break;
+    }
     case NODE_EXPR_STMT: collect_idents(n->expr_stmt.expr, out, nout, max); break;
     case NODE_LET: case NODE_VAR: collect_idents(n->let.value, out, nout, max); break;
     default: break;
@@ -296,14 +305,23 @@ static void scan_lambdas(Node *n) {
     /* walk children looking for lambdas */
     switch (VAL_TAG(n)) {
     case NODE_PROGRAM: for (int i=0;i<n->program.stmts.len;i++) scan_lambdas(n->program.stmts.items[i]); break;
-    case NODE_BLOCK: for (int i=0;i<n->block.stmts.len;i++) scan_lambdas(n->block.stmts.items[i]);
-                     if (n->block.expr) scan_lambdas(n->block.expr); break;
+    case NODE_BLOCK: {
+        for (int i=0;i<n->block.stmts.len;i++) scan_lambdas(n->block.stmts.items[i]);
+        if (n->block.expr) scan_lambdas(n->block.expr);
+        break;
+    }
     case NODE_BINOP: scan_lambdas(n->binop.left); scan_lambdas(n->binop.right); break;
     case NODE_UNARY: scan_lambdas(n->unary.expr); break;
-    case NODE_CALL: scan_lambdas(n->call.callee);
-                    for (int i=0;i<n->call.args.len;i++) scan_lambdas(n->call.args.items[i]); break;
-    case NODE_METHOD_CALL: scan_lambdas(n->method_call.obj);
-                           for (int i=0;i<n->method_call.args.len;i++) scan_lambdas(n->method_call.args.items[i]); break;
+    case NODE_CALL: {
+        scan_lambdas(n->call.callee);
+        for (int i=0;i<n->call.args.len;i++) scan_lambdas(n->call.args.items[i]);
+        break;
+    }
+    case NODE_METHOD_CALL: {
+        scan_lambdas(n->method_call.obj);
+        for (int i=0;i<n->method_call.args.len;i++) scan_lambdas(n->method_call.args.items[i]);
+        break;
+    }
     case NODE_INDEX: scan_lambdas(n->index.obj); scan_lambdas(n->index.index); break;
     case NODE_FIELD: scan_lambdas(n->field.obj); break;
     case NODE_ASSIGN: scan_lambdas(n->assign.target); scan_lambdas(n->assign.value); break;
@@ -323,22 +341,33 @@ static void scan_lambdas(Node *n) {
                          scan_lambdas(n->match.arms.items[i].guard);
                          scan_lambdas(n->match.arms.items[i].body);
                      } break;
-    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
-        for (int i=0;i<n->lit_array.elems.len;i++) scan_lambdas(n->lit_array.elems.items[i]); break;
-    case NODE_LIT_MAP:
-        for (int i=0;i<n->lit_map.vals.len;i++) scan_lambdas(n->lit_map.vals.items[i]); break;
-    case NODE_IMPL_DECL:
-        for (int i=0;i<n->impl_decl.members.len;i++) scan_lambdas(n->impl_decl.members.items[i]); break;
-    case NODE_ACTOR_DECL:
-        for (int i=0;i<n->actor_decl.methods.len;i++) scan_lambdas(n->actor_decl.methods.items[i]); break;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE: {
+        for (int i=0;i<n->lit_array.elems.len;i++) scan_lambdas(n->lit_array.elems.items[i]);
+        break;
+    }
+    case NODE_LIT_MAP: {
+        for (int i=0;i<n->lit_map.vals.len;i++) scan_lambdas(n->lit_map.vals.items[i]);
+        break;
+    }
+    case NODE_IMPL_DECL: {
+        for (int i=0;i<n->impl_decl.members.len;i++) scan_lambdas(n->impl_decl.members.items[i]);
+        break;
+    }
+    case NODE_ACTOR_DECL: {
+        for (int i=0;i<n->actor_decl.methods.len;i++) scan_lambdas(n->actor_decl.methods.items[i]);
+        break;
+    }
     case NODE_NURSERY: scan_lambdas(n->nursery_.body); break;
     case NODE_SPAWN: scan_lambdas(n->spawn_.expr); break;
     case NODE_AWAIT: scan_lambdas(n->await_.expr); break;
     case NODE_SEND_EXPR: scan_lambdas(n->send_expr.target); scan_lambdas(n->send_expr.message); break;
     case NODE_RANGE: scan_lambdas(n->range.start); scan_lambdas(n->range.end); break;
-    case NODE_LIST_COMP: scan_lambdas(n->list_comp.element);
+    case NODE_LIST_COMP: {
+        scan_lambdas(n->list_comp.element);
         for (int i=0;i<n->list_comp.clause_iters.len;i++) scan_lambdas(n->list_comp.clause_iters.items[i]);
-        for (int i=0;i<n->list_comp.clause_conds.len;i++) scan_lambdas(n->list_comp.clause_conds.items[i]); break;
+        for (int i=0;i<n->list_comp.clause_conds.len;i++) scan_lambdas(n->list_comp.clause_conds.items[i]);
+        break;
+    }
     default: break;
     }
 }
