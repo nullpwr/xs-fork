@@ -177,12 +177,6 @@ static void buf_name(WasmBuf *b, const char *s) {
     buf_bytes(b, (const uint8_t *)s, (int)len);
 }
 
-static void buf_f64(WasmBuf *b, double val) {
-    uint8_t raw[8];
-    memcpy(raw, &val, 8);
-    buf_bytes(b, raw, 8);
-}
-
 /* ========================================================================
    Value tags for the dynamic type system
    All runtime values are 12-byte cells in linear memory:
@@ -670,16 +664,6 @@ static void emit_str_val(WasmBuf *code, int offset, int len) {
     emit_i32(code, offset);
     emit_i32(code, len);
     emit_call(code, RT_STR_NEW);
-}
-
-/* Emit: get the tag of a value on top of stack */
-static void emit_val_tag(WasmBuf *code) {
-    emit_call(code, RT_VAL_TAG);
-}
-
-/* Emit: get i32 payload of a value on top of stack */
-static void emit_val_i32(WasmBuf *code) {
-    emit_call(code, RT_VAL_I32);
 }
 
 /* Emit: compile deferred stmts in LIFO order */
@@ -1810,7 +1794,6 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
         /* Track per-clause loop index locals for proper increment */
         int clause_i_locals[16];
-        int clause_is_range[16];
 
         for (int c = 0; c < node->list_comp.clause_pats.len && c < 16; c++) {
             Node *iter = node->list_comp.clause_iters.items[c];
@@ -1821,7 +1804,6 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
             /* Check if iterator is a range */
             if (iter && VAL_TAG(iter) == NODE_RANGE) {
-                clause_is_range[c] = 1;
                 int i_idx = locals_add(locals, "__lc_ri");
                 int end_idx = locals_add(locals, "__lc_re");
                 clause_i_locals[c] = i_idx;
@@ -1854,7 +1836,6 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 emit_call(code, RT_VAL_NEW);
                 emit_local_set(code, elem_idx);
             } else {
-                clause_is_range[c] = 0;
                 int arr_src = locals_add(locals, "__lc_src");
                 int i_idx = locals_add(locals, "__lc_i");
                 int len_idx = locals_add(locals, "__lc_len");

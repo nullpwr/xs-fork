@@ -1655,11 +1655,6 @@ static void strarr_push(StringArray *arr, const char *s) {
     arr->items[arr->count++] = strdup(s);
 }
 
-static void strarr_free(StringArray *arr) {
-    for (int i = 0; i < arr->count; i++) free(arr->items[i]);
-    free(arr->items);
-}
-
 int xs_regex_extract_all(const XSRegex *re, const char *str, int len,
                           int group, char ***out, int *nout)
 {

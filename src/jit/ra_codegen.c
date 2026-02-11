@@ -362,12 +362,6 @@ static void emit_inline_incref_rax(Emitter *e) {
     emit_byte(e, (uint8_t)VAL_OFF_REFCOUNT); emit_byte(e, 0x01);
 }
 
-/* Call value_decref(reg). Clobbers rax/rdi/etc (standard C call). */
-static void emit_decref_call(Emitter *e, int src) {
-    if (src != RDI) emit_mov_rr(e, RDI, src);
-    emit_call_abs(e, (void *)(uintptr_t)value_decref);
-}
-
 /* --- VM-sp push/pop helpers (work with vm->sp through r12). --- */
 
 /* [vm->sp] = rax; vm->sp += 8. Uses rcx as scratch. */

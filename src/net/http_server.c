@@ -1107,7 +1107,8 @@ static void process_request(HTTPConnection *c) {
 
         char out_buf[4096];
         int out_len = http_format_response(&res, out_buf, sizeof(out_buf));
-        (void)write(c->fd, out_buf, out_len);
+        ssize_t written = write(c->fd, out_buf, out_len);
+        (void)written;
 
         http_response_free(&res);
         return;
@@ -1436,37 +1437,6 @@ void http_server_stop(HTTPServer *s) {
     evloop_stop(s->evloop);
 }
 
-
-/* ================================================================
- *  JSON encoding helper (for res.json)
- * ================================================================ */
-
-/* minimal JSON string escaper */
-static void json_escape_str(const char *s, char *out, int out_size) {
-    int o = 0;
-    out[o++] = '"';
-    for (int i = 0; s[i] && o < out_size - 3; i++) {
-        char c = s[i];
-        switch (c) {
-            case '"':  out[o++] = '\\'; out[o++] = '"'; break;
-            case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
-            case '\b': out[o++] = '\\'; out[o++] = 'b'; break;
-            case '\f': out[o++] = '\\'; out[o++] = 'f'; break;
-            case '\n': out[o++] = '\\'; out[o++] = 'n'; break;
-            case '\r': out[o++] = '\\'; out[o++] = 'r'; break;
-            case '\t': out[o++] = '\\'; out[o++] = 't'; break;
-            default:
-                if ((unsigned char)c < 0x20) {
-                    o += snprintf(out + o, out_size - o, "\\u%04x", c);
-                } else {
-                    out[o++] = c;
-                }
-                break;
-        }
-    }
-    out[o++] = '"';
-    out[o] = '\0';
-}
 
 /* ================================================================
  *  XS language bindings (called from builtins.c)
@@ -2000,9 +1970,6 @@ int http_check_etag(const HTTPRequest *req, const char *etag) {
 /* ================================================================
  *  Basic auth parsing
  * ================================================================ */
-
-static const char base64_chars[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static int base64_decode_char(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';

@@ -362,34 +362,6 @@ typedef struct {
     int done;
 } CombinatorCtx;
 
-static void all_on_resolve(void *ctx_ptr) {
-    CombinatorCtx *ctx = ctx_ptr;
-    if (ctx->done) return;
-
-    ctx->resolved_count++;
-    if (ctx->resolved_count == ctx->count) {
-        ctx->done = 1;
-        Value *arr = xs_array_new();
-        for (int i = 0; i < ctx->count; i++)
-            array_push(arr->arr, ctx->results[i] ? ctx->results[i] : xs_null());
-        promise_resolve(ctx->rt, ctx->combined, arr);
-    }
-}
-
-static void all_on_reject(void *ctx_ptr) {
-    CombinatorCtx *ctx = ctx_ptr;
-    if (ctx->done) return;
-    ctx->done = 1;
-    /* reject with first error */
-    for (int i = 0; i < ctx->count; i++) {
-        if (ctx->settled[i] == PROMISE_REJECTED) {
-            promise_reject(ctx->rt, ctx->combined, ctx->results[i]);
-            return;
-        }
-    }
-    promise_reject(ctx->rt, ctx->combined, XS_NULL_VAL);
-}
-
 XSPromise *promise_all(AsyncRuntime *rt, XSPromise **promises, int count) {
     XSPromise *combined = promise_new(rt);
 
@@ -480,7 +452,7 @@ XSPromise *promise_race(AsyncRuntime *rt, XSPromise **promises, int count) {
 XSPromise *promise_any(AsyncRuntime *rt, XSPromise **promises, int count) {
     XSPromise *combined = promise_new(rt);
 
-    if (count == 0) {
+    if (count <= 0) {
         Value *msg = xs_str("All promises were rejected");
         promise_reject(rt, combined, msg);
         value_decref(msg);
@@ -488,7 +460,7 @@ XSPromise *promise_any(AsyncRuntime *rt, XSPromise **promises, int count) {
     }
 
     int rejected_count = 0;
-    Value **errors = xs_calloc(count, sizeof(Value *));
+    Value **errors = xs_calloc((size_t)count, sizeof(Value *));
 
     for (int i = 0; i < count; i++) {
         XSPromise *p = promises[i];

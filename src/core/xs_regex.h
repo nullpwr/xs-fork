@@ -378,11 +378,6 @@ static void xr_tlist_add_ex(xr_tlist *l, xr_node *node, const int *saved,
     memcpy(t->saved, saved, sizeof(t->saved));
 }
 
-static void xr_tlist_add(xr_tlist *l, xr_node *node, const int *saved,
-                          int nsub, int *gen, int curgen) {
-    xr_tlist_add_ex(l, node, saved, nsub, gen, curgen, NULL, 0, 0);
-}
-
 static int xr_run_nfa(xr_node *start, const char *str, int pos, int nsub,
                        int *best_saved, int slen) {
     xr_tlist cur, nxt;
