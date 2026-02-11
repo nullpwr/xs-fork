@@ -589,7 +589,7 @@ static void usage(void) {
         "Flags (can appear before or after the filename):\n"
         "  --record <file.xst>  Record execution trace\n"
         "  --vm                 Use bytecode VM backend\n"
-        "  --jit                Use JIT backend (x86-64)\n"
+        "  --jit                Use JIT backend (x86-64 and aarch64)\n"
         "  --check              Type-check only, don't run\n"
         "  --strict             Require all type annotations\n"
         "  --lenient            Downgrade errors to warnings\n"

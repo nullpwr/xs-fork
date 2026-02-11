@@ -92,7 +92,7 @@ Or build from source:
 make            # produces ./xs (or xs.exe on Windows)
 make debug      # -g -O0 with AddressSanitizer + UBSan
 make release    # -O3 with LTO, stripped
-make test       # runs tests/run.sh (all tests/test_*.xs + examples + test_cli.sh)
+make test       # runs tests/run-all.sh (7 layers: unit, e2e, negative, property, golden, regression, conformance)
 make install    # install release build to /usr/local/bin/xs
 make wasm       # produces xs.wasm via wasi-sdk (needs WASI_SDK env var)
 ```
@@ -106,7 +106,7 @@ xs file.xs              # run a script (tree-walk interpreter, default)
 xs                      # interactive REPL
 xs -e 'println(42)'     # eval one-liner
 xs --vm file.xs         # bytecode VM backend (faster for compute, recommended)
-xs --jit file.xs        # JIT backend (x86-64, two tiers; see STATUS.md)
+xs --jit file.xs        # JIT backend (x86-64 and aarch64; see STATUS.md)
 xs --emit js file.xs    # transpile to JavaScript
 xs --emit c file.xs     # transpile to C
 xs --check file.xs      # static type check without running
@@ -144,7 +144,7 @@ xs --strict file.xs     # require type annotations everywhere
 **Backends:**
 - Tree-walk interpreter (default)
 - Bytecode VM (`--vm`, full feature parity, faster for compute-heavy code)
-- JIT compiler (`--jit`, x86-64, two tiers: template dispatch + register-allocating specialiser; ARM64 stubbed)
+- JIT compiler (`--jit`, x86-64 and aarch64): register-allocating specialiser; protos outside the supported opcode set drop back to the VM
 - Transpilers: JavaScript, C, WebAssembly
 
 **Tooling:**
@@ -196,14 +196,15 @@ let nums: [int] = [1, 2, "oops"]  -- runtime error: expected '[int]', got '[mixe
 ## Project layout
 
 ```
-src/            compiler and runtime (353 .c files across 26 subsystems)
-src/tls/        bundled BearSSL for HTTPS
-tests/          40 test_*.xs files + test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh
-examples/       15 .xs examples + examples/plugins/
-benchmarks/     benchmark programs
-editors/        VS Code extension (editors/vscode/)
-Makefile        build system
-xs.toml         project config
+src/             compiler and runtime, one subdirectory per subsystem
+src/tls/         bundled BearSSL for HTTPS
+tests/           behavioural tests (test_*.xs) and shell drivers (test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh)
+tests/*/         adversarial, conformance, golden, regression, negative, property, fuzz layers
+examples/        example programs (examples/plugins/ for plugin demos)
+benchmarks/      benchmark programs
+editors/vscode/  VS Code extension
+Makefile         build system
+xs.toml          project config
 ```
 
 ## Benchmarks

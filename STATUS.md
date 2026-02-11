@@ -1,6 +1,7 @@
 # XS Status
 
-What works, what's partial, and what's planned. Current release: v0.5.0.
+What works, what's partial, and what's planned. For the current
+release number, check `git tag` or `xs --version`.
 
 ## Bytecode VM
 
@@ -46,14 +47,13 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | HTTPS via embedded BearSSL | works |
 | Universal literals (duration, color, date, size, angle) | works |
 | Temporal primitives (every, after, timeout, debounce) | works |
-
 | Multi-line strings (triple-quote) | works |
 | `do` expressions | works |
 | `with` resource management | works |
 | Named arguments | works |
 | Enum methods via impl | works |
 
-Full test run: 40 test_*.xs files + examples sweep + test_cli.sh all pass on Linux, macOS, and MinGW Windows.
+Full test run: `tests/test_*.xs` + adversarial suite + examples + CLI drivers all pass on Linux, macOS, and MinGW Windows.
 
 ## Bytecode VM (feature matrix)
 
@@ -79,7 +79,7 @@ Use `--vm` flag. Full feature parity with the interpreter (except reactive bindi
 | Modules and imports | works |
 | List/map comprehensions | works |
 | Pipe operator | works |
-| Plugin system (use plugin, global.set, add_method) | works |
+| Plugin system (`load`, global.set, add_method) | works |
 | All string methods (80+) | works |
 | All array methods (50+) | works |
 | All map methods (20+) | works |
@@ -88,10 +88,9 @@ Use `--vm` flag. Full feature parity with the interpreter (except reactive bindi
 | Optional chaining (?.) | works |
 | Range indexing (arr[1..3]) | works |
 | All builtins matching interpreter | works |
-
 | Growable stack and frames (no fixed limits) | works |
 
-The VM test (`test_vm.xs`) is run through `--vm` automatically by `tests/run.sh`. Use `xs build file.xs` to compile, `xs run file.xsc` to execute.
+The VM test (`test_vm.xs`) runs through `--vm` automatically from `tests/run.sh`. Every other test also runs under both backends and the two outputs are diffed; a divergence fails the test even if each backend passes on its own. Use `xs build file.xs` to compile, `xs run file.xsc` to execute.
 
 ## JIT Compiler
 
@@ -136,10 +135,11 @@ Observed numbers on a Linux x86-64 box:
 | 10M-iter `while` sum  |  640 ms |  110 ms |   20 ms | 110 ms |
 | 1M-iter `while` sum   |   60 ms |   10 ms |   <1 ms | 110 ms |
 
-Tier-2 is 5–8× faster than `--vm`, beats Node on every loop, and
+The JIT is 5-8x faster than `--vm`, beats Node on every loop, and
 matches or beats Node on short recursion; the V8 gap only opens up on
-heavy recursion where cross-call inlining pays off. All 47 test
-files pass (`bash tests/run.sh`).
+heavy recursion where cross-call inlining pays off. `bash tests/run.sh`
+runs every test through `--jit` alongside `--interp` and `--vm` and
+diffs the three outputs.
 
 ## C Transpiler
 
@@ -203,11 +203,17 @@ files pass (`bash tests/run.sh`).
 
 ## Platform Support
 
+CI runs the full 7-layer suite on every commit across each of these.
+libFuzzer runs the parser fuzz harness on a short budget, and the
+WASM job cross-compiles with wasi-sdk and runs the conformance and
+regression layers under wasmtime.
+
 | Platform | Status |
 |----------|--------|
-| Linux (x86-64) | fully tested |
-| macOS (x86-64, ARM) | builds and tests pass |
-| Windows (MinGW) | builds and tests pass, statically linked (`-static` in Makefile) |
+| Linux (x86-64) | builds and tests pass; ASan + UBSan also clean |
+| macOS (aarch64) | builds and tests pass |
+| Windows (MinGW, x86-64) | builds and tests pass, statically linked (`-static` in Makefile) |
+| WASM (wasi-sdk 25) | conformance + regression layers pass under wasmtime 25 |
 
 ## Standard Library
 
@@ -260,22 +266,21 @@ burns. Fix one, and this list gets shorter.
   "no registry configured" unless `[registry]` is set in `xs.toml`.
   `xsi` can install from local paths today; the hosted registry at
   registry.xslang.org is not live yet.
-- **JIT is x86-64 only and opcode-subsetted.** Tier 2 (the register-
-  allocating pipeline) handles the subset listed in the JIT Compiler
-  section above -- basic arithmetic, compares, loads/stores, branches,
-  returns, and direct calls. Anything outside the subset lands in
-  tier 1 or the interpreter. Tight arithmetic/branch loops get a
-  3-6x wall-clock win over VM; call-heavy workloads sit near VM
-  parity until the planned call-site fast paths land. ARM64 is a
-  stub.
+- **JIT is opcode-subsetted.** The register-allocating pipeline
+  handles the subset listed in the JIT Compiler section above: basic
+  arithmetic, compares, loads/stores, branches, returns, and direct
+  calls. Anything outside the subset (generators, capturing writes to
+  locals shadowed into inner closures) falls back to the bytecode VM
+  for that proto. Tight arithmetic/branch loops get 5-8x over VM;
+  call-heavy workloads sit closer to VM parity until call-site fast
+  paths land. Both x86-64 and aarch64 are supported.
 
 ## Known Limitations
 
 - Struct operator overloading only works when both operands are structs (not mixed struct+int)
 - C transpiler closures break when the same variable name is captured in multiple functions in one file
-- JIT is x86-64 only; ARM64 is a stub. Tier 2 lowers a fixed subset of
-  opcodes (see the JIT Compiler section); anything else falls back to
-  tier 1 or the interpreter.
+- JIT lowers a fixed opcode subset (see the JIT Compiler section
+  above); anything else runs on the bytecode VM for that proto.
 - WASM transpiler only handles basic programs
 - `xs publish` and `xs search` print "no registry configured" unless `[registry]` is set in `xs.toml`
 - VM effects use snapshot/restore (single-shot only, no nested effects)

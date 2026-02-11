@@ -16,15 +16,22 @@ You need gcc or clang and GNU make. No other dependencies.
 ## Run the tests
 
 ```
-make test        # tests/run.sh: 40+ test_*.xs files + examples + CLI
-make test-asan   # the same suite under AddressSanitizer + UBSan
-make test-diff   # cross-backend diff: interp vs VM vs C vs Node (JS)
-make test-all    # 7-layer suite: unit, e2e, negative, property, golden, regression, conformance
+make test        # all 7 layers via tests/run-all.sh
+make test-asan   # the layer-2 behavioural suite under AddressSanitizer + UBSan
 make test-unit   # just the C-level unit tests (tests/unit/*_test.c)
 ```
 
-Adversarial suite (deep recursion, huge strings, pathological patterns,
-stdin pipe bugs, unhandled-throw exit codes):
+The 7 layers are unit, end-to-end behavioural (`tests/run.sh`),
+negative, property, golden, regression, and conformance. The
+behavioural layer runs each `test_*.xs` through `--interp`, `--vm`,
+and `--jit`, then diffs the stdout: backend divergence fails the test
+even if each backend passes on its own. This is how silent VM/JIT
+pattern-match bugs used to slip through, and why the runner was
+changed.
+
+The adversarial suite (deep recursion, huge strings, pathological
+patterns, stdin pipe bugs, unhandled-throw exit codes) rides along
+with layer 2. To trigger it on its own:
 
 ```
 bash tests/adversarial/run.sh
