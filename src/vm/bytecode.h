@@ -165,6 +165,11 @@ struct XSProto {
      * interpreter. NULL when no tier-2 entry is available -- the
      * dispatcher then interprets. */
     void       *jit_entry;
+    /* Set once tier-2 has been tried and declined (unsupported op,
+     * cross-block operand leak, code buffer full, ...). Keeps the hot
+     * path from re-running lowerer / liveness / codegen on every
+     * invocation of a proto we already know we can't JIT. */
+    unsigned char jit_tried;
 };
 
 XSProto *proto_new(const char *name, int arity);

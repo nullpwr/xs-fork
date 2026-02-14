@@ -50,12 +50,26 @@
 #define JIT_HAS_WIN  0
 #endif
 
+/* Let long-running workloads ask for a bigger code buffer than the 4 MiB
+ * default. XS_JIT_CODE_SIZE_MB capped at 1 GiB. */
+static size_t jit_pick_code_size(void) {
+    const char *env = getenv("XS_JIT_CODE_SIZE_MB");
+    if (env && *env) {
+        char *end = NULL;
+        long mb = strtol(env, &end, 10);
+        if (end != env && mb > 0 && mb <= 1024) {
+            return (size_t)mb * 1024 * 1024;
+        }
+    }
+    return XS_JIT_CODE_SIZE;
+}
+
 XSJIT *jit_new(void) {
     XSJIT *j = xs_calloc(1, sizeof *j);
     j->available = 0;
 
 #if JIT_ARCH_SUPPORTED && JIT_HAS_MMAP
-    j->code_size = XS_JIT_CODE_SIZE;
+    j->code_size = jit_pick_code_size();
     int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     /* macOS on Apple Silicon requires MAP_JIT for executable anonymous
@@ -74,7 +88,7 @@ XSJIT *jit_new(void) {
         j->available = 1;
     }
 #elif JIT_ARCH_SUPPORTED && JIT_HAS_WIN
-    j->code_size = XS_JIT_CODE_SIZE;
+    j->code_size = jit_pick_code_size();
     j->code = (uint8_t *)VirtualAlloc(NULL, j->code_size,
                                        MEM_COMMIT | MEM_RESERVE,
                                        PAGE_EXECUTE_READWRITE);
@@ -140,18 +154,22 @@ int tier2_run_until(VM *vm, int target_fc) {
 /* Run the tier-2 pipeline on one proto. NULL result = lowerer / codegen
  * declined (unsupported op, cross-block stack leak, captured written
  * local, code-buffer overflow). Caller leaves proto->jit_entry as NULL
- * and the runtime dispatcher routes through vm_step_jit. */
+ * and the runtime dispatcher routes through vm_step_jit. The jit_tried
+ * flag memoises the NULL result so callers don't re-run the full
+ * pipeline on every invocation of a proto we already know can't JIT. */
 static void *tier2_compile_one(XSJIT *j, XSProto *proto) {
     if (!proto) return NULL;
     if (proto->jit_entry) return proto->jit_entry;
+    if (proto->jit_tried)  return NULL;
     IRFunc *f = ralow_lower(proto);
-    if (!f) return NULL;
+    if (!f) { proto->jit_tried = 1; return NULL; }
     ralow_liveness(f);
     IRAlloc *a = ralow_alloc(f);
     void *e = ralow_codegen(j, f, a);
     iralloc_free(a);
     irfunc_free(f);
     if (e) proto->jit_entry = e;
+    else   proto->jit_tried = 1;
     return e;
 }
 
@@ -184,12 +202,25 @@ void *jit_compile(XSJIT *j, XSProto *proto) {
 
 #endif
 
+/* Threshold scales with proto size: tiny functions (<20 ops) reach the
+ * JIT faster because compilation pays off quickly; big ones (>500 ops)
+ * need a bit more confidence before paying the codegen cost. */
+static int threshold_for(XSProto *proto) {
+    if (!proto) return XS_JIT_THRESHOLD;
+    int len = proto->chunk.len;
+    if (len < 20)   return XS_JIT_THRESHOLD / 4;   /* 25 */
+    if (len < 100)  return XS_JIT_THRESHOLD / 2;   /* 50 */
+    if (len < 500)  return XS_JIT_THRESHOLD;       /* 100 */
+    return XS_JIT_THRESHOLD * 2;                   /* 200 */
+}
+
 void *jit_maybe_compile(XSJIT *j, int proto_index, XSProto *proto) {
     if (!j || !j->available) return NULL;
     if (proto_index < 0 || proto_index >= j->n_protos) return NULL;
     if (j->compiled[proto_index]) return j->compiled[proto_index];
+    if (proto && proto->jit_tried) return NULL;
     j->call_counts[proto_index]++;
-    if (j->call_counts[proto_index] < XS_JIT_THRESHOLD) return NULL;
+    if (j->call_counts[proto_index] < threshold_for(proto)) return NULL;
     void *fn = jit_compile(j, proto);
     if (fn) j->compiled[proto_index] = fn;
     return fn;
