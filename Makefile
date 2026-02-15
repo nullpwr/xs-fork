@@ -60,6 +60,12 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins.c \
                src/runtime/builtins_math.c \
                src/runtime/builtins_time.c \
+               src/runtime/builtins_string.c \
+               src/runtime/builtins_path.c \
+               src/runtime/builtins_base64.c \
+               src/runtime/builtins_hash.c \
+               src/runtime/builtins_uuid.c \
+               src/runtime/builtins_random.c \
                src/runtime/error.c \
                src/runtime/stdlib.c \
                src/runtime/scheduler.c \

@@ -929,517 +929,7 @@ static Value *native_io_write_file(Interp *i, Value **args, int argc) {
     return value_incref(XS_TRUE_VAL);
 }
 
-/* string module */
-static Value *native_str_pad_left(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
-    int slen=(int)strlen(s);
-    if (slen>=width) return value_incref(a[0]);
-    char *r=xs_malloc(width+1);
-    int pad=width-slen;
-    for(int j=0;j<pad;j++) r[j]=fill;
-    memcpy(r+pad,s,slen); r[width]='\0';
-    Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_pad_right(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
-    int slen=(int)strlen(s);
-    if (slen>=width) return value_incref(a[0]);
-    char *r=xs_malloc(width+1);
-    memcpy(r,s,slen);
-    for(int j=slen;j<width;j++) r[j]=fill;
-    r[width]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_center(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
-    int slen=(int)strlen(s);
-    if (slen>=width) return value_incref(a[0]);
-    int pad=width-slen; int lpad=pad/2; int rpad=pad-lpad;
-    char *r=xs_malloc(width+1);
-    for(int j=0;j<lpad;j++) r[j]=fill;
-    memcpy(r+lpad,s,slen);
-    for(int j=0;j<rpad;j++) r[lpad+slen+j]=fill;
-    r[width]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_truncate(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int width=(int)VAL_INT(a[1]);
-    const char *suf=(n>=3&&VAL_TAG(a[2])==XS_STR)?a[2]->s:"...";
-    int slen=(int)strlen(s); int suflen=(int)strlen(suf);
-    if (slen<=width) return value_incref(a[0]);
-    int keep=width-suflen; if(keep<0)keep=0;
-    char *r=xs_malloc(keep+suflen+1);
-    memcpy(r,s,keep); memcpy(r+keep,suf,suflen); r[keep+suflen]='\0';
-    Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_camel_to_snake(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int slen=(int)strlen(s);
-    char *r=xs_malloc(slen*2+1); int ri=0;
-    for (int j=0;j<slen;j++) {
-        if (isupper((unsigned char)s[j])&&j>0) r[ri++]='_';
-        r[ri++]=tolower((unsigned char)s[j]);
-    }
-    r[ri]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_snake_to_camel(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int slen=(int)strlen(s);
-    char *r=xs_malloc(slen+1); int ri=0; int cap=0;
-    for (int j=0;j<slen;j++) {
-        if (s[j]=='_') { cap=1; continue; }
-        r[ri++]=cap?toupper((unsigned char)s[j]):s[j]; cap=0;
-    }
-    r[ri]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_escape_html(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s;
-    int cap=256; char *r=xs_malloc(cap); int ri=0;
-    for (const char *p=s;*p;p++) {
-        const char *ent=NULL; int elen=0;
-        if (*p=='&'){ent="&amp;";elen=5;}
-        else if(*p=='<'){ent="&lt;";elen=4;}
-        else if(*p=='>'){ent="&gt;";elen=4;}
-        else if(*p=='"'){ent="&quot;";elen=6;}
-        else if(*p=='\''){ent="&#39;";elen=5;}
-        if (ri+elen+2>cap){cap=cap*2+elen+2;r=realloc(r,cap);}
-        if (ent){memcpy(r+ri,ent,elen);ri+=elen;}
-        else r[ri++]=(char)*p;
-    }
-    r[ri]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_is_numeric(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
-    const char *s=a[0]->s; if (!*s) return value_incref(XS_FALSE_VAL);
-    int j=0; if(s[j]=='+'||s[j]=='-') j++;
-    int digits=0, dots=0;
-    for(;s[j];j++){
-        if (isdigit((unsigned char)s[j])) digits++;
-        else if (s[j]=='.'&&!dots) dots++;
-        else return value_incref(XS_FALSE_VAL);
-    }
-    return digits>0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
-}
-static Value *native_str_words(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_array_new();
-    const char *s=a[0]->s; Value *arr=xs_array_new();
-    const char *p=s;
-    while (*p) {
-        while (*p&&isspace((unsigned char)*p)) p++;
-        if (!*p) break;
-        const char *start=p;
-        while (*p&&!isspace((unsigned char)*p)) p++;
-        array_push(arr->arr,xs_str_n(start,(int)(p-start)));
-    }
-    return arr;
-}
-static int levenshtein_dist(const char *s1, const char *s2) {
-    int l1=(int)strlen(s1), l2=(int)strlen(s2);
-    int *dp=xs_malloc((l2+1)*sizeof(int));
-    for(int j=0;j<=l2;j++) dp[j]=j;
-    for(int i=1;i<=l1;i++){
-        int prev=dp[0]; dp[0]=i;
-        for(int j=1;j<=l2;j++){
-            int old=dp[j];
-            dp[j]=s1[i-1]==s2[j-1]?prev:1+( prev<dp[j-1]?(prev<dp[j]?prev:dp[j]):(dp[j-1]<dp[j]?dp[j-1]:dp[j]) );
-            prev=old;
-        }
-    }
-    int r=dp[l2]; free(dp); return r;
-}
-static Value *native_str_levenshtein(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_int(0);
-    return xs_int(levenshtein_dist(a[0]->s,a[1]->s));
-}
-static Value *native_str_similarity(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_float(0.0);
-    int l1=(int)strlen(a[0]->s), l2=(int)strlen(a[1]->s);
-    int maxlen=l1>l2?l1:l2;
-    if (maxlen==0) return xs_float(1.0);
-    int d=levenshtein_dist(a[0]->s,a[1]->s);
-    return xs_float(1.0-(double)d/maxlen);
-}
-static Value *native_str_repeat(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_INT) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int count=(int)VAL_INT(a[1]);
-    if (count<=0) return xs_str("");
-    int slen=(int)strlen(s);
-    int rlen=slen*count;
-    char *r=xs_malloc(rlen+1);
-    for(int j=0;j<count;j++) memcpy(r+j*slen,s,slen);
-    r[rlen]='\0';
-    Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_str_chars(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int slen=(int)strlen(s);
-    Value *arr=xs_array_new();
-    char buf[2]; buf[1]='\0';
-    for(int j=0;j<slen;j++){
-        buf[0]=s[j];
-        Value *ch=xs_str(buf);
-        array_push(arr->arr,ch);
-    }
-    return arr;
-}
-static Value *native_str_bytes(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const unsigned char *s=(const unsigned char*)a[0]->s; int slen=(int)strlen(a[0]->s);
-    Value *arr=xs_array_new();
-    for(int j=0;j<slen;j++){
-        Value *b=xs_int((int64_t)s[j]);
-        array_push(arr->arr,b);
-    }
-    return arr;
-}
-Value *make_string_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"pad_left",       xs_native(native_str_pad_left));
-    map_take(m,"pad_right",      xs_native(native_str_pad_right));
-    map_take(m,"center",         xs_native(native_str_center));
-    map_take(m,"truncate",       xs_native(native_str_truncate));
-    map_take(m,"camel_to_snake", xs_native(native_str_camel_to_snake));
-    map_take(m,"snake_to_camel", xs_native(native_str_snake_to_camel));
-    map_take(m,"escape_html",    xs_native(native_str_escape_html));
-    map_take(m,"is_numeric",     xs_native(native_str_is_numeric));
-    map_take(m,"words",          xs_native(native_str_words));
-    map_take(m,"levenshtein",    xs_native(native_str_levenshtein));
-    map_take(m,"similarity",     xs_native(native_str_similarity));
-    map_take(m,"repeat",         xs_native(native_str_repeat));
-    map_take(m,"chars",          xs_native(native_str_chars));
-    map_take(m,"bytes",          xs_native(native_str_bytes));
-    return xs_module(m);
-}
 
-/* path module */
-static Value *native_path_basename(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s;
-    const char *sl=strrchr(s,'/');
-    const char *bs=strrchr(s,'\\');
-    const char *last=sl>bs?sl:bs;
-    return xs_str(last?last+1:s);
-}
-static Value *native_path_dirname(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str(".");
-    const char *s=a[0]->s;
-    const char *sl=strrchr(s,'/');
-    const char *bs=strrchr(s,'\\');
-    const char *last=sl>bs?sl:bs;
-    if (!last) return xs_str(".");
-    int dlen=(int)(last-s);
-    if (dlen==0) return xs_str("/");
-    char *r=xs_strndup(s,dlen); Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_path_ext(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
-    const char *s=a[0]->s;
-    const char *sl=strrchr(s,'/');
-    const char *bs=strrchr(s,'\\');
-    const char *last=sl>bs?sl:bs;
-    const char *base=last?last+1:s;
-    const char *dot=strrchr(base,'.');
-    return xs_str(dot?dot:"");
-}
-static Value *native_path_stem(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
-    const char *s=a[0]->s;
-    const char *sl=strrchr(s,'/'); const char *bs=strrchr(s,'\\');
-    const char *last=sl>bs?sl:bs; const char *base=last?last+1:s;
-    const char *dot=strrchr(base,'.');
-    if (!dot) return xs_str(base);
-    char *r=xs_strndup(base,(int)(dot-base)); Value *v=xs_str(r); free(r); return v;
-}
-static Value *native_path_join(Interp *i, Value **a, int argc) {
-    (void)i;
-    if (argc==0) return xs_str("");
-    int total=0;
-    for(int j=0;j<argc;j++) if(VAL_TAG(a[j])==XS_STR) total+=(int)strlen(a[j]->s)+1;
-    char *r=xs_malloc(total+2); int ri=0;
-    for(int j=0;j<argc;j++){
-        if(VAL_TAG(a[j])!=XS_STR) continue;
-        const char *s=a[j]->s;
-        if(ri>0&&s[0]!='/'&&s[0]!='\\') r[ri++]='/';
-        int slen=(int)strlen(s);
-        memcpy(r+ri,s,slen); ri+=slen;
-        /* remove trailing slash */
-        while(ri>1&&(r[ri-1]=='/'||r[ri-1]=='\\')) ri--;
-    }
-    r[ri]='\0'; Value *v=xs_str(r); free(r); return v;
-}
-Value *make_path_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"basename", xs_native(native_path_basename));
-    map_take(m,"dirname",  xs_native(native_path_dirname));
-    map_take(m,"ext",      xs_native(native_path_ext));
-    map_take(m,"stem",     xs_native(native_path_stem));
-    map_take(m,"join",     xs_native(native_path_join));
-    { Value *v=xs_str("/"); map_set(m,"sep",v); value_decref(v); }
-    return xs_module(m);
-}
-
-/* base64 module */
-static const char b64_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-static Value *native_b64_encode(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const unsigned char *s=(const unsigned char*)a[0]->s;
-    int slen=(int)strlen(a[0]->s);
-    int rlen=((slen+2)/3)*4; char *r=xs_malloc(rlen+1); int ri=0;
-    for(int j=0;j<slen;j+=3){
-        unsigned int v=(unsigned)s[j]<<16|(j+1<slen?(unsigned)s[j+1]:0)<<8|(j+2<slen?(unsigned)s[j+2]:0);
-        r[ri++]=b64_table[(v>>18)&63]; r[ri++]=b64_table[(v>>12)&63];
-        r[ri++]=(j+1<slen)?b64_table[(v>>6)&63]:'=';
-        r[ri++]=(j+2<slen)?b64_table[v&63]:'=';
-    }
-    r[ri]='\0'; Value *v2=xs_str(r); free(r); return v2;
-}
-static Value *native_b64_decode(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    const char *s=a[0]->s; int slen=(int)strlen(s);
-    char *r=xs_malloc(slen); int ri=0;
-    static const signed char b64_inv[256]={
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
-        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
-        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
-    };
-    for(int j=0;j+3<slen;j+=4){
-        int a0=b64_inv[(unsigned char)s[j]],a1=b64_inv[(unsigned char)s[j+1]];
-        int a2=b64_inv[(unsigned char)s[j+2]],a3=b64_inv[(unsigned char)s[j+3]];
-        if(a0<0||a1<0) break;
-        r[ri++]=(char)((a0<<2)|(a1>>4));
-        if(a2>=0) r[ri++]=(char)((a1<<4)|(a2>>2));
-        if(a3>=0) r[ri++]=(char)((a2<<6)|a3);
-    }
-    r[ri]='\0'; Value *v2=xs_str(r); free(r); return v2;
-}
-Value *make_base64_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"encode",xs_native(native_b64_encode));
-    map_take(m,"decode",xs_native(native_b64_decode));
-    return xs_module(m);
-}
-
-/* hash module */
-/* Forward declarations for real hash implementations (defined in crypto module section) */
-static void md5_hash(const uint8_t *data, size_t len, uint8_t out[16]);
-static void sha256_hash(const uint8_t *data, size_t len, uint8_t out[32]);
-
-static Value *native_hash_md5(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
-    uint8_t hash[16];
-    md5_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
-    char buf[33];
-    for(int j=0;j<16;j++) sprintf(buf+j*2,"%02x",hash[j]);
-    buf[32]='\0';
-    return xs_str(buf);
-}
-static Value *native_hash_sha256(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return xs_str("");
-    uint8_t hash[32];
-    sha256_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
-    char buf[65];
-    for(int j=0;j<32;j++) sprintf(buf+j*2,"%02x",hash[j]);
-    buf[64]='\0';
-    return xs_str(buf);
-}
-Value *make_hash_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"md5",   xs_native(native_hash_md5));
-    map_take(m,"sha256",xs_native(native_hash_sha256));
-    return xs_module(m);
-}
-
-/* uuid module */
-static Value *native_uuid_v4(Interp *i, Value **a, int n) {
-    (void)i;(void)a;(void)n;
-    unsigned char b[16];
-    for(int j=0;j<16;j++) b[j]=(unsigned char)(rand()&0xff);
-    b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
-    char buf[37];
-    snprintf(buf,sizeof(buf),"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-             b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15]);
-    return xs_str(buf);
-}
-static Value *native_uuid_is_valid(Interp *i, Value **a, int n) {
-    (void)i;
-    if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
-    const char *s=a[0]->s; int l=(int)strlen(s);
-    if (l!=36) return value_incref(XS_FALSE_VAL);
-    for(int j=0;j<36;j++){
-        if(j==8||j==13||j==18||j==23){if(s[j]!='-')return value_incref(XS_FALSE_VAL);}
-        else if(!isxdigit((unsigned char)s[j])) return value_incref(XS_FALSE_VAL);
-    }
-    return value_incref(XS_TRUE_VAL);
-}
-Value *make_uuid_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"v4",      xs_native(native_uuid_v4));
-    map_take(m,"is_valid",xs_native(native_uuid_is_valid));
-    return xs_module(m);
-}
-
-/* random module */
-static Value *native_random_int(Interp *ig, Value **args, int argc) {
-    (void)ig;
-    int64_t lo = 0, hi = 100;
-    if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) lo = VAL_INT(args[0]);
-    if (argc >= 2 && VAL_TAG(args[1]) == XS_INT) hi = VAL_INT(args[1]);
-    if (hi < lo) { int64_t tmp=lo; lo=hi; hi=tmp; }
-    int64_t range2 = hi - lo + 1;
-    return xs_int(lo + (range2 > 0 ? (int64_t)(rand() % (int)range2) : 0));
-}
-static Value *native_random_float(Interp *ig, Value **args, int argc) {
-    (void)ig; (void)args; (void)argc;
-    return xs_float((double)rand() / ((double)RAND_MAX + 1.0));
-}
-static Value *native_random_choice(Interp *ig, Value **args, int argc) {
-    (void)ig;
-    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY || args[0]->arr->len == 0)
-        return value_incref(XS_NULL_VAL);
-    int idx = rand() % args[0]->arr->len;
-    return value_incref(array_get(args[0]->arr, idx));
-}
-static Value *native_random_shuffle(Interp *ig, Value **args, int argc) {
-    (void)ig;
-    if (argc < 1 || VAL_TAG(args[0]) != XS_ARRAY) return value_incref(XS_NULL_VAL);
-    Value *result = xs_array_new();
-    for (int j2 = 0; j2 < args[0]->arr->len; j2++)
-        array_push(result->arr, value_incref(array_get(args[0]->arr, j2)));
-    for (int j2 = result->arr->len - 1; j2 > 0; j2--) {
-        int k = rand() % (j2 + 1);
-        Value *tmp2 = result->arr->items[j2];
-        result->arr->items[j2] = result->arr->items[k];
-        result->arr->items[k] = tmp2;
-    }
-    return result;
-}
-static Value *native_random_seed(Interp *ig, Value **args, int argc) {
-    (void)ig;
-    if (argc >= 1 && VAL_TAG(args[0]) == XS_INT) srand((unsigned)VAL_INT(args[0]));
-    return value_incref(XS_NULL_VAL);
-}
-static Value *native_random_bool(Interp *ig, Value **a, int n) {
-    (void)ig;(void)a;(void)n;
-    return (rand()%2==0)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
-}
-static Value *native_random_choices(Interp *ig, Value **a, int n) {
-    (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_ARRAY||a[0]->arr->len==0) return xs_array_new();
-    int64_t k=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):1;
-    Value *arr=xs_array_new();
-    XSArray *src=a[0]->arr;
-    for (int64_t j=0;j<k;j++) {
-        int idx=rand()%src->len;
-        array_push(arr->arr,value_incref(src->items[idx]));
-    }
-    return arr;
-}
-static Value *native_random_shuffled(Interp *ig, Value **a, int n) {
-    return native_random_shuffle(ig,a,n);
-}
-static Value *native_random_sample(Interp *ig, Value **a, int n) {
-    (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_ARRAY) return xs_array_new();
-    XSArray *src=a[0]->arr;
-    int64_t k=(VAL_TAG(a[1])==XS_INT)?VAL_INT(a[1]):0;
-    if (k>src->len) k=src->len;
-    /* Fisher-Yates on a copy */
-    Value *copy=xs_array_new();
-    for (int j=0;j<src->len;j++) array_push(copy->arr,value_incref(src->items[j]));
-    for (int j=copy->arr->len-1;j>0;j--) {
-        int r=rand()%(j+1);
-        Value *tmp=copy->arr->items[j];
-        copy->arr->items[j]=copy->arr->items[r];
-        copy->arr->items[r]=tmp;
-    }
-    /* Shrink to k */
-    while (copy->arr->len>(int)k) {
-        value_decref(copy->arr->items[--copy->arr->len]);
-    }
-    return copy;
-}
-static Value *native_random_gauss(Interp *ig, Value **a, int n) {
-    (void)ig;
-    double mu=(n>0)?(VAL_TAG(a[0])==XS_FLOAT?a[0]->f:(double)VAL_INT(a[0])):0.0;
-    double sigma=(n>1)?(VAL_TAG(a[1])==XS_FLOAT?a[1]->f:(double)VAL_INT(a[1])):1.0;
-    /* Box-Muller transform */
-    double u1=((double)rand()+1.0)/((double)RAND_MAX+2.0);
-    double u2=((double)rand()+1.0)/((double)RAND_MAX+2.0);
-    double z=sqrt(-2.0*log(u1))*cos(2.0*M_PI*u2);
-    return xs_float(mu+sigma*z);
-}
-static Value *native_random_uniform(Interp *ig, Value **a, int n) {
-    (void)ig;
-    double lo=(n>0)?(VAL_TAG(a[0])==XS_FLOAT?a[0]->f:(double)VAL_INT(a[0])):0.0;
-    double hi=(n>1)?(VAL_TAG(a[1])==XS_FLOAT?a[1]->f:(double)VAL_INT(a[1])):1.0;
-    double r=(double)rand()/((double)RAND_MAX+1.0);
-    return xs_float(lo+r*(hi-lo));
-}
-static Value *native_random_bytes(Interp *ig, Value **a, int n) {
-    (void)ig;
-    int64_t cnt=(n>0&&VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):0;
-    Value *arr=xs_array_new();
-    for (int64_t j=0;j<cnt;j++) array_push(arr->arr,xs_int((int64_t)(rand()&0xff)));
-    return arr;
-}
-static Value *native_random_hex_str(Interp *ig, Value **a, int n) {
-    (void)ig;
-    int64_t cnt=(n>0&&VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):0;
-    char *buf=xs_malloc(cnt*2+1); buf[0]='\0';
-    for (int64_t j=0;j<cnt;j++) snprintf(buf+j*2,3,"%02x",(unsigned)(rand()&0xff));
-    Value *v=xs_str(buf); free(buf); return v;
-}
-
-Value *make_random_module(void) {
-    XSMap *m = map_new();
-    map_take(m, "int",     xs_native(native_random_int));
-    map_take(m, "float",   xs_native(native_random_float));
-    map_take(m, "bool",    xs_native(native_random_bool));
-    map_take(m, "choice",  xs_native(native_random_choice));
-    map_take(m, "choices", xs_native(native_random_choices));
-    map_take(m, "shuffle", xs_native(native_random_shuffle));
-    map_take(m, "shuffled",xs_native(native_random_shuffled));
-    map_take(m, "sample",  xs_native(native_random_sample));
-    map_take(m, "gauss",   xs_native(native_random_gauss));
-    map_take(m, "uniform", xs_native(native_random_uniform));
-    map_take(m, "bytes",   xs_native(native_random_bytes));
-    map_take(m, "hex_str", xs_native(native_random_hex_str));
-    map_take(m, "seed",    xs_native(native_random_seed));
-    return xs_module(m);
-}
 
 /* collections module */
 /* Stack: returns a map with _type="Stack" and _data=[] */
@@ -5013,7 +4503,7 @@ static void sha256_transform(uint32_t state[8], const uint8_t block[64]) {
     state[4]+=e; state[5]+=f; state[6]+=g; state[7]+=h;
 }
 
-static void sha256_hash(const uint8_t *data, size_t len, uint8_t out[32]) {
+void xs_sha256_hash(const uint8_t *data, size_t len, uint8_t out[32]) {
     uint32_t state[8] = {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
         0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
@@ -5067,7 +4557,7 @@ static const uint32_t md5_k_tab[64] = {
 
 static uint32_t md5_leftrotate(uint32_t x, uint32_t c) { return (x << c) | (x >> (32 - c)); }
 
-static void md5_hash(const uint8_t *data, size_t len, uint8_t out[16]) {
+void xs_md5_hash(const uint8_t *data, size_t len, uint8_t out[16]) {
     uint32_t a0=0x67452301, b0=0xefcdab89, c0=0x98badcfe, d0=0x10325476;
     /* pad message */
     size_t new_len = ((len + 8) / 64 + 1) * 64;
@@ -5103,7 +4593,7 @@ static Value *native_crypto_sha256(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     uint8_t hash[32];
-    sha256_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
+    xs_sha256_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char hex[65];
     for (int i = 0; i < 32; i++) sprintf(hex + i*2, "%02x", hash[i]);
     hex[64] = '\0';
@@ -5114,7 +4604,7 @@ static Value *native_crypto_md5(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
     uint8_t hash[16];
-    md5_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
+    xs_md5_hash((const uint8_t*)a[0]->s, strlen(a[0]->s), hash);
     char hex[33];
     for (int i = 0; i < 16; i++) sprintf(hex + i*2, "%02x", hash[i]);
     hex[32] = '\0';
@@ -5267,6 +4757,7 @@ static Value *native_crypto_hex_decode(Interp *ig, Value **a, int n) {
     Value *r = xs_str(out); free(out); return r;
 }
 
+static const char xs_b64_tbl[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static Value *native_crypto_base64_encode(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1 || VAL_TAG(a[0]) != XS_STR) return xs_str("");
@@ -5276,9 +4767,9 @@ static Value *native_crypto_base64_encode(Interp *ig, Value **a, int n) {
     char *r = xs_malloc(rlen + 1); int ri = 0;
     for (int j = 0; j < slen; j += 3) {
         unsigned int v = (unsigned)s[j]<<16 | (j+1<slen?(unsigned)s[j+1]:0)<<8 | (j+2<slen?(unsigned)s[j+2]:0);
-        r[ri++] = b64_table[(v>>18)&63]; r[ri++] = b64_table[(v>>12)&63];
-        r[ri++] = (j+1<slen) ? b64_table[(v>>6)&63] : '=';
-        r[ri++] = (j+2<slen) ? b64_table[v&63] : '=';
+        r[ri++] = xs_b64_tbl[(v>>18)&63]; r[ri++] = xs_b64_tbl[(v>>12)&63];
+        r[ri++] = (j+1<slen) ? xs_b64_tbl[(v>>6)&63] : '=';
+        r[ri++] = (j+2<slen) ? xs_b64_tbl[v&63] : '=';
     }
     r[ri] = '\0'; Value *v2 = xs_str(r); free(r); return v2;
 }
@@ -6001,7 +5492,7 @@ Value *make_buf_module(void) {
 
 /* encoding: base64, hex, json */
 
-/* b64_table already defined above for base64 module */
+static const char b64_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static Value *native_encode_base64_encode(Interp *ig, Value **a, int n) {
     (void)ig;
