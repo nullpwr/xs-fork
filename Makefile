@@ -70,6 +70,10 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins_csv.c \
                src/runtime/builtins_url.c \
                src/runtime/builtins_toml.c \
+               src/runtime/builtins_log.c \
+               src/runtime/builtins_fmt.c \
+               src/runtime/builtins_test.c \
+               src/runtime/builtins_re.c \
                src/runtime/error.c \
                src/runtime/stdlib.c \
                src/runtime/scheduler.c \
