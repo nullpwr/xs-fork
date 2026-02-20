@@ -85,6 +85,13 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins_buf.c \
                src/runtime/builtins_encode.c \
                src/runtime/builtins_db.c \
+               src/runtime/builtins_cli.c \
+               src/runtime/builtins_ffi.c \
+               src/runtime/builtins_reflect.c \
+               src/runtime/builtins_gc.c \
+               src/runtime/builtins_reactive.c \
+               src/runtime/builtins_http.c \
+               src/runtime/builtins_fs.c \
                src/runtime/error.c \
                src/runtime/stdlib.c \
                src/runtime/scheduler.c \
