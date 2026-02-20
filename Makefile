@@ -78,6 +78,9 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins_process.c \
                src/runtime/builtins_io.c \
                src/runtime/builtins_os.c \
+               src/runtime/builtins_async.c \
+               src/runtime/builtins_net.c \
+               src/runtime/builtins_crypto.c \
                src/runtime/error.c \
                src/runtime/stdlib.c \
                src/runtime/scheduler.c \
