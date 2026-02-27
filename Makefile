@@ -57,6 +57,7 @@ CORE_SRCS = src/core/value.c \
 COMPILER_SRCS = src/compiler/match_compiler.c
 
 RUNTIME_SRCS = src/runtime/interp.c \
+               src/runtime/interp_ast.c \
                src/runtime/builtins.c \
                src/runtime/builtins_math.c \
                src/runtime/builtins_time.c \
