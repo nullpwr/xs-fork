@@ -34,6 +34,12 @@ module.exports = grammar({
     [$.call_expression, $.field_expression],
     [$._statement, $._expression],
     [$.block, $.map_literal],
+    [$.while_statement, $.for_statement, $.loop_statement, $._expression],
+    [$.map_entry, $._expression],
+    [$.break_statement, $._expression],
+    [$.continue_statement, $._expression],
+    [$.lambda_expression, $._expression],
+    [$.where_clause, $.assignment_expression],
   ],
 
   rules: {
@@ -67,11 +73,9 @@ module.exports = grammar({
       $.throw_statement,
       $.defer_statement,
       $.yield_statement,
-      $.if_statement,
       $.while_statement,
       $.for_statement,
       $.loop_statement,
-      $.match_statement,
       $.try_statement,
       $.block,
       $._expression_statement,
@@ -157,7 +161,7 @@ module.exports = grammar({
 
     generic_params: $ => seq('<', commaSep1($.identifier), '>'),
 
-    where_clause: $ => seq('where', commaSep1($._expression)),
+    where_clause: $ => prec(1, seq('where', commaSep1($._expression))),
 
     // ---- types -----------------------------------------------------------
 
@@ -286,8 +290,8 @@ module.exports = grammar({
 
     tuple_type:     $ => seq('(', commaSep1($._type), ')'),
     array_type:     $ => seq('[', $._type, optional(seq(';', $.number_literal)), ']'),
-    option_type:    $ => seq($._type, '?'),
-    reference_type: $ => seq('&', optional('mut'), $._type),
+    option_type:    $ => prec(1, seq($._type, '?')),
+    reference_type: $ => prec.right(seq('&', optional('mut'), $._type)),
 
     // ---- statements ------------------------------------------------------
 
@@ -297,14 +301,6 @@ module.exports = grammar({
     throw_statement:    $ => seq('throw', $._expression),
     defer_statement:    $ => seq('defer', $._expression),
     yield_statement:    $ => prec.right(seq('yield', optional($._expression))),
-
-    if_statement: $ => prec.right(seq(
-      'if',
-      field('condition', $._expression),
-      field('consequence', $.block),
-      repeat(seq('elif', $._expression, $.block)),
-      optional(seq('else', choice($.block, $.if_statement))),
-    )),
 
     while_statement: $ => seq(
       optional(seq(field('label', $.identifier), ':')),
@@ -329,21 +325,13 @@ module.exports = grammar({
       field('body', $.block),
     ),
 
-    match_statement: $ => seq(
-      'match',
-      field('scrutinee', $._expression),
-      '{',
-      repeat($.match_arm),
-      '}',
-    ),
-
-    match_arm: $ => seq(
+    match_arm: $ => prec(1, seq(
       field('pattern', $._pattern),
       optional(seq('when', field('guard', $._expression))),
       '->',
-      field('body', choice($._expression, $.block)),
+      field('body', $._expression),
       optional(','),
-    ),
+    )),
 
     try_statement: $ => seq(
       'try',
@@ -469,21 +457,20 @@ module.exports = grammar({
       ']',
     )),
 
-    lambda_expression: $ => seq(
+    lambda_expression: $ => prec.right(seq(
       '|',
       commaSep($.parameter),
       '|',
       choice($._expression, $.block),
-    ),
+    )),
 
-    if_expression: $ => seq(
+    if_expression: $ => prec.right(seq(
       'if',
       field('condition', $._expression),
       field('consequence', $.block),
       repeat(seq('elif', $._expression, $.block)),
-      'else',
-      field('alternative', choice($.block, $.if_expression)),
-    ),
+      optional(seq('else', choice($.block, $.if_expression))),
+    )),
 
     match_expression: $ => seq(
       'match',

@@ -3,3 +3,12 @@ src/
 build/
 package-lock.json
 *.wasm
+Cargo.toml
+Makefile
+Package.swift
+binding.gyp
+bindings/
+pyproject.toml
+setup.py
+.editorconfig
+.gitattributes
