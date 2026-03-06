@@ -11,6 +11,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
+#elif defined(__wasi__)
+#include <unistd.h>
+#include <signal.h>
 #else
 #include <unistd.h>
 #include <sys/wait.h>
