@@ -32,6 +32,8 @@ module.exports = grammar({
   conflicts: $ => [
     [$.type_identifier, $.identifier],
     [$.call_expression, $.field_expression],
+    [$._statement, $._expression],
+    [$.block, $.map_literal],
   ],
 
   rules: {
@@ -289,12 +291,12 @@ module.exports = grammar({
 
     // ---- statements ------------------------------------------------------
 
-    return_statement:   $ => seq('return',   optional($._expression)),
-    break_statement:    $ => seq('break',    optional($.identifier), optional($._expression)),
-    continue_statement: $ => seq('continue', optional($.identifier)),
-    throw_statement:    $ => seq('throw',    $._expression),
-    defer_statement:    $ => seq('defer',    $._expression),
-    yield_statement:    $ => seq('yield',    optional($._expression)),
+    return_statement:   $ => prec.right(seq('return', optional($._expression))),
+    break_statement:    $ => prec.right(seq('break', optional($.identifier), optional($._expression))),
+    continue_statement: $ => prec.right(seq('continue', optional($.identifier))),
+    throw_statement:    $ => seq('throw', $._expression),
+    defer_statement:    $ => seq('defer', $._expression),
+    yield_statement:    $ => prec.right(seq('yield', optional($._expression))),
 
     if_statement: $ => prec.right(seq(
       'if',
@@ -495,7 +497,7 @@ module.exports = grammar({
     await_expression:   $ => prec(PREC.unary, seq('await',   $._expression)),
     async_expression:   $ => prec(PREC.unary, seq('async',   $._expression)),
     perform_expression: $ => prec(PREC.unary, seq('perform', $._expression)),
-    resume_expression:  $ => prec(PREC.unary, seq('resume',  optional($._expression))),
+    resume_expression:  $ => prec.right(PREC.unary, seq('resume', optional($._expression))),
     handle_expression:  $ => seq(
       'handle',
       $._expression,
@@ -531,11 +533,11 @@ module.exports = grammar({
 
     /* Universal literals: 500ms, #ff6600, 2025-01-20, 10MB, 45deg */
     universal_literal: $ => token(choice(
-      /[0-9]+(\.[0-9]+)?(ns|us|ms|s|min|h|d|w|mo|y)\b/,
-      /#[0-9a-fA-F]{3,8}\b/,
-      /[0-9]+-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?\b/,
-      /[0-9]+(\.[0-9]+)?(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)\b/,
-      /[0-9]+(\.[0-9]+)?(deg|rad|turn|grad)\b/,
+      /[0-9]+(\.[0-9]+)?(ns|us|ms|s|min|h|d|w|mo|y)/,
+      /#[0-9a-fA-F]{3,8}/,
+      /[0-9]+-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?/,
+      /[0-9]+(\.[0-9]+)?(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/,
+      /[0-9]+(\.[0-9]+)?(deg|rad|turn|grad)/,
     )),
 
     identifier: $ => /[a-z_][a-zA-Z0-9_]*/,

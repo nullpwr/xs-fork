@@ -400,6 +400,55 @@ wasm:
 	$(WASI_CC) $(WASM_FLAGS) -lwasi-emulated-signal -lwasi-emulated-pthread -o xs.wasm $(WASM_SRCS)
 	@echo "built xs.wasm"
 
+# Browser-targeted wasm: strip TLS (no sockets in wasi anyway), SSL engine,
+# x509 chain verification, RSA and EC BearSSL backends, the bundled CA
+# roots, http_server, and the transpiler/doc/lint/coverage tools that make
+# no sense without a CLI. Keeps hash / mac / kdf / symcipher so the crypto
+# module still works. Expects `wasm-opt` from binaryen; degrades gracefully
+# if it isn't installed.
+WASM_BROWSER_DROP = \
+    src/tls/xs_tls.c src/tls/xs_ca_bundle.c \
+    src/net/http_server.c \
+    src/doc/docgen.c src/lint/lint.c \
+    src/pkg/pkg.c \
+    $(wildcard src/tls/bearssl/ssl/*.c) \
+    $(wildcard src/tls/bearssl/x509/*.c) \
+    $(wildcard src/tls/bearssl/rsa/*.c) \
+    $(wildcard src/tls/bearssl/ec/*.c) \
+    $(wildcard src/tls/bearssl/aead/*.c)
+
+WASM_BROWSER_SRCS = $(filter-out $(WASM_BROWSER_DROP),$(WASM_SRCS))
+
+WASM_BROWSER_FLAGS = -Oz -std=c11 -Isrc \
+             --target=wasm32-wasi \
+             --sysroot=$(WASI_SYSROOT) \
+             -mllvm -wasm-enable-sjlj \
+             -D_WASI_EMULATED_SIGNAL \
+             -D_WASI_EMULATED_PTHREAD \
+             -DXS_WASM=1 -DXS_BROWSER=1 \
+             -DXSC_ENABLE_VM -DXSC_ENABLE_EFFECTS -DXSC_ENABLE_TRANSPILER \
+             -DXSC_ENABLE_FMT -DXSC_ENABLE_PLUGINS -DXSC_ENABLE_SANDBOX \
+             -DXSC_ENABLE_TRACER \
+             -ffunction-sections -fdata-sections \
+             -Wno-incompatible-library-redeclaration \
+             -Wno-implicit-function-declaration \
+             -Wno-int-conversion
+
+wasm-browser:
+	$(WASI_CC) $(WASM_BROWSER_FLAGS) \
+	    -Wl,--gc-sections -Wl,--strip-all \
+	    -lwasi-emulated-signal -lwasi-emulated-pthread \
+	    -o xs-browser.wasm $(WASM_BROWSER_SRCS)
+	@echo "built xs-browser.wasm ($$(wc -c < xs-browser.wasm) bytes)"
+	@if command -v wasm-opt >/dev/null 2>&1; then \
+	    wasm-opt -Oz --strip-debug --strip-producers \
+	        xs-browser.wasm -o xs-browser.wasm.tmp && \
+	    mv xs-browser.wasm.tmp xs-browser.wasm && \
+	    echo "wasm-opt: $$(wc -c < xs-browser.wasm) bytes"; \
+	else \
+	    echo "wasm-opt not found; skipping post-link optimisation"; \
+	fi
+
 clean:
 	rm -f $(OBJS) $(TARGET)
 	find src -name '*.o' -delete
