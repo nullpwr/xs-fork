@@ -227,7 +227,7 @@ endif
 OBJS = $(SRCS:.c=.o)
 
 # Targets
-.PHONY: all clean debug release test test-unit test-e2e test-negative test-property test-golden test-regression test-conformance test-all install wasm
+.PHONY: all clean debug release test test-unit test-e2e test-negative test-property test-golden test-regression test-conformance test-all install wasm wasm-browser bench bench-compare
 
 all: $(TARGET)
 
@@ -262,6 +262,18 @@ release: clean $(TARGET)
 
 test: $(TARGET)
 	@bash tests/run-all.sh
+
+# Cross-runtime benchmark: times each bench under xs (interp/vm/jit)
+# plus python3, node, and go (any missing runtime is skipped). Writes
+# results.json with the best-of-N wall times; CI uses it to guard
+# regressions against the committed baseline.
+bench: $(TARGET)
+	@bash benchmarks/run.sh
+
+# Detect perf regressions against benchmarks/baseline.json. Exits non-zero
+# if any numeric shrinks or grows by more than $$TOLERANCE (default 25%).
+bench-compare: bench
+	@python3 benchmarks/compare.py benchmarks/baseline.json benchmarks/results.json
 
 # Unit tests: isolated C tests that exercise compiler internals (lexer,
 # parser, sema, vm) without going through the full `xs` binary. Each
