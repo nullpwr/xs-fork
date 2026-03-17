@@ -1,0 +1,30 @@
+<idea-plugin>
+    <id>org.xslang.intellij</id>
+    <name>XS</name>
+    <vendor email="xslang.090@gmail.com" url="https://xslang.org">XS Language</vendor>
+    <description><![CDATA[
+        Support for the <a href="https://xslang.org">XS programming language</a>:
+        syntax highlighting, code navigation, completion, and diagnostics
+        via the <code>xs lsp</code> language server.
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <ul>
+            <li>0.1.0 — initial release: filetype, TextMate grammar, LSP wiring.</li>
+        </ul>
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends optional="true" config-file="textmate.xml">org.jetbrains.plugins.textmate</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="XS"
+                  implementationClass="org.xslang.intellij.XsFileType"
+                  fieldName="INSTANCE"
+                  language="XS"
+                  extensions="xs"/>
+
+        <platform.lsp.serverSupportProvider
+                implementation="org.xslang.intellij.XsLspServerSupportProvider"/>
+    </extensions>
+</idea-plugin>

@@ -1,0 +1,18 @@
+[[language]]
+name = "xs"
+scope = "source.xs"
+file-types = ["xs"]
+roots = ["xs.toml", ".git"]
+comment-tokens = ["--"]
+indent = { tab-width = 2, unit = "  " }
+auto-format = true
+formatter = { command = "xs", args = ["fmt", "-"] }
+language-servers = ["xs"]
+
+[language-server.xs]
+command = "xs"
+args = ["lsp"]
+
+[[grammar]]
+name = "xs"
+source = { git = "https://github.com/xs-lang0/xs", subpath = "editors/tree-sitter-xs" }
