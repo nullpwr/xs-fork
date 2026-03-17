@@ -77,6 +77,7 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins_fmt.c \
                src/runtime/builtins_test.c \
                src/runtime/builtins_re.c \
+               src/runtime/builtins_tracing.c \
                src/runtime/builtins_collections.c \
                src/runtime/builtins_process.c \
                src/runtime/builtins_io.c \

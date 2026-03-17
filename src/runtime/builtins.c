@@ -1154,6 +1154,10 @@ extern Value *builtin_derived(Interp *, Value **, int);
     env_define(i->globals, "test", test_mod, 1);
     value_decref(test_mod);
 
+    Value *tracing_mod = make_tracing_module();
+    env_define(i->globals, "tracing", tracing_mod, 1);
+    value_decref(tracing_mod);
+
     Value *csv_mod = make_csv_module();
     env_define(i->globals, "csv", csv_mod, 1);
     value_decref(csv_mod);

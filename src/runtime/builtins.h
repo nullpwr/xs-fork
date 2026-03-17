@@ -50,5 +50,6 @@ Value *make_toml_module(void);
 Value *make_http_module(void);
 Value *make_fs_module(void);
 Value *make_test_module(void);
+Value *make_tracing_module(void);
 
 #endif
