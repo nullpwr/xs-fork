@@ -1,0 +1,8 @@
+[package]
+name = "xs-dotenv"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "read .env files; expand ${VAR} references"
+
+[lib]
+path = "src/lib.xs"

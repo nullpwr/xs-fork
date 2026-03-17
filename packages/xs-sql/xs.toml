@@ -1,0 +1,8 @@
+[package]
+name = "xs-sql"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "parameterised query builder for the in-memory db module"
+
+[lib]
+path = "src/lib.xs"

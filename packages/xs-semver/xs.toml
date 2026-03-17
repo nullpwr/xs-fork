@@ -1,0 +1,8 @@
+[package]
+name = "xs-semver"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "parse / compare / range-satisfies for semver versions"
+
+[lib]
+path = "src/lib.xs"
