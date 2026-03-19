@@ -127,9 +127,29 @@ typedef struct {
     int state;       /* 0 = reading headers, 1 = reading body, 2 = done */
     HTTPServer *server;
     int64_t connected_at;
+    int64_t last_activity_ms;
+    int64_t request_start_ms;   /* 0 until first byte; reset after each request */
+    int processing;             /* handler running, do not cull on shutdown drain */
     char remote_addr[64];
     int remote_port;
+
+    /* TLS (BearSSL) per-connection state. Opaque so http_server.h does
+     * not need to drag in BearSSL's headers. NULL on plain-HTTP listeners. */
+    void *tls_state;
 } HTTPConnection;
+
+/* ----------------------------------------------------------------
+ *  Per-server tunable limits
+ * ---------------------------------------------------------------- */
+
+typedef struct {
+    int max_body_bytes;       /* per-request body cap; 0 = use HTTP_MAX_BODY */
+    int max_header_bytes;     /* total header section cap; 0 = 32 KiB */
+    int max_connections;      /* concurrent connection cap; 0 = 1024 */
+    int idle_timeout_ms;      /* close idle keep-alive conns after; 0 = 60s */
+    int request_timeout_ms;   /* drop slow / partial requests after; 0 = 30s */
+    int shutdown_grace_ms;    /* drain in-flight requests before forcing close; 0 = 5s */
+} HTTPServerLimits;
 
 /* ----------------------------------------------------------------
  *  Server
@@ -141,8 +161,13 @@ struct HTTPServer {
     Router *router;
     int port;
     int running;
-    int max_connections;
+    int draining;             /* graceful shutdown in progress: no new accepts */
+    int64_t shutdown_deadline_ms;
+    int sweeper_timer;        /* periodic idle / request-timeout cull */
+    HTTPServerLimits limits;
     int64_t request_count;
+    int64_t bytes_in;
+    int64_t bytes_out;
 
     /* active connections */
     HTTPConnection **conns;
@@ -154,6 +179,10 @@ struct HTTPServer {
 
     /* access log */
     int access_log;
+
+    /* TLS (BearSSL) listener context. Opaque; populated by
+     * http_server_use_tls. NULL = plain HTTP. */
+    void *tls_ctx;
 };
 
 /* ----------------------------------------------------------------
@@ -199,6 +228,21 @@ void http_server_middleware(HTTPServer *s, MiddlewareFunc fn, void *ctx);
 void http_server_static(HTTPServer *s, const char *prefix, const char *dir);
 int  http_server_start(HTTPServer *s);
 void http_server_stop(HTTPServer *s);
+
+/* Begin graceful shutdown: stop accepting new connections, drain
+ * in-flight requests up to grace_ms, then force-close any remaining
+ * connections. Pass 0 to use the configured shutdown_grace_ms. Returns
+ * immediately; the event loop continues until drain completes. */
+void http_server_shutdown(HTTPServer *s, int grace_ms);
+
+/* Override per-server limits. Pass NULL to fall back to defaults. */
+void http_server_set_limits(HTTPServer *s, const HTTPServerLimits *l);
+
+/* Enable TLS termination on the listener. cert_pem and key_pem are
+ * file paths to a PEM-encoded certificate chain and private key. Must
+ * be called before http_server_start. Returns 0 on success. */
+int  http_server_use_tls(HTTPServer *s, const char *cert_pem,
+                         const char *key_pem);
 
 /* ----------------------------------------------------------------
  *  MIME type detection

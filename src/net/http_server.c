@@ -1073,6 +1073,9 @@ static HTTPConnection *conn_new(int fd, HTTPServer *server) {
     c->read_len = 0;
     c->state = 0;
     c->connected_at = evloop_now_ms();
+    c->last_activity_ms = c->connected_at;
+    c->request_start_ms = 0;
+    c->processing = 0;
     return c;
 }
 
@@ -1169,6 +1172,7 @@ static void process_request(HTTPConnection *c) {
 
     free(out_buf);
     s->request_count++;
+    s->bytes_out += total_written;
 
     /* access log */
     if (s->access_log) {
@@ -1198,12 +1202,25 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
     HTTPServer *s = c->server;
     (void)ev;
 
-    /* grow buffer if needed */
+    /* grow buffer if needed, but cap at server's max_body + headers */
+    int hard_cap = s->limits.max_body_bytes + s->limits.max_header_bytes;
     if (c->read_len >= c->read_cap - 1) {
         c->read_cap *= 2;
-        if (c->read_cap > HTTP_MAX_BODY + 8192)
-            c->read_cap = HTTP_MAX_BODY + 8192;
+        if (c->read_cap > hard_cap) c->read_cap = hard_cap;
         c->read_buf = realloc(c->read_buf, c->read_cap);
+    }
+
+    /* if we already filled the buffer to its hard cap, the request is
+     * oversized; reply 413 and close. */
+    if (c->read_len >= hard_cap - 1) {
+        const char *resp =
+            "HTTP/1.1 413 Payload Too Large\r\n"
+            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+        evloop_remove_fd(s->evloop, fd);
+        server_remove_conn(s, c);
+        conn_free(c);
+        return;
     }
 
     int n = (int)read(fd, c->read_buf + c->read_len,
@@ -1218,31 +1235,54 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
 
     c->read_len += n;
     c->read_buf[c->read_len] = '\0';
+    c->last_activity_ms = evloop_now_ms();
+    if (c->request_start_ms == 0) c->request_start_ms = c->last_activity_ms;
+    s->bytes_in += n;
 
     /* check if we have complete headers */
-    if (strstr(c->read_buf, "\r\n\r\n")) {
-        /* check if we need to wait for body */
-        const char *cl_str = NULL;
-        const char *hdr = c->read_buf;
-        const char *hdr_end = strstr(hdr, "\r\n\r\n");
+    char *hdr_end = strstr(c->read_buf, "\r\n\r\n");
+    if (hdr_end) {
+        int header_size = (int)(hdr_end - c->read_buf) + 4;
+        if (header_size > s->limits.max_header_bytes) {
+            const char *resp =
+                "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+            evloop_remove_fd(s->evloop, fd);
+            server_remove_conn(s, c);
+            conn_free(c);
+            return;
+        }
 
         /* quick scan for Content-Length */
-        const char *cl_pos = strcasestr(hdr, "Content-Length:");
+        const char *cl_pos = strcasestr(c->read_buf, "Content-Length:");
         if (cl_pos && cl_pos < hdr_end) {
-            cl_str = cl_pos + 15;
+            const char *cl_str = cl_pos + 15;
             while (*cl_str == ' ') cl_str++;
-            int content_len = atoi(cl_str);
-            int header_size = (int)(hdr_end - hdr) + 4;
-            int total_needed = header_size + content_len;
+            long content_len = atol(cl_str);
+            if (content_len > s->limits.max_body_bytes) {
+                const char *resp =
+                    "HTTP/1.1 413 Payload Too Large\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+                evloop_remove_fd(s->evloop, fd);
+                server_remove_conn(s, c);
+                conn_free(c);
+                return;
+            }
+            int total_needed = header_size + (int)content_len;
             if (c->read_len < total_needed) {
                 return;  /* wait for more body data */
             }
         }
 
+        c->processing = 1;
         process_request(c);
+        c->processing = 0;
+        c->request_start_ms = 0;       /* reset for next request on this conn */
+        c->last_activity_ms = evloop_now_ms();
 
         /* if not keep-alive, close */
-        /* check the request's Connection header quickly */
         const char *conn_hdr = strcasestr(c->read_buf, "Connection:");
         int should_close = 0;
         if (conn_hdr) {
@@ -1251,6 +1291,11 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
             if (strncasecmp(val, "close", 5) == 0)
                 should_close = 1;
         }
+
+        /* during graceful shutdown, never keep-alive: send Connection:
+         * close on this response (already done by process_request) and
+         * tear down once the buffer drains. */
+        if (s->draining) should_close = 1;
 
         if (should_close || c->read_len == 0) {
             evloop_remove_fd(s->evloop, fd);
@@ -1280,6 +1325,19 @@ static void on_accept(int listen_fd, EventType ev, void *ctx) {
         return;
     }
 
+    /* refuse new connections during graceful shutdown so in-flight
+     * requests can drain without competing with arrivals. */
+    if (s->draining || s->nconns >= s->limits.max_connections) {
+        const char *resp = s->draining
+            ? "HTTP/1.1 503 Service Unavailable\r\n"
+              "Content-Length: 0\r\nConnection: close\r\n\r\n"
+            : "HTTP/1.1 503 Too Many Connections\r\n"
+              "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        ssize_t w = write(client_fd, resp, (int)strlen(resp)); (void)w;
+        close(client_fd);
+        return;
+    }
+
     /* set non-blocking */
     xs_set_nonblocking(client_fd);
 
@@ -1305,22 +1363,96 @@ static void on_accept(int listen_fd, EventType ev, void *ctx) {
     evloop_add_fd(s->evloop, client_fd, EV_READ, on_client_readable, c);
 }
 
+/* Periodic sweep: cull idle keep-alive connections, drop connections
+ * stuck mid-request past the request_timeout deadline, and finalize
+ * graceful shutdown once all in-flight requests drain or the
+ * shutdown_deadline_ms fires. */
+static void on_sweep_timer(void *ctx) {
+    HTTPServer *s = (HTTPServer *)ctx;
+    int64_t now = evloop_now_ms();
+
+    for (int i = s->nconns - 1; i >= 0; i--) {
+        HTTPConnection *c = s->conns[i];
+        int kill = 0;
+
+        if (c->request_start_ms != 0 &&
+            now - c->request_start_ms > s->limits.request_timeout_ms) {
+            /* slow / partial request - drop with 408 */
+            const char *resp =
+                "HTTP/1.1 408 Request Timeout\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            ssize_t w = write(c->fd, resp, (int)strlen(resp)); (void)w;
+            kill = 1;
+        } else if (c->request_start_ms == 0 &&
+                   now - c->last_activity_ms > s->limits.idle_timeout_ms) {
+            /* idle keep-alive past deadline */
+            kill = 1;
+        }
+
+        if (kill) {
+            evloop_remove_fd(s->evloop, c->fd);
+            s->conns[i] = s->conns[s->nconns - 1];
+            s->nconns--;
+            conn_free(c);
+        }
+    }
+
+    /* shutdown bookkeeping: once everything's drained, or the deadline
+     * fires, stop the loop. */
+    if (s->draining) {
+        int in_flight = 0;
+        for (int i = 0; i < s->nconns; i++)
+            if (s->conns[i]->processing) in_flight++;
+
+        int deadline_passed = now >= s->shutdown_deadline_ms;
+        if (in_flight == 0 || deadline_passed) {
+            /* force-close any stragglers */
+            for (int i = s->nconns - 1; i >= 0; i--) {
+                HTTPConnection *c = s->conns[i];
+                evloop_remove_fd(s->evloop, c->fd);
+                s->conns[i] = s->conns[s->nconns - 1];
+                s->nconns--;
+                conn_free(c);
+            }
+            s->running = 0;
+            evloop_stop(s->evloop);
+        }
+    }
+}
+
 /* ================================================================
  *  Server API
  * ================================================================ */
+
+static void apply_default_limits(HTTPServerLimits *l) {
+    if (l->max_body_bytes <= 0)     l->max_body_bytes = HTTP_MAX_BODY;
+    if (l->max_header_bytes <= 0)   l->max_header_bytes = 32 * 1024;
+    if (l->max_connections <= 0)    l->max_connections = 1024;
+    if (l->idle_timeout_ms <= 0)    l->idle_timeout_ms = 60 * 1000;
+    if (l->request_timeout_ms <= 0) l->request_timeout_ms = 30 * 1000;
+    if (l->shutdown_grace_ms <= 0)  l->shutdown_grace_ms = 5 * 1000;
+}
 
 HTTPServer *http_server_new(int port) {
     HTTPServer *s = calloc(1, sizeof(HTTPServer));
     s->port = port;
     s->listen_fd = -1;
     s->running = 0;
-    s->max_connections = 1024;
     s->access_log = 1;
+    s->sweeper_timer = -1;
+    apply_default_limits(&s->limits);
 
     s->evloop = evloop_new();
     s->router = router_new();
 
     return s;
+}
+
+void http_server_set_limits(HTTPServer *s, const HTTPServerLimits *l) {
+    if (!s) return;
+    if (l) s->limits = *l;
+    else memset(&s->limits, 0, sizeof s->limits);
+    apply_default_limits(&s->limits);
 }
 
 void http_server_free(HTTPServer *s) {
@@ -1358,8 +1490,9 @@ void http_server_static(HTTPServer *s, const char *prefix,
 static void on_sigint(int fd, EventType ev, void *ctx) {
     (void)fd; (void)ev;
     HTTPServer *s = (HTTPServer *)ctx;
-    fprintf(stderr, "\nShutting down...\n");
-    http_server_stop(s);
+    fprintf(stderr, "\nShutting down (grace %d ms)...\n",
+            s->limits.shutdown_grace_ms);
+    http_server_shutdown(s, 0);
 }
 #endif
 
@@ -1415,10 +1548,16 @@ int http_server_start(HTTPServer *s) {
     getsockname(s->listen_fd, (struct sockaddr *)&addr, &alen);
     s->port = ntohs(addr.sin_port);
 
-    fprintf(stderr, "xs-http listening on http://0.0.0.0:%d\n", s->port);
+    fprintf(stderr, "xs-http listening on %s://0.0.0.0:%d\n",
+            s->tls_ctx ? "https" : "http", s->port);
 
     /* register with event loop */
     evloop_add_fd(s->evloop, s->listen_fd, EV_READ, on_accept, s);
+
+    /* periodic sweeper for idle / slow-request culling and shutdown
+     * deadline. Fires every 1s; cheap relative to per-connection traffic. */
+    s->sweeper_timer = evloop_add_timer(s->evloop, 1000, 1,
+                                        on_sweep_timer, s);
 
 #ifndef _WIN32
     /* handle SIGINT for graceful shutdown */
@@ -1439,6 +1578,33 @@ void http_server_stop(HTTPServer *s) {
     if (!s) return;
     s->running = 0;
     evloop_stop(s->evloop);
+}
+
+void http_server_shutdown(HTTPServer *s, int grace_ms) {
+    if (!s || s->draining) return;
+    if (grace_ms <= 0) grace_ms = s->limits.shutdown_grace_ms;
+    s->draining = 1;
+    s->shutdown_deadline_ms = evloop_now_ms() + grace_ms;
+    /* close the listener so kernel SYN-queue starts rejecting too. */
+    if (s->listen_fd >= 0) {
+        evloop_remove_fd(s->evloop, s->listen_fd);
+        close(s->listen_fd);
+        s->listen_fd = -1;
+    }
+    /* the sweeper timer will tear down once in-flight requests drain
+     * or grace_ms elapses. */
+}
+
+/* Weak symbol so a TLS implementation in net/http_tls.c can override
+ * this; without it, the server runs plain HTTP and use_tls returns -1
+ * with a clear diagnostic. Wired this way so the build stays linkable
+ * across the no-BearSSL targets (esp32, browser-wasm). */
+int http_server_use_tls(HTTPServer *s, const char *cert_pem,
+                        const char *key_pem) {
+    (void)s; (void)cert_pem; (void)key_pem;
+    fprintf(stderr,
+            "http: TLS not compiled in (build with XS_HTTP_TLS=1 to enable)\n");
+    return -1;
 }
 
 

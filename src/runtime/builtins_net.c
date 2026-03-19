@@ -402,6 +402,149 @@ static Value *http_parse_response(HttpBuf *buf) {
 }
 
 /* Core: perform an HTTP request. Returns XS map. */
+/* ----------------------------------------------------------------
+ *  Client-side keep-alive connection pool.
+ *
+ *  Cuts the connect + (TLS) handshake round-trip out of repeated
+ *  requests to the same origin. Keyed by (scheme, host, port). Pool
+ *  capacity is small on purpose (8 entries) -- this is a request-side
+ *  amortization, not a load-balancer.
+ * ---------------------------------------------------------------- */
+#define HTTP_POOL_CAP        8
+#define HTTP_POOL_IDLE_MS    30000
+
+#include <pthread.h>
+
+typedef struct {
+    int          in_use;
+    int          fd;
+    xs_tls_conn *tls;
+    char         host[256];
+    int          port;
+    int          use_tls;
+    int64_t      last_used_ms;
+} PoolSlot;
+
+static PoolSlot g_pool[HTTP_POOL_CAP];
+static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static int64_t pool_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void pool_drop(PoolSlot *s) {
+    if (s->tls) xs_tls_close(s->tls);
+    else if (s->fd >= 0) close(s->fd);
+    s->fd = -1; s->tls = NULL; s->in_use = 0;
+    s->host[0] = 0; s->port = 0; s->use_tls = 0;
+}
+
+/* Find a usable cached connection for (host, port, use_tls). Removes
+ * it from the pool while in use; pool_release puts it back if reusable. */
+static int pool_check_out(const char *host, int port, int use_tls,
+                          int *out_fd, xs_tls_conn **out_tls) {
+    pthread_mutex_lock(&g_pool_mu);
+    int64_t now = pool_now_ms();
+    int found = 0;
+    for (int i = 0; i < HTTP_POOL_CAP; i++) {
+        PoolSlot *s = &g_pool[i];
+        if (!s->in_use) continue;
+        if (now - s->last_used_ms > HTTP_POOL_IDLE_MS) { pool_drop(s); continue; }
+        if (s->port != port || s->use_tls != use_tls) continue;
+        if (strcmp(s->host, host) != 0) continue;
+        *out_fd = s->fd;
+        *out_tls = s->tls;
+        s->fd = -1; s->tls = NULL; s->in_use = 0;
+        found = 1;
+        break;
+    }
+    pthread_mutex_unlock(&g_pool_mu);
+    return found;
+}
+
+static void pool_release(const char *host, int port, int use_tls,
+                         int fd, xs_tls_conn *tls) {
+    pthread_mutex_lock(&g_pool_mu);
+    int64_t now = pool_now_ms();
+    /* prefer an empty slot; fall back to the oldest in-use slot */
+    int target = -1, oldest = -1;
+    int64_t oldest_ms = INT64_MAX;
+    for (int i = 0; i < HTTP_POOL_CAP; i++) {
+        if (!g_pool[i].in_use) { target = i; break; }
+        if (g_pool[i].last_used_ms < oldest_ms) {
+            oldest_ms = g_pool[i].last_used_ms;
+            oldest = i;
+        }
+    }
+    if (target < 0) { target = oldest; pool_drop(&g_pool[target]); }
+    PoolSlot *s = &g_pool[target];
+    snprintf(s->host, sizeof s->host, "%s", host);
+    s->port = port; s->use_tls = use_tls;
+    s->fd = fd; s->tls = tls;
+    s->last_used_ms = now;
+    s->in_use = 1;
+    pthread_mutex_unlock(&g_pool_mu);
+}
+
+/* Read exactly `n` bytes from the (TLS or plain) socket into buf.
+ * Returns the number of bytes read; less than n means a short read. */
+static size_t http_read_n(int fd, xs_tls_conn *tls, HttpBuf *buf, size_t n) {
+    char tmp[4096];
+    size_t got = 0;
+    while (got < n) {
+        size_t want = n - got;
+        if (want > sizeof tmp) want = sizeof tmp;
+        int nr = tls ? xs_tls_read(tls, tmp, (int)want)
+                     : (int)read(fd, tmp, want);
+        if (nr <= 0) break;
+        httpbuf_append(buf, tmp, (size_t)nr);
+        got += (size_t)nr;
+    }
+    return got;
+}
+
+/* Read up through the end-of-headers marker into buf. Returns the
+ * offset of the first body byte, or 0 if the headers never completed. */
+static size_t http_read_headers(int fd, xs_tls_conn *tls, HttpBuf *buf) {
+    char tmp[2048];
+    while (1) {
+        if (buf->data) {
+            char *eoh = strstr(buf->data, "\r\n\r\n");
+            if (eoh) return (size_t)(eoh - buf->data) + 4;
+        }
+        int nr = tls ? xs_tls_read(tls, tmp, sizeof tmp)
+                     : (int)read(fd, tmp, sizeof tmp);
+        if (nr <= 0) return 0;
+        httpbuf_append(buf, tmp, (size_t)nr);
+        if (buf->len > 64 * 1024) return 0;  /* header bomb */
+    }
+}
+
+/* Read a chunked body off the wire until the 0-length terminator.
+ * Appends the (still-encoded) bytes to buf so http_parse_response can
+ * decode them with the rest of the message. */
+static void http_read_chunked(int fd, xs_tls_conn *tls,
+                              HttpBuf *buf, size_t body_start) {
+    char tmp[4096];
+    while (1) {
+        /* find a "\r\n0\r\n\r\n" - the chunked terminator */
+        if (buf->len > body_start + 5) {
+            const char *tail = buf->data + body_start;
+            const char *needle = strstr(tail, "\r\n0\r\n\r\n");
+            if (needle) return;
+            /* also handle the case where 0\r\n\r\n is at body start */
+            if (buf->len >= body_start + 5 &&
+                memcmp(buf->data + body_start, "0\r\n\r\n", 5) == 0) return;
+        }
+        int nr = tls ? xs_tls_read(tls, tmp, sizeof tmp)
+                     : (int)read(fd, tmp, sizeof tmp);
+        if (nr <= 0) return;
+        httpbuf_append(buf, tmp, (size_t)nr);
+    }
+}
+
 Value *http_do_request(const char *method, const char *url,
                               XSMap *extra_headers, const char *body,
                               size_t body_len) {
@@ -411,19 +554,24 @@ Value *http_do_request(const char *method, const char *url,
         return value_incref(XS_NULL_VAL);
 
     int use_tls = (strncmp(url, "https://", 8) == 0);
-    int fd = http_connect(host, port);
-    if (fd < 0) {
-        fprintf(stderr, "error: could not connect to %s:%d\n", host, port);
-        return value_incref(XS_NULL_VAL);
-    }
 
+    int fd = -1;
     xs_tls_conn *tls = NULL;
-    if (use_tls) {
-        tls = xs_tls_connect(fd, host);
-        if (!tls) {
-            fprintf(stderr, "error: TLS handshake failed for %s\n", host);
-            close(fd);
+    int from_pool = pool_check_out(host, port, use_tls, &fd, &tls);
+
+    if (!from_pool) {
+        fd = http_connect(host, port);
+        if (fd < 0) {
+            fprintf(stderr, "error: could not connect to %s:%d\n", host, port);
             return value_incref(XS_NULL_VAL);
+        }
+        if (use_tls) {
+            tls = xs_tls_connect(fd, host);
+            if (!tls) {
+                fprintf(stderr, "error: TLS handshake failed for %s\n", host);
+                close(fd);
+                return value_incref(XS_NULL_VAL);
+            }
         }
     }
 
@@ -447,8 +595,11 @@ Value *http_do_request(const char *method, const char *url,
     }
     httpbuf_append(&req, "\r\n", 2);
 
-    /* Connection: close */
-    httpbuf_append(&req, "Connection: close\r\n", 19);
+    /* Default to keep-alive so the pool can reuse the connection.
+     * If the caller explicitly set Connection: close in extra_headers,
+     * the duplicate header gets emitted below and the response handler
+     * will close anyway. */
+    httpbuf_append(&req, "Connection: keep-alive\r\n", 24);
 
     /* Content-Length if body present */
     if (body && body_len > 0) {
@@ -507,18 +658,83 @@ Value *http_do_request(const char *method, const char *url,
         }
     }
 
-    /* read response */
+    /* read response: headers first, then exactly the body length so we
+     * can return the connection to the pool when keep-alive is in play. */
     HttpBuf resp;
     httpbuf_init(&resp);
-    if (tls) {
+    size_t body_offset = http_read_headers(fd, tls, &resp);
+    if (body_offset == 0) {
+        /* malformed response or read error - if we got it from the pool
+         * the server may have closed our half-open conn; fall back to a
+         * fresh connect once. */
+        if (tls) xs_tls_close(tls);
+        else if (fd >= 0) close(fd);
+        httpbuf_free(&resp);
+        if (from_pool) {
+            return http_do_request(method, url, extra_headers, body, body_len);
+        }
+        return value_incref(XS_NULL_VAL);
+    }
+
+    /* parse headers in the partial buffer to learn the framing */
+    int chunked = 0;
+    long content_length = -1;
+    int server_close = 0;
+    {
+        char *p = strstr(resp.data, "\r\n");
+        if (p) p += 2;
+        while (p && *p && (size_t)(p - resp.data) < body_offset - 4) {
+            char *eol = strstr(p, "\r\n");
+            if (!eol) break;
+            char *colon = memchr(p, ':', (size_t)(eol - p));
+            if (colon) {
+                int klen = (int)(colon - p);
+                char k[64];
+                int kc = klen < (int)sizeof(k) - 1 ? klen : (int)sizeof(k) - 1;
+                for (int i = 0; i < kc; i++) k[i] = (char)tolower((unsigned char)p[i]);
+                k[kc] = 0;
+                const char *v = colon + 1;
+                while (v < eol && *v == ' ') v++;
+                if (strcmp(k, "content-length") == 0) {
+                    content_length = atol(v);
+                } else if (strcmp(k, "transfer-encoding") == 0) {
+                    if (strstr(v, "chunked") || strstr(v, "Chunked"))
+                        chunked = 1;
+                } else if (strcmp(k, "connection") == 0) {
+                    if (strncasecmp(v, "close", 5) == 0)
+                        server_close = 1;
+                }
+            }
+            p = eol + 2;
+        }
+    }
+
+    if (chunked) {
+        http_read_chunked(fd, tls, &resp, body_offset);
+    } else if (content_length >= 0) {
+        size_t have = resp.len - body_offset;
+        if ((long)have < content_length) {
+            http_read_n(fd, tls, &resp, (size_t)content_length - have);
+        }
+    } else {
+        /* no framing; read until close (legacy HTTP/1.0 path) */
         char tmp[4096];
         int nr;
-        while ((nr = xs_tls_read(tls, tmp, sizeof tmp)) > 0)
+        while ((nr = tls ? xs_tls_read(tls, tmp, sizeof tmp)
+                         : (int)read(fd, tmp, sizeof tmp)) > 0)
             httpbuf_append(&resp, tmp, (size_t)nr);
-        xs_tls_close(tls);
+        server_close = 1;
+    }
+
+    /* return connection to the pool unless the server asked us to close
+     * or framing forced it. TLS conns are pooled too. */
+    int reusable = !server_close &&
+                   (chunked || content_length >= 0);
+    if (reusable) {
+        pool_release(host, port, use_tls, fd, tls);
     } else {
-        http_read_all(fd, &resp);
-        close(fd);
+        if (tls) xs_tls_close(tls);
+        else if (fd >= 0) close(fd);
     }
 
     Value *result = http_parse_response(&resp);
