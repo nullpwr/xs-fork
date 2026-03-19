@@ -60,6 +60,8 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/interp_ast.c \
                src/runtime/interp_enum.c \
                src/runtime/interp_nodemap.c \
+               src/runtime/interp_typecheck.c \
+               src/runtime/interp_derive.c \
                src/runtime/builtins.c \
                src/runtime/builtins_math.c \
                src/runtime/builtins_time.c \

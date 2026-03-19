@@ -129,4 +129,15 @@ Value  *call_value(Interp *i, Value *callee, Value **args, int argc, const char 
 void    interp_define_native(Interp *i, const char *name, NativeFn fn);
 void    stdlib_register(Interp *i);
 
+/* runtime type-annotation checking; defined in interp_typecheck.c */
+int         value_matches_type(Value *v, const char *type_name);
+int         value_matches_typeexpr(Value *v, TypeExpr *te);
+const char *typeexpr_str(TypeExpr *te);
+const char *value_type_str(Value *v);
+
+/* derive(...) trait impls; defined in interp_derive.c */
+Value *builtin_debug_to_string(Interp *i, Value **args, int argc);
+Value *builtin_clone(Interp *i, Value **args, int argc);
+Value *builtin_struct_eq(Interp *i, Value **args, int argc);
+
 #endif
