@@ -15,6 +15,7 @@
  */
 
 #include "core/gc.h"
+#include "core/gc_concurrent.h"
 #include "core/value.h"
 #include <stdlib.h>
 #include <stddef.h>
@@ -165,12 +166,20 @@ void gc_init(void) {
     gc_gens[2].threshold = 10;
 
     memset(&gc_stats, 0, sizeof(gc_stats));
+
+    /* concurrent collector is opt-in: env or explicit enable. */
+    const char *cflag = getenv("XS_GC_CONCURRENT");
+    if (cflag && cflag[0] && cflag[0] != '0') gc_concurrent_enable();
 }
 
 /* Release all process-lifetime GC state so leak checkers stop flagging
    the GC internals. Called from main at exit; safe to call even if
    gc_init was never invoked. */
 void gc_shutdown(void) {
+    /* let the worker drain any in-flight free batch before tearing the
+     * heap down on this thread. */
+    gc_concurrent_stop();
+
     /* free any lingering tracked GCNodes */
     for (int g = 0; g < GC_NUM_GENERATIONS; g++) {
         GCNode *node = gc_gens[g].head.gc_next;
@@ -883,80 +892,78 @@ int gc_collect_gen(int generation) {
         }
     }
 
-    /* phase 7: untrack and free garbage objects */
+    /* phase 7a: detach garbage from gen lists + node map (always STW). */
     int freed = garbage_len;
     for (int i = 0; i < garbage_len; i++) {
         GCNode *node = garbage[i];
-        Value *v = node->value;
         int gen = node->generation;
-
-        /* unlink from gen list */
         list_remove(node);
         if (gen >= 0 && gen < GC_NUM_GENERATIONS) gc_gens[gen].count--;
-        nodemap_del(v);
+        nodemap_del(node->value);
+    }
 
-        /* free container internals then the Value */
-        switch (VAL_TAG(v)) {
-            case XS_ARRAY:
-            case XS_TUPLE:
-                if (v->arr) {
-                    free(v->arr->items);
-                    free(v->arr);
-                }
-                break;
-            case XS_MAP:
-            case XS_MODULE:
-                if (v->map) {
-                    free(v->map->keys);
-                    free(v->map->vals);
-                    free(v->map);
-                }
-                break;
-            case XS_OVERLOAD:
-                if (v->overload) {
-                    free(v->overload->items);
-                    free(v->overload);
-                }
-                break;
-            case XS_FUNC:
-                if (v->fn) {
-                    v->fn->refcount--;
-                    if (v->fn->refcount <= 0) {
-                        free(v->fn->name);
-                        free(v->fn->deprecated_msg);
-                        free(v->fn->params);
-                        free(v->fn->default_vals);
-                        free(v->fn->variadic_flags);
-                        if (v->fn->param_type_names) {
-                            for (int j = 0; j < v->fn->nparams; j++)
-                                free(v->fn->param_type_names[j]);
-                            free(v->fn->param_type_names);
+    /* phase 7b: free payload. Hand to the concurrent worker if enabled,
+     * otherwise free inline on this thread. The worker handles the same
+     * payload-tear-down logic and only operates on fully-detached nodes,
+     * so there is no nodemap or list contention. */
+    if (gc_concurrent_is_enabled()) {
+        for (int i = 0; i < garbage_len; i++) gc_concurrent_queue(garbage[i]);
+    } else {
+        for (int i = 0; i < garbage_len; i++) {
+            GCNode *node = garbage[i];
+            Value *v = node->value;
+            switch (VAL_TAG(v)) {
+                case XS_ARRAY:
+                case XS_TUPLE:
+                    if (v->arr) { free(v->arr->items); free(v->arr); }
+                    break;
+                case XS_MAP:
+                case XS_MODULE:
+                    if (v->map) { free(v->map->keys); free(v->map->vals); free(v->map); }
+                    break;
+                case XS_OVERLOAD:
+                    if (v->overload) { free(v->overload->items); free(v->overload); }
+                    break;
+                case XS_FUNC:
+                    if (v->fn) {
+                        v->fn->refcount--;
+                        if (v->fn->refcount <= 0) {
+                            free(v->fn->name);
+                            free(v->fn->deprecated_msg);
+                            free(v->fn->params);
+                            free(v->fn->default_vals);
+                            free(v->fn->variadic_flags);
+                            if (v->fn->param_type_names) {
+                                for (int j = 0; j < v->fn->nparams; j++)
+                                    free(v->fn->param_type_names[j]);
+                                free(v->fn->param_type_names);
+                            }
+                            free(v->fn->ret_type_name);
+                            free(v->fn->param_contracts);
+                            free(v->fn);
                         }
-                        free(v->fn->ret_type_name);
-                        free(v->fn->param_contracts);
-                        free(v->fn);
                     }
-                }
-                break;
-            case XS_STRUCT_VAL:
-                if (v->st) {
-                    v->st->refcount--;
-                    if (v->st->refcount <= 0) {
-                        free(v->st->type_name);
-                        if (v->st->fields) {
-                            free(v->st->fields->keys);
-                            free(v->st->fields->vals);
-                            free(v->st->fields);
+                    break;
+                case XS_STRUCT_VAL:
+                    if (v->st) {
+                        v->st->refcount--;
+                        if (v->st->refcount <= 0) {
+                            free(v->st->type_name);
+                            if (v->st->fields) {
+                                free(v->st->fields->keys);
+                                free(v->st->fields->vals);
+                                free(v->st->fields);
+                            }
+                            free(v->st);
                         }
-                        free(v->st);
                     }
-                }
-                break;
-            default:
-                break;
+                    break;
+                default:
+                    break;
+            }
+            free(v);
+            free(node);
         }
-        free(v);
-        free(node);
     }
 
     gc_stats.total_collected += freed;

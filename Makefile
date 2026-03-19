@@ -50,6 +50,7 @@ CORE_SRCS = src/core/value.c \
             src/core/parser.c \
             src/core/xs_bigint.c \
             src/core/gc.c \
+            src/core/gc_concurrent.c \
             src/core/utf8.c \
             src/core/strbuf.c \
             src/core/limits.c
