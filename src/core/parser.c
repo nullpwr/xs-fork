@@ -3955,11 +3955,26 @@ static Node *parse_stmt(Parser *p) {
         pp_expect(p, TK_RBRACKET, "expected ']' after #[attribute]");
     }
 
-    /* skip @ attributes, detect @pure, @deprecated, @scoped */
+    /* skip @ attributes, detect @pure, @deprecated, @scoped, @[macro] */
     int fn_is_pure = 0;
     int decl_is_scoped = 0;
+    int fn_is_macro = 0;
     while (pp_check(p, TK_AT)) {
         pp_advance(p); /* consume @ */
+        /* @[name] form: bracketed attribute. used for macro markers
+         * to keep them visually distinct from value-flavor attributes
+         * like @pure / @scoped. */
+        if (pp_check(p, TK_LBRACKET)) {
+            pp_advance(p);
+            Token *bn = pp_peek(p, 0);
+            if (bn->kind == TK_IDENT && bn->sval &&
+                strcmp(bn->sval, "macro") == 0) {
+                fn_is_macro = 1;
+            }
+            pp_advance(p);
+            pp_match(p, TK_RBRACKET);
+            continue;
+        }
         Token *attr = pp_peek(p, 0);
         int is_deprecated = 0;
         if (attr->kind == TK_IDENT && attr->sval && strcmp(attr->sval, "pure") == 0)
@@ -4033,7 +4048,8 @@ static Node *parse_stmt(Parser *p) {
         }
         Node *fn_node = parse_fn_decl(p, is_pub, is_async, fn_is_pure);
         if (fn_node) {
-            fn_node->fn_decl.is_test = fn_is_test;
+            fn_node->fn_decl.is_test  = fn_is_test;
+            fn_node->fn_decl.is_macro = fn_is_macro;
             if (fn_deprecated_msg) {
                 fn_node->fn_decl.deprecated_msg = fn_deprecated_msg;
             } else {

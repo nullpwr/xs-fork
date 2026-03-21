@@ -811,9 +811,10 @@ static Value *builtin_copy(Interp *i, Value **args, int argc) {
     return value_copy(args[0]);
 }
 
-static Value *builtin_clone(Interp *i, Value **args, int argc) {
-    return builtin_copy(i, args, argc);
-}
+/* The canonical builtin_clone now lives in interp_derive.c (it's
+ * exposed via interp.h). This file used to ship a small wrapper that
+ * just delegated to value_copy; the impl in interp_derive does the
+ * proper deep XSInst clone, which is what classes expect. */
 
 /* Runtime for the todo() builtin -- panics with a message, like Rust's todo!() */
 /* todo() / unreachable(): à la Rust */

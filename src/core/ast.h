@@ -396,6 +396,7 @@ struct Node {
             int        is_pure;
             int        is_test;
             int        is_static;
+            int        is_macro;     /* @[macro] -- compile-time procedural macro */
             char      *deprecated_msg; /* NULL = not deprecated */
             TypeExpr  *ret_type;
             char     **type_params;
