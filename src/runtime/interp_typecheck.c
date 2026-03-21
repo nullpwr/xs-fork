@@ -103,6 +103,12 @@ int value_matches_typeexpr(Value *v, TypeExpr *te) {
     case TEXPR_INFER:
         return 1;
 
+    case TEXPR_FORALL:
+        /* A forall<T> body type matches whatever the inner type matches.
+         * The quantifier is a static-only construct; at runtime any
+         * value that satisfies the body satisfies the quantification. */
+        return value_matches_typeexpr(v, te->inner);
+
     default:
         return 1;
     }
@@ -144,6 +150,17 @@ const char *typeexpr_str(TypeExpr *te) {
         return "fn";
     case TEXPR_INFER:
         return "_";
+    case TEXPR_FORALL: {
+        int pos = snprintf(buf, sizeof buf, "forall<");
+        for (int j = 0; j < te->nquant; j++) {
+            if (j) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s",
+                            te->quant_names[j] ? te->quant_names[j] : "?");
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "> %s",
+                        te->inner ? typeexpr_str(te->inner) : "?");
+        return buf;
+    }
     default:
         return "?";
     }

@@ -57,6 +57,8 @@ void typeexpr_free(TypeExpr *te) {
     for (int i = 0; i < te->nparams; i++) typeexpr_free(te->params[i]);
     free(te->params);
     typeexpr_free(te->ret);
+    for (int i = 0; i < te->nquant;  i++) free(te->quant_names[i]);
+    free(te->quant_names);
     free(te);
 }
 
@@ -349,6 +351,7 @@ void node_free(Node *n) {
         }
         free(n->fn_decl.type_params);
         free(n->fn_decl.type_bounds);
+        free(n->fn_decl.type_param_variance);
         break;
     case NODE_CLASS_DECL:
         free(n->class_decl.name);
@@ -360,6 +363,7 @@ void node_free(Node *n) {
         nodepairlist_free(&n->struct_decl.fields);
         for (int i = 0; i < n->struct_decl.n_type_params; i++) free(n->struct_decl.type_params[i]);
         free(n->struct_decl.type_params);
+        free(n->struct_decl.type_param_variance);
         for (int i = 0; i < n->struct_decl.n_field_types; i++)
             typeexpr_free(n->struct_decl.field_types[i]);
         free(n->struct_decl.field_types);
@@ -372,6 +376,7 @@ void node_free(Node *n) {
         enumvariantlist_free(&n->enum_decl.variants);
         for (int i = 0; i < n->enum_decl.n_type_params; i++) free(n->enum_decl.type_params[i]);
         free(n->enum_decl.type_params);
+        free(n->enum_decl.type_param_variance);
         break;
     case NODE_IMPL_DECL:
         free(n->impl_decl.type_name);

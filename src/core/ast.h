@@ -27,6 +27,7 @@ struct TypeExpr {
         TEXPR_FN,       /* fn(A,B)->R: .params, .nparams, .ret */
         TEXPR_OPTION,   /* T?: .inner */
         TEXPR_INFER,    /* _ (placeholder) */
+        TEXPR_FORALL,   /* forall<T,U> body: .quant_names + .nquant + .inner */
     } kind;
     char      *name;
     TypeExpr **args;    int nargs;
@@ -34,6 +35,9 @@ struct TypeExpr {
     TypeExpr **elems;   int nelems;
     TypeExpr **params;  int nparams;
     TypeExpr  *ret;
+    /* TEXPR_FORALL: quantified type variables. nquant > 0 only for
+     * higher-rank types like `forall<T> fn(T) -> T`. */
+    char     **quant_names;  int nquant;
     Span       span;
 };
 void typeexpr_free(TypeExpr *te);
@@ -396,6 +400,7 @@ struct Node {
             TypeExpr  *ret_type;
             char     **type_params;
             TypeExpr **type_bounds;
+            int       *type_param_variance; /* 0=invariant, +1=covariant, -1=contravariant */
             int        n_type_params;
         } fn_decl;
 
@@ -412,6 +417,7 @@ struct Node {
             TypeExpr   **field_types;  /* parallel to fields, NULL entries for untyped */
             int          n_field_types;
             char       **type_params;
+            int         *type_param_variance;
             int          n_type_params;
             char       **derives;
             int          n_derives;
@@ -421,6 +427,7 @@ struct Node {
             char           *name;
             EnumVariantList variants;
             char          **type_params;
+            int            *type_param_variance;
             int             n_type_params;
         } enum_decl;
 

@@ -2961,6 +2961,27 @@ static TypeExpr *parse_type_expr(Parser *p) {
         if (pp_match(p, TK_ARROW)) te->ret = parse_type_expr(p);
     } else if (t->kind == TK_IDENT && t->sval && strcmp(t->sval, "_") == 0) {
         pp_advance(p); te->kind = TEXPR_INFER;      /* _ */
+    } else if (t->kind == TK_IDENT && t->sval && strcmp(t->sval, "forall") == 0) {
+        /* forall<T, U> body -- higher-rank polymorphic type. */
+        pp_advance(p);                              /* consume 'forall' */
+        te->kind = TEXPR_FORALL;
+        if (pp_match(p, TK_LT)) {
+            char **qn = NULL; int nq = 0;
+            while (!pp_at_end(p) && !pp_check(p, TK_GT)) {
+                Token *q = pp_peek(p, 0);
+                if (q->kind != TK_IDENT) { pp_advance(p); break; }
+                qn = xs_realloc(qn, sizeof(char*) * (nq + 1));
+                qn[nq++] = xs_strdup(q->sval ? q->sval : "");
+                pp_advance(p);
+                /* swallow optional `T: Bound` */
+                if (pp_match(p, TK_COLON)) typeexpr_free(parse_type_expr(p));
+                if (!pp_match(p, TK_COMMA)) break;
+            }
+            pp_match(p, TK_GT);
+            te->quant_names = qn;
+            te->nquant      = nq;
+        }
+        te->inner = parse_type_expr(p);
     } else if (t->kind == TK_IDENT) {               /* Foo or Foo<T,U> */
         te->kind = TEXPR_NAMED;
         te->name = xs_strdup(t->sval ? t->sval : "");
@@ -3032,17 +3053,22 @@ static Node *parse_fn_decl(Parser *p, int is_pub, int is_async, int is_pure) {
         fname = xs_strdup("<anonymous>");
     }
 
-    /* parse generic type parameters <T>, <T: Bound>, <T: Bound + Bound2> */
-    char **tparams = NULL; TypeExpr **tbounds = NULL; int ntp = 0;
+    /* parse generic type parameters <T>, <+T>, <-T>, <T: Bound>, <T: Bound + Bound2> */
+    char **tparams = NULL; TypeExpr **tbounds = NULL; int *tvariance = NULL; int ntp = 0;
     if (pp_check(p, TK_LT)) {
         pp_advance(p); /* consume < */
         while (!pp_at_end(p) && !pp_check(p, TK_GT)) {
+            int variance = 0;
+            if (pp_match(p, TK_PLUS))       variance = 1;
+            else if (pp_match(p, TK_MINUS)) variance = -1;
             Token *tp = pp_peek(p, 0);
             if (tp->kind != TK_IDENT) { pp_advance(p); break; }
-            tparams = xs_realloc(tparams, sizeof(char*) * (ntp+1));
-            tbounds = xs_realloc(tbounds, sizeof(TypeExpr*) * (ntp+1));
-            tparams[ntp] = xs_strdup(tp->sval ? tp->sval : "");
-            tbounds[ntp] = NULL;
+            tparams   = xs_realloc(tparams, sizeof(char*) * (ntp+1));
+            tbounds   = xs_realloc(tbounds, sizeof(TypeExpr*) * (ntp+1));
+            tvariance = xs_realloc(tvariance, sizeof(int) * (ntp+1));
+            tparams[ntp]   = xs_strdup(tp->sval ? tp->sval : "");
+            tbounds[ntp]   = NULL;
+            tvariance[ntp] = variance;
             pp_advance(p); /* consume type param name */
             if (pp_match(p, TK_COLON)) {
                 tbounds[ntp] = parse_type_expr(p);
@@ -3106,9 +3132,10 @@ static Node *parse_fn_decl(Parser *p, int is_pub, int is_async, int is_pure) {
     n->fn_decl.is_generator  = is_generator;
     n->fn_decl.is_pure       = is_pure;
     n->fn_decl.ret_type      = ret_type;
-    n->fn_decl.type_params   = tparams;
-    n->fn_decl.type_bounds   = tbounds;
-    n->fn_decl.n_type_params = ntp;
+    n->fn_decl.type_params         = tparams;
+    n->fn_decl.type_bounds         = tbounds;
+    n->fn_decl.type_param_variance = tvariance;
+    n->fn_decl.n_type_params       = ntp;
     return n;
 }
 
@@ -3276,14 +3303,27 @@ static Node *parse_struct_decl(Parser *p) {
     Span span = name_tok->span;
     char *name = xs_strdup(name_tok->sval ? name_tok->sval : "");
 
-    /* skip generics */
+    /* generic params with optional variance markers: <+T, -U, V> */
+    char **st_tparams = NULL; int *st_tvariance = NULL; int st_ntp = 0;
     if (pp_check(p, TK_LT)) {
-        int d=1; pp_advance(p);
-        while (!pp_at_end(p)&&d>0) {
-            if(pp_peek(p,0)->kind==TK_LT) d++;
-            else if(pp_peek(p,0)->kind==TK_GT) d--;
+        pp_advance(p);
+        while (!pp_at_end(p) && !pp_check(p, TK_GT)) {
+            int variance = 0;
+            if (pp_match(p, TK_PLUS))       variance = 1;
+            else if (pp_match(p, TK_MINUS)) variance = -1;
+            Token *tp = pp_peek(p, 0);
+            if (tp->kind != TK_IDENT) { pp_advance(p); break; }
+            st_tparams   = xs_realloc(st_tparams,   sizeof(char*) * (st_ntp+1));
+            st_tvariance = xs_realloc(st_tvariance, sizeof(int)   * (st_ntp+1));
+            st_tparams[st_ntp]   = xs_strdup(tp->sval ? tp->sval : "");
+            st_tvariance[st_ntp] = variance;
             pp_advance(p);
+            /* allow `T: Bound` style without binding (we drop it for now) */
+            if (pp_match(p, TK_COLON)) typeexpr_free(parse_type_expr(p));
+            st_ntp++;
+            if (!pp_match(p, TK_COMMA)) break;
         }
+        pp_match(p, TK_GT);
     }
 
     pp_expect(p, TK_LBRACE, "expected '{'");
@@ -3331,6 +3371,9 @@ static Node *parse_struct_decl(Parser *p) {
     n->struct_decl.fields      = fields;
     n->struct_decl.field_types = field_types;
     n->struct_decl.n_field_types = n_field_types;
+    n->struct_decl.type_params         = st_tparams;
+    n->struct_decl.type_param_variance = st_tvariance;
+    n->struct_decl.n_type_params       = st_ntp;
     n->struct_decl.derives     = derives;
     n->struct_decl.n_derives = n_derives;
     return n;
@@ -3342,14 +3385,26 @@ static Node *parse_enum_decl(Parser *p) {
     Span span = name_tok->span;
     char *name = xs_strdup(name_tok->sval ? name_tok->sval : "");
 
-    /* skip generics */
+    /* generic params with optional variance markers */
+    char **en_tparams = NULL; int *en_tvariance = NULL; int en_ntp = 0;
     if (pp_check(p, TK_LT)) {
-        int d=1; pp_advance(p);
-        while (!pp_at_end(p)&&d>0){
-            if(pp_peek(p,0)->kind==TK_LT) d++;
-            else if(pp_peek(p,0)->kind==TK_GT) d--;
+        pp_advance(p);
+        while (!pp_at_end(p) && !pp_check(p, TK_GT)) {
+            int variance = 0;
+            if (pp_match(p, TK_PLUS))       variance = 1;
+            else if (pp_match(p, TK_MINUS)) variance = -1;
+            Token *tp = pp_peek(p, 0);
+            if (tp->kind != TK_IDENT) { pp_advance(p); break; }
+            en_tparams   = xs_realloc(en_tparams,   sizeof(char*) * (en_ntp+1));
+            en_tvariance = xs_realloc(en_tvariance, sizeof(int)   * (en_ntp+1));
+            en_tparams[en_ntp]   = xs_strdup(tp->sval ? tp->sval : "");
+            en_tvariance[en_ntp] = variance;
             pp_advance(p);
+            if (pp_match(p, TK_COLON)) typeexpr_free(parse_type_expr(p));
+            en_ntp++;
+            if (!pp_match(p, TK_COMMA)) break;
         }
+        pp_match(p, TK_GT);
     }
 
     pp_expect(p, TK_LBRACE, "expected '{'");
@@ -3420,8 +3475,11 @@ static Node *parse_enum_decl(Parser *p) {
     pp_expect(p, TK_RBRACE, "expected '}'");
 
     Node *n = node_new(NODE_ENUM_DECL, span);
-    n->enum_decl.name     = name;
-    n->enum_decl.variants = variants;
+    n->enum_decl.name                = name;
+    n->enum_decl.variants            = variants;
+    n->enum_decl.type_params         = en_tparams;
+    n->enum_decl.type_param_variance = en_tvariance;
+    n->enum_decl.n_type_params       = en_ntp;
     return n;
 }
 
