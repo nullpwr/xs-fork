@@ -13,6 +13,7 @@
 #if !defined(__MINGW32__) && !defined(__wasi__)
 #  include <unistd.h>
 #  include <sys/stat.h>
+#  include <sys/select.h>      /* fd_set / FD_ZERO / FD_SET / select */
 #  include <dirent.h>
 #  include <glob.h>
 #  include <fcntl.h>

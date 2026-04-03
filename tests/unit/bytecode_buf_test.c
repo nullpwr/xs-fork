@@ -35,9 +35,16 @@ static uint8_t *slurp(const char *path, long *out_size) {
 }
 
 TEST(read_buf_round_trip) {
-    /* Generate a minimal .xsc via the host binary. */
-    char src_path[] = "/tmp/xs_bcbuf_src_XXXXXX";
-    char xsc_path[] = "/tmp/xs_bcbuf_out_XXXXXX";
+    /* Generate a minimal .xsc via the host binary. The temp-dir base
+     * differs between platforms (mingw doesn't have /tmp); honor the
+     * env variables that the host already uses for tmpfile placement. */
+    const char *tmpdir = getenv("TMPDIR");
+    if (!tmpdir) tmpdir = getenv("TEMP");
+    if (!tmpdir) tmpdir = getenv("TMP");
+    if (!tmpdir) tmpdir = ".";
+    char src_path[256], xsc_path[256];
+    snprintf(src_path, sizeof src_path, "%s/xs_bcbuf_src_XXXXXX", tmpdir);
+    snprintf(xsc_path, sizeof xsc_path, "%s/xs_bcbuf_out_XXXXXX", tmpdir);
     int fd1 = mkstemp(src_path); if (fd1 < 0) FAIL("mkstemp src");
     int fd2 = mkstemp(xsc_path); if (fd2 < 0) FAIL("mkstemp xsc");
     close(fd2);
@@ -45,9 +52,13 @@ TEST(read_buf_round_trip) {
     fprintf(f, "let x = 1 + 1\n");
     fclose(f);
 
+    /* Locate the xs binary: tests/run-all.sh exports XS, otherwise
+     * fall back to the conventional repo-root location. */
+    const char *xs_bin = getenv("XS");
+    if (!xs_bin) xs_bin = "./xs";
     char cmd[1024];
-    snprintf(cmd, sizeof cmd, "./xs build %s -o %s >/dev/null 2>&1",
-             src_path, xsc_path);
+    snprintf(cmd, sizeof cmd, "\"%s\" build \"%s\" -o \"%s\" >/dev/null 2>&1",
+             xs_bin, src_path, xsc_path);
     if (system(cmd) != 0) {
         unlink(src_path); unlink(xsc_path);
         FAIL("xs build failed (host binary not yet built?)");
