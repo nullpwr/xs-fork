@@ -35,7 +35,7 @@ cd xs
 make release
 ```
 
-You'll need a C11 compiler (gcc or clang). No external libraries —
+You'll need a C11 compiler (gcc or clang). No external libraries:
 BearSSL is bundled, the regex engine is in-tree, sockets use raw
 POSIX. The release build produces `./xs`, around 2 MB, with no shared
 library dependencies.

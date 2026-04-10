@@ -56,7 +56,9 @@ sharp edges.
 
 ## Package layout
 
-A package has an `xs.toml` and source under `src/`:
+A package has an `xs.toml` and source under `src/`. The full shape,
+including dependencies, features, workspaces, and publishing, is
+its own chapter: see [Packages and the registry](./packages.md).
 
 ```
 my-thing/
@@ -65,21 +67,9 @@ my-thing/
     └── lib.xs               -- entry point
 ```
 
-`xs.toml` looks like:
-
-```toml
-[package]
-name = "my-thing"
-version = "0.2.1"
-license = "Apache-2.0"
-
-[lib]
-path = "src/lib.xs"
-```
-
 `xs install my-thing` resolves the package against the registry,
 fetches it, and unpacks it into `xs_lib/my-thing/`. Subsequent
-`import my_thing` (note the underscore — names normalize) finds it
+`import my_thing` (note the underscore: names normalize) finds it
 via the local `xs_lib/`.
 
 ## Search order
@@ -91,6 +81,6 @@ When you `import name`, the resolver looks in:
 3. `.xs_lib/...` (same shape, hidden directory).
 4. `~/.xs/lib/<name>/...` (per-user installs).
 5. `$XS_LIB_PATH/<name>/...` (env var, colon-separated).
-6. Plugin `resolve_import` hooks (last — they can synthesise modules).
+6. Plugin `resolve_import` hooks (last; they can synthesise modules).
 
 The first hit wins.

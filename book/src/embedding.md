@@ -33,7 +33,7 @@ void       xs_register_native(XSContext *xs, const char *name,
                               XSValue (*fn)(XSContext *, XSValue *, int));
 ```
 
-Values cross the boundary as `XSValue` — a small tagged union the
+Values cross the boundary as `XSValue`, a small tagged union the
 host can build with `xs_int(...)`, `xs_str(...)`, `xs_array_new()`,
 etc. The host owns the lifetime of XSContext but XS values are
 GC-managed; rooting a value is `xs_root(xs, val)` / `xs_unroot`.
@@ -54,13 +54,13 @@ gcc myapp.c -L. -lxs -lm -o myapp
 
 The static library is around 2 MB. If you want to slim it down, the
 `wasm-browser` make target shows which sources can be left out (TLS,
-HTTP server, the doc generator, etc.) — the same trick works for
+HTTP server, the doc generator, etc.); the same trick works for
 embedded native builds.
 
 ## Examples
 
-`examples/embedding/` has a worked `hello.c`, plus the inverse —
-calling C from XS via `ffi.load` — in `examples/ffi-demo/`.
+`examples/embedding/` has a worked `hello.c`, plus the inverse,
+calling C from XS via `ffi.load`, in `examples/ffi-demo/`.
 
 ## Sandboxing
 
@@ -68,7 +68,7 @@ A host that wants to run untrusted XS should:
 
 1. Pass `xs_new_sandbox(&XS_SANDBOX_RO)` to disable filesystem,
    networking, and `os.exec`.
-2. Install resource limits via `xs_set_limits(xs, &limits)` —
+2. Install resource limits via `xs_set_limits(xs, &limits)`:
    max instructions, RSS bytes, wall seconds.
 3. Watch for `XSResult.error` to surface as a host-level fault, not
    a panic.

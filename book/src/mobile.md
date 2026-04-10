@@ -88,7 +88,7 @@ small allocations. What doesn't: heavy regex, the full crypto suite
 make release CC=aarch64-linux-gnu-gcc TARGET=xs-arm64
 ```
 
-Native arm64 build, full feature set. The JIT works on arm64 — the
+Native arm64 build, full feature set. The JIT works on arm64; the
 codegen is at `src/jit/ra_codegen_arm64.c`.
 
 ## Picking a target

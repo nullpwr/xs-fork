@@ -73,7 +73,7 @@ fn depth(t) {
 
 ## Where XS is *less* expressive
 
-- No higher-rank polymorphism (yet — RFC open).
+- No higher-rank polymorphism (yet, RFC open).
 - No const generics. `[T; N]` is not a type; you have `Array<T>` of
   any length.
 - No zero-cost abstractions. Iterator chains allocate.

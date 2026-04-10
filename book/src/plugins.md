@@ -1,7 +1,7 @@
 # Plugins
 
 XS lets a program rewrite the compiler's parser, hook semantic
-analysis, and inject runtime behaviour — all from a `.xs` file you
+analysis, and inject runtime behaviour, all from a `.xs` file you
 load with `use plugin "name"`.
 
 This is a sharp tool. The chapter covers what plugins can do, the
@@ -11,11 +11,11 @@ sandbox flags that contain them, and when not to reach for one.
 
 A plugin has access to three points in the compilation pipeline:
 
-1. **Lexer / parser extension** — add new tokens, override an existing
+1. **Lexer / parser extension**: add new tokens, override an existing
    production, define an entirely new statement.
-2. **Sema hooks** — register custom passes that run after parsing,
+2. **Sema hooks**: register custom passes that run after parsing,
    inspect the AST, emit diagnostics.
-3. **Runtime hooks** — `before_eval`/`after_eval` callbacks that fire
+3. **Runtime hooks**: `before_eval`/`after_eval` callbacks that fire
    per node, runtime methods injected onto types, an
    `on_error` chain for diagnostic transformation.
 
@@ -53,7 +53,7 @@ build()
 
 ## Sandboxing
 
-By default, plugins run with **no restrictions** — they can override
+By default, plugins run with **no restrictions**: they can override
 keywords, replace functions, hook every eval. That's powerful and
 appropriate for first-party tooling; it's wrong for randomly imported
 third-party code.
@@ -80,10 +80,10 @@ manifest declares.
 
 ## When *not* to write a plugin
 
-- For a library — write a normal module.
-- For a DSL nested inside XS — try a plain function with a closure
+- For a library: write a normal module.
+- For a DSL nested inside XS: try a plain function with a closure
   builder first.
-- For a syntax preference (custom operators etc.) — please don't.
+- For a syntax preference (custom operators etc.): please don't.
   Five plugins all redefining `+` is worse than no plugins.
 
 ## When plugins earn their keep

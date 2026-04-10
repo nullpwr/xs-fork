@@ -2,7 +2,7 @@
 
 `xs build app.xs -o app.xsc` produces a self-contained bytecode
 bundle that any `xs` runtime can execute. For deployments that don't
-already have `xs` available, ship the source plus an `xs` binary —
+already have `xs` available, ship the source plus an `xs` binary,
 or use the C transpiler for an actual native build.
 
 ## The xsc bundle

@@ -2,9 +2,9 @@
 
 You have three options:
 
-1. **`try` / `catch` / `finally`** — like Python or JavaScript.
-2. **`Result<T, E>` + `match`** — like Rust.
-3. **Algebraic effects** — see [the effects chapter](./effects.md).
+1. **`try` / `catch` / `finally`**, like Python or JavaScript.
+2. **`Result<T, E>` + `match`**, like Rust.
+3. **Algebraic effects**, see [the effects chapter](./effects.md).
 
 Pick per call site. They compose cleanly.
 
@@ -22,7 +22,7 @@ try {
 ```
 
 `throw` raises any value. The catch binds it as `e`. There's no
-exception type hierarchy — match on the value to narrow.
+exception type hierarchy; match on the value to narrow.
 
 ```xs
 try {
@@ -79,7 +79,7 @@ let parsed = match parse(input) {
 
 ## Defer
 
-`defer expr` runs `expr` when the surrounding scope exits — on
+`defer expr` runs `expr` when the surrounding scope exits: on
 return, on throw, on fall-through. Use for cleanup:
 
 ```xs
@@ -96,7 +96,7 @@ Multiple defers run in reverse order (LIFO).
 
 `panic("...")` is a non-recoverable error. It terminates the
 program with the message. Use it for "this should never happen"
-invariants — not for normal failure paths.
+invariants, not for normal failure paths.
 
 ```xs
 fn require_positive(n) {

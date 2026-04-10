@@ -7,7 +7,7 @@ Most Python idioms have a direct XS equivalent. Pay attention to:
 - **`map`/`filter` exist on arrays directly**. No need for
   `list(map(...))`.
 - **`{}` is a block, not a dict**. The map literal is `#{...}`.
-- **No `self` parameter on instance methods** — XS infers it from the
+- **No `self` parameter on instance methods**; XS infers it from the
   context, but you write `self.x` explicitly inside the body.
 
 ## Cheat sheet

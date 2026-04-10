@@ -27,8 +27,8 @@ hello, Cy
 
 ## What just happened
 
-- `fn main()` declares a function. There's no special "entry point"
-  — `main()` runs because we called it explicitly.
+- `fn main()` declares a function. There's no special "entry point";
+  `main()` runs because we called it explicitly.
 - `let names = [...]` is an immutable binding to an array. `var`
   would make it reassignable.
 - `"hello, {name}"` is string interpolation. Anything in `{}` is an
@@ -42,7 +42,7 @@ xs
 ```
 
 ```text
-xs 0.6.0 — type :help, :q to quit
+xs 0.6.0 (type :help, :q to quit)
 > 1 + 2
 3
 > [1,2,3].map(|x| x * x)
@@ -54,4 +54,6 @@ xs 0.6.0 — type :help, :q to quit
 
 The [language tour](./tour.md) walks through every major feature in
 ~30 minutes. If you've used Python, Node, Go, or Rust you'll spot
-familiar shapes; the differences are called out as we go.
+familiar shapes; the differences are called out as we go. For the
+toolchain (build, test, debug, REPL meta-commands) jump to
+[The xs command](./cli.md).

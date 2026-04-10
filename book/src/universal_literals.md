@@ -47,13 +47,13 @@ let layout = #{padding: 10MB / file_size, angle: 45deg}
 45deg.sin()                -- 0.707
 ```
 
-The arithmetic respects units — adding `10MB + 30s` is a type error.
+The arithmetic respects units; adding `10MB + 30s` is a type error.
 
 ## Why this works
 
 Each shape has a tag the lexer recognises. The parser produces a
 typed AST node. The interpreter constructs a `Duration{ns: ...}`
-struct (or equivalent) — same memory layout as a regular struct,
+struct (or equivalent), same memory layout as a regular struct,
 just with a literal-friendly constructor.
 
 You can implement your own through plugins; the lexer hooks let you

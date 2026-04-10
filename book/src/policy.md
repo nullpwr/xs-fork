@@ -3,18 +3,18 @@
 The full policy lives in `POLICY.md` at the repo root. The book
 summarises and points you at the contract.
 
-## Tier 1 — stable
+## Tier 1: stable
 
 Anything documented here without an `@unstable` tag, plus the CLI
 and stdlib surface. Breaking changes only across MAJOR versions, and
 only after a deprecation cycle.
 
-## Tier 2 — `@unstable` opt-in
+## Tier 2: `@unstable` opt-in
 
 Marked at the function or module level. Requires `--allow-unstable`
 to compile. Changes freely between MINOR versions.
 
-## Tier 3 — `experimental.*`
+## Tier 3: `experimental.*`
 
 Lives outside `stdlib`. Loaded only with `XS_EXPERIMENTAL=1`. May be
 removed without warning.

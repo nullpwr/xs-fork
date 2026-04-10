@@ -70,10 +70,10 @@ What's lowered:
 
 What isn't (yet):
 
-- Effect machinery (`perform`, `handle`, `resume`) — falls back to
+- Effect machinery (`perform`, `handle`, `resume`): falls back to
   the VM
 - Some method dispatch paths
-- Code-buffer overflow — proto stays bytecode; flagged `jit_tried`
+- Code-buffer overflow: proto stays bytecode; flagged `jit_tried`
   so we don't retry the whole pipeline next call
 
 ## Adaptive threshold
@@ -99,13 +99,13 @@ on Windows, `mmap(MAP_JIT)` on Apple Silicon (with the
 write-protect toggle dance).
 
 When the buffer fills, subsequent `ralow_codegen` returns NULL and
-the proto stays in bytecode. This is conservative — long-running
+the proto stays in bytecode. This is conservative; long-running
 workloads with thousands of distinct closures may not all be JITted.
 Future work: multi-region code buffer with eviction.
 
 ## Deoptimization
 
-Not implemented. The lowerer is conservative — it rejects code
+Not implemented. The lowerer is conservative; it rejects code
 patterns whose runtime shapes it can't prove. If your code matches a
 pattern the lowerer accepts, the JIT'd version is correct under all
 inputs.
@@ -129,6 +129,6 @@ For a single proto:
 fn cold_path() { ... }
 ```
 
-`@no_jit` is rarely useful — usually the JIT was right not to compile
+`@no_jit` is rarely useful; usually the JIT was right not to compile
 something cold. Reach for it when profiling shows JIT overhead
 dominating a one-shot startup function.

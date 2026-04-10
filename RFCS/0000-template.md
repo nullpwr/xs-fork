@@ -15,7 +15,7 @@ One paragraph, max five sentences. What does this change, and why.
 ## Motivation
 
 What problem does this solve? Who feels it? Cite real code or real
-users wherever possible — speculative pain is the weakest form of
+users wherever possible; speculative pain is the weakest form of
 motivation.
 
 ## Guide-level explanation

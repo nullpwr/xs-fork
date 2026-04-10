@@ -102,14 +102,14 @@ spans, and POSTs them to the collector.
 
 Nothing, on purpose. The runtime emits no spans without your
 explicit instrumentation. Auto-tracing through `before_eval` hooks
-is possible (see [Plugins](./plugins.md)) but isn't on by default —
+is possible (see [Plugins](./plugins.md)) but isn't on by default;
 the cost would be unbounded.
 
 ## Conventions
 
-- `tracing.with_span("verb_noun", || ...)` — `"fetch_user"`,
+- `tracing.with_span("verb_noun", || ...)`: `"fetch_user"`,
   `"render_template"`, `"db_query"`.
 - Pass attrs as a Map: `tracing.info("login", #{user_id: id, ip: ip})`.
 - Don't put large bodies in attrs; spans are meant to be compact.
-- Keep level filters in mind — `tracing.debug` calls inside hot
+- Keep level filters in mind; `tracing.debug` calls inside hot
   loops still pay the call cost even when the level is filtered.

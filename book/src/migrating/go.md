@@ -1,7 +1,7 @@
 # Migrating from Go
 
-XS aims at the same niche Go does — single-binary deployment, real
-threads, networking out of the box — with more language features and
+XS aims at the same niche Go does (single-binary deployment, real
+threads, networking out of the box) with more language features and
 a smaller runtime.
 
 ## What's the same
@@ -56,12 +56,12 @@ for i in 0..5 { spawn worker(i, jobs, results) }
 for j in tasks { jobs.send(j) }
 ```
 
-For request-scoped fan-out, prefer a `nursery` block — it gives you
+For request-scoped fan-out, prefer a `nursery` block; it gives you
 the structured-concurrency property Go's `errgroup.Group` chases.
 
 ## What's missing vs Go
 
-- **`select`** on channels — currently you poll with `try_recv` in a
+- **`select`** on channels: currently you poll with `try_recv` in a
   loop. An RFC for first-class `select` is open.
 - **Mature stdlib breadth**: `crypto/x509` analogues exist (BearSSL is
   bundled) but the API surface is narrower than Go's.
@@ -74,5 +74,5 @@ the structured-concurrency property Go's `errgroup.Group` chases.
   error-handling style Go is known for, when you want.
 - Universal literals: `500ms`, `10MB`, `45deg` are typed values, not
   comments on integers.
-- Plugins for compile-time codegen — Go's `go generate` is text-level;
+- Plugins for compile-time codegen; Go's `go generate` is text-level,
   XS plugins operate on the AST.

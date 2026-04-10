@@ -47,7 +47,7 @@ Division by zero raises a runtime error and returns `null`.
 Strings are UTF-8 encoded byte sequences. `s.len()` counts bytes;
 `s.chars()` returns an array of Unicode codepoints; `s.upper()` /
 `s.lower()` use full Unicode case mapping (Latin-1, Latin Extended,
-and beyond — not ASCII-only).
+and beyond, not ASCII-only).
 
 ```xs
 let s = "héllo"

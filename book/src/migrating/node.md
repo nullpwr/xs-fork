@@ -78,7 +78,7 @@ http.serve(3000, |req| {
 })
 ```
 
-No `npm install` for express — `http.serve` ships with the runtime.
+No `npm install` for express; `http.serve` ships with the runtime.
 
 ## Browser
 

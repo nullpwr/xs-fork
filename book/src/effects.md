@@ -32,7 +32,7 @@ hello, aria
 - **State, swap, undo**. `resume` can be called with a different
   value, called multiple times, or never called at all.
 - **Async without colour**. The same `read` effect can be handled
-  synchronously in tests and with `await` in production — the function
+  synchronously in tests and with `await` in production; the function
   body doesn't change.
 - **Crash isolation**. `handle` can swallow a `perform` and return a
   default; the caller never sees the failure.
@@ -105,7 +105,7 @@ handle page("https://example.com") {
 ```
 
 The same `page()` function works in tests with a stubbed `Net.fetch`
-that returns canned data — no separate test scaffolding, no mocking
+that returns canned data; no separate test scaffolding, no mocking
 library.
 
 ## Cost

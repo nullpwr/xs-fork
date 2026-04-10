@@ -90,7 +90,7 @@ fn loop_until(p, n) {
 }
 ```
 
-This is automatic — no `@tco` annotation, no opt-in.
+This is automatic; no `@tco` annotation, no opt-in.
 
 ## Function types
 

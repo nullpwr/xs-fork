@@ -14,7 +14,7 @@ fn greet_typed(name: str) -> () {
 }
 ```
 
-The compiler runs type inference everywhere — annotations just
+The compiler runs type inference everywhere; annotations just
 constrain it.
 
 ## Three modes
@@ -35,7 +35,7 @@ pub fn settle(amount: float, currency: str) -> Result<Receipt, str> {
 ```
 
 `@strict` on a function turns the strict checker on for that
-function only — any inference fallback inside the body becomes an
+function only; any inference fallback inside the body becomes an
 error. Mix freely with non-strict code.
 
 ## What gets inferred
@@ -47,7 +47,7 @@ let m = #{a: 1, b: 2}      -- inferred: Map<str, int>
 let f = |x| x * 2          -- inferred: fn(int) -> int  (after first call site)
 ```
 
-For closures, inference looks at the call sites — if you write
+For closures, inference looks at the call sites: if you write
 `f(1.5)` later, the inferred type updates to `fn(float) -> float`.
 Mixed call sites with incompatible types are an error under `--check`.
 

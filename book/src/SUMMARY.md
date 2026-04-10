@@ -26,6 +26,8 @@
 
 # Working with code
 
+- [The xs command](./cli.md)
+- [Packages and the registry](./packages.md)
 - [Testing](./testing.md)
 - [Tracing and observability](./tracing.md)
 - [Performance](./performance.md)

@@ -31,7 +31,7 @@ node mathlib.js
 ```
 
 For browsers, pair with the
-[Browser via WebAssembly](./browser.md) story instead — running the
+[Browser via WebAssembly](./browser.md) story instead; running the
 wasm interpreter is closer to native XS semantics and the runtime is
 smaller.
 

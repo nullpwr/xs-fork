@@ -157,7 +157,7 @@ let size = 10MB                            -- byte size
 let ang = 45deg                            -- angle
 ```
 
-These aren't strings — each has a typed runtime value.
+These aren't strings; each has a typed runtime value.
 
 ## Modules
 
@@ -185,6 +185,10 @@ test.run()
 - [Concurrency](./concurrency.md) and [Effects](./effects.md) are the
   most distinctive.
 - The [Plugin system](./plugins.md) lets you change the parser at
-  compile time — if that idea worries you, that chapter is for you.
+  compile time; if that idea worries you, that chapter is for you.
+- For the toolchain shape (build, test, format, debug, the REPL),
+  see [The xs command](./cli.md).
+- For the package layout, dependencies, and publishing flow, see
+  [Packages and the registry](./packages.md).
 - If you're moving from another language, jump to
   [Migrating from Python](./migrating/python.md) (or Node, Go, Rust).

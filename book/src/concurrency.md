@@ -60,7 +60,7 @@ while not ch.is_empty() {
 
 Channels are blocking by default; pair with `try_send` / `try_recv`
 for non-blocking variants. They're the canonical way to share values
-across threads — no shared mutable state, no locks.
+across threads, with no shared mutable state and no locks.
 
 ## Nurseries: structured concurrency
 
@@ -73,7 +73,7 @@ nursery {
 ```
 
 The block returns *after* every spawned task finishes (or one of them
-throws — in which case the others are cancelled and the throw
+throws, in which case the others are cancelled and the throw
 propagates). No leaked goroutines, no orphaned threads.
 
 ## Actors
@@ -93,7 +93,7 @@ println(c.read())               -- 2
 
 Actors own their state; the only way in is through their methods,
 which are serialised via a per-actor message queue. Crash isolation
-is at the actor boundary — a panic kills only that actor.
+is at the actor boundary; a panic kills only that actor.
 
 ## Choosing
 
@@ -108,7 +108,7 @@ is at the actor boundary — a panic kills only that actor.
 ## Cancellation
 
 `spawn` returns a handle with `.cancel()` that signals the thread.
-Cooperative — the thread checks at safe points (every `await`, every
+Cooperative; the thread checks at safe points (every `await`, every
 channel op, every loop back-edge in tight loops). Force-killing a
 thread mid-instruction is unsafe and we don't expose it.
 

@@ -59,7 +59,7 @@ Use `_` as a catch-all when you really want to ignore the rest.
 
 ## Match expressions
 
-`match` is an expression — every arm produces a value:
+`match` is an expression; every arm produces a value:
 
 ```xs
 let label = match score {
