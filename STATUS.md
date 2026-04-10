@@ -35,6 +35,10 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Structs, impl, traits | works |
 | Enums with associated data | works |
 | Classes with inheritance | works |
+| Variance markers (`<+T>`, `<-T>`) on fn / struct / enum | works |
+| Higher-rank `forall<T>` types | works |
+| `@scoped` annotations + escape analysis | works |
+| `@[macro]` procedural-macro markers | works |
 | Algebraic effects (effect/perform/handle/resume) | works |
 | Concurrency (spawn, async/await, channels, actors, nurseries) | works |
 | Error handling (try/catch/finally, throw, defer) | works |
@@ -43,8 +47,9 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Pipe operator | works |
 | Gradual typing (--check, --strict) | works |
 | Plugin system | works |
-| Standard library (36 modules) | works |
-| HTTPS via embedded BearSSL | works |
+| Standard library (37 modules) | works |
+| HTTPS client via embedded BearSSL | works |
+| Generational refcount GC + concurrent cycle collector | works |
 | Universal literals (duration, color, date, size, angle) | works |
 | Temporal primitives (every, after, timeout, debounce) | works |
 | Multi-line strings (triple-quote) | works |
@@ -214,14 +219,18 @@ regression layers under wasmtime.
 | macOS (aarch64) | builds and tests pass |
 | Windows (MinGW, x86-64) | builds and tests pass, statically linked (`-static` in Makefile) |
 | WASM (wasi-sdk 25) | conformance + regression layers pass under wasmtime 25 |
+| iOS (arm64 device + x86_64 sim) | `make ios` produces `xs-ios.a` static archive (no JIT, App Store policy) |
+| Android (arm64-v8a, armeabi-v7a, x86_64) | `make android` via NDK r25+ produces `libxs.so` per ABI |
+| ESP32 (xtensa) | `make esp32` produces `libxs.a` for an ESP-IDF component (VM-only build) |
+| Raspberry Pi (aarch64 Linux) | `make release CC=aarch64-linux-gnu-gcc` full feature set including JIT |
 
 ## Standard Library
 
-36 modules are registered at interpreter startup (`stdlib_register` in `src/runtime/builtins.c`):
+37 modules are registered at interpreter startup (`stdlib_register` in `src/runtime/builtins.c`):
 `math`, `time`, `io`, `string`, `path`, `base64`, `hash`, `uuid`, `collections`, `process`,
 `random`, `os`, `json`, `log`, `fmt`, `test`, `csv`, `url`, `re`, `msgpack`, `Promise`,
 `async`, `net`, `crypto`, `thread`, `buf`, `encode`, `db`, `cli`, `ffi`, `reflect`, `gc`,
-`reactive`, `toml`, `http`, `fs`.
+`reactive`, `toml`, `http`, `fs`, `tracing`.
 
 ## Known Footguns
 
@@ -246,18 +255,22 @@ burns. Fix one, and this list gets shorter.
 - **WASM backend only runs trivial programs.** Arithmetic and direct
   function calls are fine; anything touching GC, strings, closures,
   async, or effects does not yet work. Do not ship.
-- **Circular references leak.** The GC is refcount-only; a cycle between
-  two arrays or closures never frees. Avoid long-lived mutual references,
-  or break the cycle by hand before dropping the last external ref. A
-  cycle collector is on the roadmap.
+- **Cycle collector is opt-in for concurrent mode.** The default GC
+  catches reference cycles synchronously (CPython-style trial deletion)
+  on a generational schedule. For workloads where the multi-ms free
+  walk dominates pause time, set `XS_GC_CONCURRENT=1` to move the
+  sweep onto a worker thread; mark stays inline because it's already
+  fast. Pause-time SLO documented at the top of `src/core/gc_concurrent.h`.
 - **Regex is POSIX-extended, not PCRE.** No `\d`, `\w`, lookaround, or
   backreferences. Use `[0-9]`, `[a-zA-Z_]`, etc.
-- **`http.serve` is minimal.** There is a working HTTP/1.1 server in
-  `src/runtime/builtins.c` (`native_http_serve`) that threads out each
-  accepted connection and releases the GIL around socket I/O, so slow
-  handlers don't block subsequent connects. The richer async router
-  scaffolding in `src/net/http_server.c` is not wired up. Fine for
-  demos and internal tools; not a production server.
+- **HTTPS server termination not wired.** `http_server_use_tls` is a
+  stub that returns -1 with a clear diagnostic; the BearSSL
+  per-connection bridge is queued for a follow-up. The HTTP/1.1
+  server in `src/net/http_server.c` itself is hardened (configurable
+  body / header / connection limits, idle + slow-request culling,
+  graceful shutdown with a deadline-based drain) and the client side
+  has a process-wide keep-alive connection pool. Front it with a
+  TLS-terminating reverse proxy in production until the bridge lands.
 - **Unicode is byte-oriented.** `.len()`, `.slice()`, indexing all work
   on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
   `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
@@ -289,7 +302,13 @@ burns. Fix one, and this list gets shorter.
 - Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
 - `match` does not support map patterns yet: destructure tuples, arrays, structs, and enums, but build a struct wrapper if you need to match map-shaped data.
 - JS transpiler's `perform`/`handle` story is currently broken: the emitted JS puts `yield` inside a non-generator arrow IIFE, so even a direct `perform` inside a `handle` fails to parse under Node (SyntaxError). Use `--vm` or the interpreter for effects until the handle lowering is reworked.
-- `http` module exposes client methods (`get`, `post`, ...) plus a
-  basic `http.serve(port, handler)` defined in `src/runtime/builtins.c`.
-  The richer async router in `src/net/http_server.c` is not wired up
-  yet; `http.serve` is the only server entry point.
+- `http` module exposes client methods (`get`, `post`, ...) on a
+  shared keep-alive pool, plus `http.serve(port, handler)` for a
+  small request loop. The richer async router in
+  `src/net/http_server.c` (idle / slow-request culling, graceful
+  shutdown, per-server limits) is reachable from C hosts but is
+  not yet exposed through the XS-side `http` module surface; that
+  rewire is pending.
+- TLS server termination is not wired. `http_server_use_tls` returns
+  -1 with a clear diagnostic; pair the server with a TLS-terminating
+  reverse proxy until the BearSSL per-connection bridge lands.

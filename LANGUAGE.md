@@ -1086,9 +1086,61 @@ impl Point {
         return Point { x: 0, y: 0 }
     }
 }
+
+-- @[macro]: marks a fn as a procedural macro. the body runs at
+-- the call site and returns a transformed value. examples in
+-- examples/macros/ (derive_eq, derive_show, sql).
+@[macro]
+fn show_for(name) {
+    return fn(v) { return name + " " + str(v) }
+}
 ```
 
 `@pure` is enforced by the semantic analyzer: calling impure functions (I/O, sleep, exit) inside a `@pure` function is an error.
+
+### `@scoped` bindings
+
+`@scoped` annotates a `let` or `var` whose value must not outlive
+the lexical block that introduced it. The semantic analyzer rejects
+the obvious escape patterns (returning the binding, storing it in a
+non-scoped container, calling a method that retains it, capturing
+it in a closure that survives the scope). The runtime opts the
+value out of cycle detection because refcounting alone suffices
+once escape is statically forbidden.
+
+```xs
+fn process() {
+    @scoped let buf = make_buffer(64 * 1024)
+    return buf.checksum()  -- ok: only the scalar checksum escapes
+}
+
+fn leak() {
+    @scoped let buf = make_buffer(64 * 1024)
+    return buf            -- error S0042: scoped binding escapes
+}
+```
+
+### Generic type parameters
+
+Function, struct, and enum declarations take optional `<T, U>` type
+parameter lists. Each parameter can carry a variance marker (`+T`
+covariant, `-T` contravariant, default invariant) and an optional
+trait bound (`T: Show`). `forall<T> body` is also legal as a type
+expression for a higher-rank polymorphic value.
+
+```xs
+struct Box<+T>  { inner }            -- covariant
+struct Sink<-T> { accept }            -- contravariant
+
+fn first<+T>(xs) {
+    if len(xs) > 0 { return xs[0] }
+    return null
+}
+
+fn run(f: forall<T> fn(T) -> T, x) {
+    return f(x)
+}
+```
 
 ### Closures
 

@@ -156,14 +156,24 @@ xs --strict file.xs     # require type annotations everywhere
 - Package manager (`xs install`, `xs remove`)
 - Doc generator (`xs doc`)
 
-**Standard library** (36 built-in modules, all registered at startup):
-math, time, io, string, path, base64, hash, uuid, collections, process, random, os, json, log, fmt, test, csv, url, re, msgpack, Promise, async, net, crypto, thread, buf, encode, db, cli, ffi, reflect, gc, reactive, toml, http, fs
+**Standard library** (37 built-in modules, all registered at startup):
+math, time, io, string, path, base64, hash, uuid, collections, process, random, os, json, log, fmt, test, csv, url, re, msgpack, Promise, async, net, crypto, thread, buf, encode, db, cli, ffi, reflect, gc, reactive, toml, http, fs, tracing
 
 **Plugin system:**
 Plugins are XS scripts with direct access to the lexer, parser, and runtime. Add keywords, inject globals, hook evaluation, override syntax, intercept imports -- written in XS, not C.
 
 **Networking:**
-HTTP/HTTPS client with zero external dependencies (BearSSL embedded for TLS).
+HTTP/HTTPS client with zero external dependencies (BearSSL embedded
+for TLS). Process-wide keep-alive connection pool. Hardened HTTP/1.1
+server with configurable per-server limits (body / header / connection
+caps, idle + slow-request culling) and graceful shutdown.
+
+**Mobile and embedded:**
+`make ios` produces a static archive for iOS (arm64 device + x86_64
+simulator), `make android` builds the NDK shared library across
+arm64-v8a / armeabi-v7a / x86_64, `make esp32` cross-compiles a
+VM-only build for ESP-IDF as a flashable component. Worked
+embedding examples live under `examples/embedded/`.
 
 ## Quick examples
 
