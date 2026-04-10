@@ -131,7 +131,7 @@ TOOL_SRCS = src/fmt/fmt.c \
 
 DB_SRCS = src/db/xsdb.c
 
-NET_SRCS = src/net/http_server.c
+NET_SRCS = src/net/http_server.c src/net/http_tls.c
 
 REGEX_SRCS = src/core/regex.c
 
@@ -442,7 +442,7 @@ wasm:
 # if it isn't installed.
 WASM_BROWSER_DROP = \
     src/tls/xs_tls.c src/tls/xs_ca_bundle.c \
-    src/net/http_server.c \
+    src/net/http_server.c src/net/http_tls.c \
     src/doc/docgen.c src/lint/lint.c \
     src/pkg/pkg.c \
     $(wildcard src/tls/bearssl/ssl/*.c) \
@@ -648,7 +648,7 @@ ESP32_DROP = $(wildcard src/jit/*.c) \
              src/runtime/builtins_thread.c \
              src/runtime/builtins_net.c \
              src/runtime/builtins_reactive.c \
-             src/net/http_server.c \
+             src/net/http_server.c src/net/http_tls.c \
              src/db/xsdb.c \
              src/doc/docgen.c src/lint/lint.c src/pkg/pkg.c \
              src/fmt/fmt.c \

@@ -263,14 +263,16 @@ burns. Fix one, and this list gets shorter.
   fast. Pause-time SLO documented at the top of `src/core/gc_concurrent.h`.
 - **Regex is POSIX-extended, not PCRE.** No `\d`, `\w`, lookaround, or
   backreferences. Use `[0-9]`, `[a-zA-Z_]`, etc.
-- **HTTPS server termination not wired.** `http_server_use_tls` is a
-  stub that returns -1 with a clear diagnostic; the BearSSL
-  per-connection bridge is queued for a follow-up. The HTTP/1.1
-  server in `src/net/http_server.c` itself is hardened (configurable
-  body / header / connection limits, idle + slow-request culling,
-  graceful shutdown with a deadline-based drain) and the client side
-  has a process-wide keep-alive connection pool. Front it with a
-  TLS-terminating reverse proxy in production until the bridge lands.
+- **HTTPS server uses BearSSL termination.** Pass a PEM cert + key
+  to `http_server_use_tls(server, "cert.pem", "key.pem")` before
+  calling `http_server_start`, and the listener attaches a per-
+  connection BearSSL engine that handles the handshake + record
+  framing transparently. Plain HTTP listeners pay zero cost: the
+  conn_recv / conn_send bridge dispatches through the engine only
+  when `tls_state` is non-null. SSE and the WebSocket helpers
+  (`sse_send_event`, `ws_send_frame`) still take a raw fd and so
+  bypass TLS for now; threading them through HTTPConnection is the
+  remaining piece.
 - **Unicode is byte-oriented.** `.len()`, `.slice()`, indexing all work
   on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
   `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
@@ -309,6 +311,7 @@ burns. Fix one, and this list gets shorter.
   shutdown, per-server limits) is reachable from C hosts but is
   not yet exposed through the XS-side `http` module surface; that
   rewire is pending.
-- TLS server termination is not wired. `http_server_use_tls` returns
-  -1 with a clear diagnostic; pair the server with a TLS-terminating
-  reverse proxy until the BearSSL per-connection bridge lands.
+- TLS server termination uses BearSSL via
+  `http_server_use_tls(server, cert_pem, key_pem)`. SSE and WebSocket
+  helpers still take a raw fd, so streaming endpoints over HTTPS
+  need to be threaded through the engine in a follow-up.

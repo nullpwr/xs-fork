@@ -1081,8 +1081,37 @@ static HTTPConnection *conn_new(int fd, HTTPServer *server) {
     return c;
 }
 
+#if !defined(XS_NO_BEARSSL) && !defined(__wasi__)
+/* TLS bridge -- defined in net/http_tls.c. plain HTTP connections
+ * bypass it via the c->tls_state guard. */
+extern ssize_t http_tls_read(HTTPConnection *c, void *buf, size_t len);
+extern ssize_t http_tls_write(HTTPConnection *c, const void *buf, size_t len);
+extern void    http_tls_conn_init(HTTPConnection *c);
+extern void    http_tls_conn_free(HTTPConnection *c);
+#define HTTP_TLS_AVAILABLE 1
+#else
+#define HTTP_TLS_AVAILABLE 0
+#endif
+
+static ssize_t conn_recv(HTTPConnection *c, void *buf, size_t len) {
+#if HTTP_TLS_AVAILABLE
+    if (c->tls_state) return http_tls_read(c, buf, len);
+#endif
+    return (ssize_t)read(c->fd, buf, len);
+}
+
+static ssize_t conn_send(HTTPConnection *c, const void *buf, size_t len) {
+#if HTTP_TLS_AVAILABLE
+    if (c->tls_state) return http_tls_write(c, buf, len);
+#endif
+    return (ssize_t)write(c->fd, buf, len);
+}
+
 static void conn_free(HTTPConnection *c) {
     if (!c) return;
+#if HTTP_TLS_AVAILABLE
+    if (c->tls_state) http_tls_conn_free(c);
+#endif
     if (c->fd >= 0) close(c->fd);
     free(c->read_buf);
     free(c);
@@ -1114,7 +1143,7 @@ static void process_request(HTTPConnection *c) {
 
         char out_buf[4096];
         int out_len = http_format_response(&res, out_buf, sizeof(out_buf));
-        ssize_t written = write(c->fd, out_buf, out_len);
+        ssize_t written = conn_send(c, out_buf, out_len);
         (void)written;
 
         http_response_free(&res);
@@ -1166,8 +1195,8 @@ static void process_request(HTTPConnection *c) {
     /* write response (may need multiple writes for large responses) */
     int total_written = 0;
     while (total_written < out_len) {
-        int n = (int)write(c->fd, out_buf + total_written,
-                           out_len - total_written);
+        int n = (int)conn_send(c, out_buf + total_written,
+                               out_len - total_written);
         if (n <= 0) break;
         total_written += n;
     }
@@ -1218,15 +1247,15 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
         const char *resp =
             "HTTP/1.1 413 Payload Too Large\r\n"
             "Content-Length: 0\r\nConnection: close\r\n\r\n";
-        ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+        ssize_t w = conn_send(c, resp, (int)strlen(resp)); (void)w;
         evloop_remove_fd(s->evloop, fd);
         server_remove_conn(s, c);
         conn_free(c);
         return;
     }
 
-    int n = (int)read(fd, c->read_buf + c->read_len,
-                      c->read_cap - c->read_len - 1);
+    int n = (int)conn_recv(c, c->read_buf + c->read_len,
+                           c->read_cap - c->read_len - 1);
     if (n <= 0) {
         /* client disconnected or error */
         evloop_remove_fd(s->evloop, fd);
@@ -1249,7 +1278,7 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
             const char *resp =
                 "HTTP/1.1 431 Request Header Fields Too Large\r\n"
                 "Content-Length: 0\r\nConnection: close\r\n\r\n";
-            ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+            ssize_t w = conn_send(c, resp, (int)strlen(resp)); (void)w;
             evloop_remove_fd(s->evloop, fd);
             server_remove_conn(s, c);
             conn_free(c);
@@ -1266,7 +1295,7 @@ static void on_client_readable(int fd, EventType ev, void *ctx) {
                 const char *resp =
                     "HTTP/1.1 413 Payload Too Large\r\n"
                     "Content-Length: 0\r\nConnection: close\r\n\r\n";
-                ssize_t w = write(fd, resp, (int)strlen(resp)); (void)w;
+                ssize_t w = conn_send(c, resp, (int)strlen(resp)); (void)w;
                 evloop_remove_fd(s->evloop, fd);
                 server_remove_conn(s, c);
                 conn_free(c);
@@ -1353,6 +1382,13 @@ static void on_accept(int listen_fd, EventType ev, void *ctx) {
               sizeof(c->remote_addr));
     c->remote_port = ntohs(addr.sin_port);
 
+#if HTTP_TLS_AVAILABLE
+    /* If the listener has a TLS context, spin up a per-connection
+     * BearSSL engine. Subsequent reads / writes go through the
+     * conn_recv / conn_send bridge. */
+    if (s->tls_ctx) http_tls_conn_init(c);
+#endif
+
     /* add to server's connection list */
     if (s->nconns >= s->conn_cap) {
         s->conn_cap = s->conn_cap ? s->conn_cap * 2 : 64;
@@ -1383,7 +1419,7 @@ static void on_sweep_timer(void *ctx) {
             const char *resp =
                 "HTTP/1.1 408 Request Timeout\r\n"
                 "Content-Length: 0\r\nConnection: close\r\n\r\n";
-            ssize_t w = write(c->fd, resp, (int)strlen(resp)); (void)w;
+            ssize_t w = conn_send(c, resp, (int)strlen(resp)); (void)w;
             kill = 1;
         } else if (c->request_start_ms == 0 &&
                    now - c->last_activity_ms > s->limits.idle_timeout_ms) {
@@ -1597,17 +1633,21 @@ void http_server_shutdown(HTTPServer *s, int grace_ms) {
      * or grace_ms elapses. */
 }
 
-/* Weak symbol so a TLS implementation in net/http_tls.c can override
- * this; without it, the server runs plain HTTP and use_tls returns -1
- * with a clear diagnostic. Wired this way so the build stays linkable
- * across the no-BearSSL targets (esp32, browser-wasm). */
+/* When BearSSL is in the build, http_tls.c provides the strong
+ * implementation of http_server_use_tls. The weak fallback below
+ * keeps the build linkable on the no-BearSSL targets (esp32, the
+ * browser wasm slice) and surfaces a clear diagnostic instead of
+ * a link error. GCC and Clang both honour __attribute__((weak));
+ * MSVC builds aren't a target for the http server. */
+#if defined(XS_NO_BEARSSL) || defined(__wasi__)
 int http_server_use_tls(HTTPServer *s, const char *cert_pem,
                         const char *key_pem) {
     (void)s; (void)cert_pem; (void)key_pem;
     fprintf(stderr,
-            "http: TLS not compiled in (build with XS_HTTP_TLS=1 to enable)\n");
+            "http: TLS not compiled into this build\n");
     return -1;
 }
+#endif
 
 
 /* ================================================================
