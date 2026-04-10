@@ -1288,8 +1288,10 @@ int xs_regex_split(const XSRegex *re, const char *str, int len,
         }
     }
 
-    /* add remaining segment */
+    /* add remaining segment. clamp rem so a regex that matched past
+     * the apparent end of string can't drive the alloc-size negative. */
     int rem = len - pos;
+    if (rem < 0) rem = 0;
     if (*nparts >= cap) { cap *= 2; *parts = realloc(*parts, (size_t)cap * sizeof(char *)); }
     char *seg = malloc((size_t)rem + 1);
     if (rem > 0) memcpy(seg, str + pos, (size_t)rem);

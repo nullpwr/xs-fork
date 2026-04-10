@@ -112,6 +112,15 @@ static void fmt_type(SB *s, TypeExpr *te) {
     case TEXPR_INFER:
         sb_addc(s, '_');
         break;
+    case TEXPR_FORALL:
+        sb_add(s, "forall<");
+        for (int i = 0; i < te->nquant; i++) {
+            if (i > 0) sb_add(s, ", ");
+            sb_add(s, te->quant_names[i] ? te->quant_names[i] : "?");
+        }
+        sb_add(s, "> ");
+        fmt_type(s, te->inner);
+        break;
     }
 }
 

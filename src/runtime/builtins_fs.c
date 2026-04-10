@@ -266,7 +266,8 @@ static Value *native_fs_temp_file(Interp *ig, Value **a, int n) {
     if (!t) t = getenv("TMP");
     if (!t) t = "/tmp";
     char tmpl[4096];
-    snprintf(tmpl, sizeof(tmpl), "%s/xs_tmp_XXXXXX", t);
+    snprintf(tmpl, sizeof(tmpl), "%.*s/xs_tmp_XXXXXX",
+             (int)(sizeof(tmpl) - 24), t);
     int fd = mkstemp(tmpl);
     if (fd < 0) return xs_str("");
     close(fd);
@@ -276,7 +277,8 @@ static Value *native_fs_temp_file(Interp *ig, Value **a, int n) {
     if (!t) t = getenv("TMP");
     if (!t) t = ".";
     char tmpl[4096];
-    snprintf(tmpl, sizeof(tmpl), "%s/xs_tmp_XXXXXX", t);
+    snprintf(tmpl, sizeof(tmpl), "%.*s/xs_tmp_XXXXXX",
+             (int)(sizeof(tmpl) - 24), t);
     if (_mktemp(tmpl)) { FILE *f = fopen(tmpl, "w"); if (f) fclose(f); }
     else return xs_str("");
     return xs_str(tmpl);
@@ -286,7 +288,8 @@ static Value *native_fs_temp_file(Interp *ig, Value **a, int n) {
     char resolved[4096];
     if (realpath(t, resolved)) t = resolved;
     char tmpl[4096];
-    snprintf(tmpl, sizeof(tmpl), "%s/xs_tmp_XXXXXX", t);
+    snprintf(tmpl, sizeof(tmpl), "%.*s/xs_tmp_XXXXXX",
+             (int)(sizeof(tmpl) - 24), t);
     int fd = mkstemp(tmpl);
     if (fd < 0) return xs_str("");
     close(fd);

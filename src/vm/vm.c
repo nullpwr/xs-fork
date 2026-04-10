@@ -696,7 +696,8 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     }
     /* try tests/ prefix */
     if (!f) {
-        snprintf(resolved, sizeof resolved, "tests/%s", path);
+        snprintf(resolved, sizeof resolved, "tests/%.*s",
+                 (int)(sizeof resolved - 8), path);
         f = fopen(resolved, "r");
         if (f) path = resolved;
     }

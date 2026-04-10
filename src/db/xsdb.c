@@ -1652,7 +1652,7 @@ static XSDBSnapshot *snapshot_create(XSDB *db) {
         XSDBTable *src = &db->tables[i];
         XSDBTable *dst = &snap->tables[i];
 
-        strncpy(dst->name, src->name, sizeof(dst->name) - 1);
+        snprintf(dst->name, sizeof dst->name, "%s", src->name);
         dst->ncols = src->ncols;
         dst->next_rowid = src->next_rowid;
         dst->row_count = src->row_count;
@@ -1785,7 +1785,7 @@ static XSDBResult *exec_create_table(XSDB *db, XSDBStmt *stmt) {
 
     XSDBTable *tbl = &db->tables[db->ntables++];
     memset(tbl, 0, sizeof(XSDBTable));
-    strncpy(tbl->name, stmt->table, sizeof(tbl->name) - 1);
+    snprintf(tbl->name, sizeof tbl->name, "%s", stmt->table);
     tbl->next_rowid = 1;
     tbl->btree = NULL;
     tbl->indexes = NULL;
@@ -2101,8 +2101,8 @@ static XSDBResult *exec_create_index(XSDB *db, XSDBStmt *stmt) {
     if (ci < 0) return result_error("no such column: %s", stmt->index_col);
 
     XSDBIndex *idx = xsdb_alloc(sizeof(XSDBIndex));
-    strncpy(idx->name, stmt->index_name, sizeof(idx->name) - 1);
-    strncpy(idx->col_name, stmt->index_col, sizeof(idx->col_name) - 1);
+    snprintf(idx->name, sizeof idx->name, "%s", stmt->index_name);
+    snprintf(idx->col_name, sizeof idx->col_name, "%s", stmt->index_col);
     idx->col_idx = ci;
     idx->unique = stmt->index_unique;
     idx->root = NULL;
@@ -2138,7 +2138,7 @@ static XSDBResult *exec_alter_table(XSDB *db, XSDBStmt *stmt) {
         tbl->columns = realloc(tbl->columns, sizeof(XSDBColumn) * (tbl->ncols + 1));
         XSDBColumn *col = &tbl->columns[tbl->ncols];
         memset(col, 0, sizeof(XSDBColumn));
-        strncpy(col->name, stmt->alter_col, sizeof(col->name) - 1);
+        snprintf(col->name, sizeof col->name, "%s", stmt->alter_col);
         col->type = stmt->alter_type;
         tbl->ncols++;
 
@@ -2619,7 +2619,7 @@ XSDB *xsdb_load(const char *path) {
         memset(tbl, 0, sizeof(XSDBTable));
 
         char *name = read_str(&ctx);
-        strncpy(tbl->name, name, sizeof(tbl->name) - 1);
+        snprintf(tbl->name, sizeof tbl->name, "%s", name);
         free(name);
 
         uint32_t ncols = read_u32(&ctx);
@@ -2628,7 +2628,7 @@ XSDB *xsdb_load(const char *path) {
 
         for (uint32_t c = 0; c < ncols; c++) {
             char *cname = read_str(&ctx);
-            strncpy(tbl->columns[c].name, cname, sizeof(tbl->columns[c].name) - 1);
+            snprintf(tbl->columns[c].name, sizeof tbl->columns[c].name, "%s", cname);
             free(cname);
             tbl->columns[c].type = (XSDBType)read_u32(&ctx);
             tbl->columns[c].not_null = (int)read_u32(&ctx);
@@ -2725,7 +2725,7 @@ typedef struct {
 static QueryPlan xsdb_plan_query(XSDB *db, XSDBStmt *stmt) {
     QueryPlan plan;
     memset(&plan, 0, sizeof(plan));
-    strncpy(plan.table, stmt->table, XSDB_IDENT_MAX - 1);
+    snprintf(plan.table, XSDB_IDENT_MAX, "%s", stmt->table);
 
     XSDBTable *tbl = NULL;
     for (int i = 0; i < db->ntables; i++) {
@@ -2756,7 +2756,7 @@ static QueryPlan xsdb_plan_query(XSDB *db, XSDBStmt *stmt) {
             if (strcmp(idx->col_name, stmt->where->col) == 0) {
                 if (stmt->where->op == XSDB_CMP_EQ) {
                     plan.type = QPLAN_INDEX_SCAN;
-                    strncpy(plan.index, idx->name, XSDB_IDENT_MAX - 1);
+                    snprintf(plan.index, XSDB_IDENT_MAX, "%s", idx->name);
                     plan.estimated_rows = (int)(tbl->row_count / 10);
                     if (plan.estimated_rows < 1) plan.estimated_rows = 1;
                     return plan;
@@ -2766,7 +2766,7 @@ static QueryPlan xsdb_plan_query(XSDB *db, XSDBStmt *stmt) {
                     stmt->where->op == XSDB_CMP_LT ||
                     stmt->where->op == XSDB_CMP_LE) {
                     plan.type = QPLAN_INDEX_RANGE;
-                    strncpy(plan.index, idx->name, XSDB_IDENT_MAX - 1);
+                    snprintf(plan.index, XSDB_IDENT_MAX, "%s", idx->name);
                     plan.estimated_rows = (int)(tbl->row_count / 3);
                     if (plan.estimated_rows < 1) plan.estimated_rows = 1;
                     return plan;
@@ -2895,8 +2895,8 @@ int xsdb_create_index(XSDB *db, const char *table, const char *col,
     if (col_idx < 0) return -2;
 
     XSDBIndex *idx = xsdb_alloc(sizeof(XSDBIndex));
-    strncpy(idx->name, idx_name, XSDB_IDENT_MAX - 1);
-    strncpy(idx->col_name, col, XSDB_IDENT_MAX - 1);
+    snprintf(idx->name, XSDB_IDENT_MAX, "%s", idx_name);
+    snprintf(idx->col_name, XSDB_IDENT_MAX, "%s", col);
     idx->col_idx = col_idx;
     idx->unique = unique;
     idx->root = NULL;

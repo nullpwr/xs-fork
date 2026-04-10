@@ -246,8 +246,11 @@ $(TARGET): $(OBJS)
 # inlines the interleave helpers and loses track of the caller's
 # scratch-array initialisation, producing spurious maybe-uninitialized
 # warnings. The code is fine; silence the bearssl directory only.
+# Also drop -Wunknown-pragmas: sysrng.c uses an MSVC-specific
+# `#pragma comment(lib, ...)` to link against advapi32 on windows that
+# gcc has no equivalent for.
 src/tls/bearssl/%.o: src/tls/bearssl/%.c
-	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -c -o $@ $<
+	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -Wno-unknown-pragmas -c -o $@ $<
 
 debug: CFLAGS = -g -O0 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
                 -fsanitize=address -fsanitize=undefined -DDEBUG \

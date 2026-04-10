@@ -1021,6 +1021,11 @@ static RType resolve_type_ann(TypeExpr *ann) {
     }
     case TEXPR_INFER:
         return rt_var(cgen_fresh());
+    case TEXPR_FORALL:
+        /* HM-style inference treats a forall<T> body as the body's
+         * type with the quantified vars as fresh; once we plug those
+         * into resolve_type_ann they'll get unified by the caller. */
+        return resolve_type_ann(ann->inner);
     }
     return rt_var(cgen_fresh());
 }

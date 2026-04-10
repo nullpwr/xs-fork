@@ -74,7 +74,8 @@ static XSResult make_err(XSContext *ctx, const char *msg) {
     r.ok = 0;
     memset(&r.value, 0, sizeof r.value);
     r.value.tag = XS_VAL_NULL;
-    snprintf(ctx->error_buf, sizeof ctx->error_buf, "%s", msg ? msg : "unknown error");
+    snprintf(ctx->error_buf, sizeof ctx->error_buf, "%.*s",
+             (int)(sizeof ctx->error_buf - 1), msg ? msg : "unknown error");
     r.error = ctx->error_buf;
     return r;
 }

@@ -204,9 +204,9 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
             size_t plen = (size_t)(qmark - url);
             if (plen >= sizeof path) plen = sizeof path - 1;
             memcpy(path, url, plen); path[plen] = 0;
-            strncpy(query, qmark + 1, sizeof query - 1);
+            snprintf(query, sizeof query, "%s", qmark + 1);
         } else {
-            strncpy(path, url, sizeof path - 1);
+            snprintf(path, sizeof path, "%s", url);
         }
 
         /* Collect headers until blank line */

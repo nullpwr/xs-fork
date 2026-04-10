@@ -905,8 +905,9 @@ static int serve_directory_listing(const char *dir_path,
         if (entry->d_name[0] == '.') continue;
 
         char full_path[2048];
-        snprintf(full_path, sizeof(full_path), "%s/%s",
-                 dir_path, entry->d_name);
+        snprintf(full_path, sizeof(full_path), "%.*s/%.*s",
+                 (int)(sizeof(full_path) / 2 - 1), dir_path,
+                 (int)(sizeof(full_path) / 2 - 1), entry->d_name);
 
         struct stat st;
         if (stat(full_path, &st) != 0) continue;
@@ -978,7 +979,8 @@ static int serve_static_file(const char *base_dir, const char *rel_path,
     if (S_ISDIR(st.st_mode)) {
         /* try index.html first */
         char index_path[2048];
-        snprintf(index_path, sizeof(index_path), "%s/index.html", filepath);
+        snprintf(index_path, sizeof(index_path), "%.*s/index.html",
+                 (int)(sizeof(index_path) - 16), filepath);
         if (stat(index_path, &st) == 0 && S_ISREG(st.st_mode)) {
             strcpy(filepath, index_path);
         } else {
@@ -1054,9 +1056,9 @@ static void default_not_found(HTTPRequest *req, HTTPResponse *res,
     snprintf(body, sizeof(body),
         "<!DOCTYPE html>\n<html><head><title>404</title></head>\n"
         "<body><h1>404 Not Found</h1>\n"
-        "<p>The requested URL <code>%s</code> was not found.</p>\n"
+        "<p>The requested URL <code>%.*s</code> was not found.</p>\n"
         "<hr><small>xs-http/1.0</small></body></html>\n",
-        req->path);
+        (int)(sizeof(body) - 256), req->path);
     http_response_body_str(res, body);
 }
 

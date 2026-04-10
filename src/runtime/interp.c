@@ -9053,10 +9053,12 @@ void interp_exec(Interp *i, Node *stmt) {
                     /* store production callback with its keyword and plugin id */
                     if (g_n_parser_productions < 32) {
                         int idx = g_n_parser_productions++;
-                        strncpy(g_parser_productions[idx].keyword, kw, 63);
-                        g_parser_productions[idx].keyword[63] = '\0';
-                        strncpy(g_parser_productions[idx].plugin_id, plugin_id, 63);
-                        g_parser_productions[idx].plugin_id[63] = '\0';
+                        snprintf(g_parser_productions[idx].keyword,
+                                 sizeof g_parser_productions[idx].keyword,
+                                 "%s", kw);
+                        snprintf(g_parser_productions[idx].plugin_id,
+                                 sizeof g_parser_productions[idx].plugin_id,
+                                 "%s", plugin_id);
                         g_parser_productions[idx].callback = value_incref(cb);
                     }
                     i->needs_reparse = 1;

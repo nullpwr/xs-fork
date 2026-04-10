@@ -1230,9 +1230,11 @@ int main(int argc, char **argv) {
                     return 1;
                 }
 
-                /* auto-discover lsp.xs relative to executable */
+                /* auto-discover lsp.xs relative to executable. exe_dir
+                 * deliberately stays at PATH_MAX/2 so the "%s/<rel>"
+                 * concat below never overflows lsp_path[PATH_MAX]. */
                 static char lsp_path[PATH_MAX];
-                static char exe_dir[PATH_MAX];
+                static char exe_dir[PATH_MAX/2];
                 int found_xs_lsp = 0;
 
                 exe_dir[0] = '\0';
@@ -1466,7 +1468,11 @@ test_again: ;
                     while ((ent = readdir(d)) != NULL && fl->count < 4096) {
                         if (ent->d_name[0] == '.') continue;
                         char fullpath[PATH_MAX];
-                        snprintf(fullpath, sizeof(fullpath), "%.*s/%s", (int)(sizeof(fullpath) - 258), cur_dir, ent->d_name);
+                        /* hard-bound both halves so even worst-case
+                         * cur_dir + name + sep + nul fits fullpath. */
+                        snprintf(fullpath, sizeof(fullpath), "%.*s/%.*s",
+                                 (int)(sizeof(fullpath) / 2 - 1), cur_dir,
+                                 (int)(sizeof(fullpath) / 2 - 1), ent->d_name);
 
                         DIR *sub_d = opendir(fullpath);
                         if (sub_d) {
@@ -1652,7 +1658,11 @@ test_again: ;
                     while ((ent = readdir(d)) != NULL && fl->count < 4096) {
                         if (ent->d_name[0] == '.') continue;
                         char fullpath[PATH_MAX];
-                        snprintf(fullpath, sizeof(fullpath), "%.*s/%s", (int)(sizeof(fullpath) - 258), cur_dir, ent->d_name);
+                        /* hard-bound both halves so even worst-case
+                         * cur_dir + name + sep + nul fits fullpath. */
+                        snprintf(fullpath, sizeof(fullpath), "%.*s/%.*s",
+                                 (int)(sizeof(fullpath) / 2 - 1), cur_dir,
+                                 (int)(sizeof(fullpath) / 2 - 1), ent->d_name);
 
                         DIR *sub_d = opendir(fullpath);
                         if (sub_d) {
@@ -2219,9 +2229,13 @@ run_file:;
         char *last_sep = strrchr(exe_path, '/');
         if (!last_sep) last_sep = strrchr(exe_path, '\\');
         if (last_sep) *last_sep = '\0';
-        /* try tests/plugins/provenance.xs relative to binary dir */
+        /* try tests/plugins/provenance.xs relative to binary dir.
+         * bound exe_path so a worst-case PATH_MAX dir + the suffix
+         * still fits prov_path. */
         char prov_path[PATH_MAX];
-        snprintf(prov_path, sizeof(prov_path), "%s/tests/plugins/provenance.xs", exe_path);
+        snprintf(prov_path, sizeof(prov_path),
+                 "%.*s/tests/plugins/provenance.xs",
+                 (int)(sizeof(prov_path) - 32), exe_path);
         struct stat prov_st;
         if (stat(prov_path, &prov_st) != 0) {
             /* try plugins/provenance.xs relative to script dir */

@@ -152,7 +152,9 @@ static int cert_to_anchor(const unsigned char *der, size_t der_len,
 /* PEM decoder walks the bundle text, splits into certs, calls cert_to_anchor */
 static void load_anchors(void) {
     if (g_ta.anchors || g_ta.load_failed) return;
-    if (!xs_ca_pem || !xs_ca_pem_len) { g_ta.load_failed = 1; return; }
+    /* xs_ca_pem is a static array, so its address is always non-null;
+     * only the length is meaningful here. */
+    if (!xs_ca_pem_len) { g_ta.load_failed = 1; return; }
 
     br_pem_decoder_context pem;
     br_pem_decoder_init(&pem);
