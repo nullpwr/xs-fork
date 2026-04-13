@@ -14,6 +14,12 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "net/http_server.h"
+
+/* This whole TU is a no-op on builds that strip BearSSL (esp32) or
+ * have no socket layer to terminate against (wasi). The fallback in
+ * http_server.c provides http_server_use_tls in those cases. */
+#if !defined(XS_NO_BEARSSL) && !defined(__wasi__)
+
 #include "bearssl_ssl.h"
 #include "bearssl_pem.h"
 #include "bearssl_x509.h"
@@ -32,8 +38,6 @@
 #define SOCK_RW_CAST(buf) (buf)
 #define SOCK_R_CAST(buf)  (buf)
 #endif
-
-#ifndef XS_NO_BEARSSL
 
 /* ----------------------------------------------------------------
  *  PEM parser thin wrapper around br_pem_decoder.
@@ -380,4 +384,4 @@ int http_server_use_tls(HTTPServer *s, const char *cert, const char *key) {
     return http_tls_attach(s, cert, key);
 }
 
-#endif /* !XS_NO_BEARSSL */
+#endif /* !XS_NO_BEARSSL && !__wasi__ */
