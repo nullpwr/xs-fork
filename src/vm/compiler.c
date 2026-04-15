@@ -387,6 +387,27 @@ static int compile_fn(Compiler *c, const char *name,
         }
     }
 
+    /* emit `where` contract checks for each parameter that has one.
+     * the contract expression is just an XS expression that has the
+     * parameter in scope; compile it inline, jump-if-true past the
+     * throw, otherwise push the violation string and OP_THROW.
+     * shape mirrors interp.c's loop. */
+    if (params) {
+        for (int i = 0; i < total_params; i++) {
+            Node *contract = params->items[i].contract;
+            if (!contract) continue;
+            compile_node(c, contract, 1);
+            int ok = emit_jump(c, OP_JUMP_IF_TRUE);
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                "contract violation: parameter %d of '%s' does not satisfy 'where' constraint",
+                i + 1, name ? name : "<anonymous>");
+            emit_const(c, xs_str(msg));
+            emit(c, MAKE_A(OP_THROW, 0, 0));
+            patch_jump(c, ok);
+        }
+    }
+
     compile_node(c, body, 1);
 
     XSChunk *ch = &inner->chunk;
@@ -761,6 +782,18 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
             int slot = local_add(c->current, n->let.name ? n->let.name : "<anon>");
             emit_a(c, OP_STORE_LOCAL, slot);
+            /* `let x where pred = expr` -- check pred with x in scope */
+            if (n->let.contract) {
+                compile_node(c, n->let.contract, 1);
+                int ok = emit_jump(c, OP_JUMP_IF_TRUE);
+                char msg[256];
+                snprintf(msg, sizeof msg,
+                    "contract violation: value does not satisfy 'where' constraint for '%s'",
+                    n->let.name ? n->let.name : "<pattern>");
+                emit_const(c, xs_str(msg));
+                emit(c, MAKE_A(OP_THROW, 0, 0));
+                patch_jump(c, ok);
+            }
         }
         return;
     }
