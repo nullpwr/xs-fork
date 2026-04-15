@@ -270,12 +270,14 @@ src/tls/bearssl/%.o: src/tls/bearssl/%.c
 	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -Wno-unknown-pragmas -c -o $@ $<
 
 debug: CFLAGS = -g -O0 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+                -DXS_VERSION='"$(XS_VERSION)"' \
                 -fsanitize=address -fsanitize=undefined -DDEBUG \
                 $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 debug: LDFLAGS += -fsanitize=address -fsanitize=undefined
 debug: clean $(TARGET)
 
 release: CFLAGS = -O3 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+                  -DXS_VERSION='"$(XS_VERSION)"' \
                   -DNDEBUG -flto \
                   $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 # LTO re-runs maybe-uninitialized analysis across TUs; the bearssl
@@ -386,12 +388,14 @@ test-asan: debug
 # Focused AddressSanitizer-only build. Lower overhead than `debug` when
 # the goal is just catching out-of-bounds / use-after-free.
 asan: CFLAGS = -g -O1 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+               -DXS_VERSION='"$(XS_VERSION)"' \
                -fsanitize=address -fno-omit-frame-pointer \
                $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 asan: LDFLAGS += -fsanitize=address
 asan: clean $(TARGET)
 
 ubsan: CFLAGS = -g -O1 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+                -DXS_VERSION='"$(XS_VERSION)"' \
                 -fsanitize=undefined -fno-omit-frame-pointer \
                 $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 ubsan: LDFLAGS += -fsanitize=undefined
