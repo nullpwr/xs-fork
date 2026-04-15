@@ -912,15 +912,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
         /* handle expr { arms } -> generator-based effect handler IIFE.
            Wrap the handled expression in a generator function so that any
            `perform` nodes inside it (which emit `(yield {...})`) have an
-           enclosing generator to yield into. This only fixes direct performs;
-           performs buried in non-generator helper functions still produce
-           broken JS, which is why the `perform`/`handle` story is called out
-           as partial in STATUS.md. */
+           enclosing generator to yield into. The wrapper itself is a
+           generator (function*) so direct performs in the body work; for
+           helper functions that themselves perform, the call site emits
+           a generator-call and we delegate to it via `yield*` so any
+           markers it yields propagate up to the handler loop. The runtime
+           tag check below treats a non-generator return value as a plain
+           value, which keeps non-perform expressions working too. */
         sb_add(s, "(() => {\n");
         sb_indent(s, depth + 1);
-        sb_add(s, "const __gen = (function*() { return ");
+        sb_add(s, "const __body = (function*() { const __r = ");
         emit_expr(s, n->handle.expr, depth + 1);
-        sb_add(s, "; })();\n");
+        sb_add(s, "; if (__r && typeof __r.next === \"function\") return yield* __r; return __r; });\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "const __gen = __body();\n");
         sb_indent(s, depth + 1);
         sb_add(s, "let __result = __gen.next();\n");
         sb_indent(s, depth + 1);
@@ -948,6 +953,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "const __xs_resume = (v) => { __result = __gen.next(v); };\n");
             if (earm->body && VAL_TAG(earm->body) == NODE_BLOCK) {
                 emit_block_body(s, earm->body, depth + 3);
+                /* the trailing expr of a block (e.g. `resume(null)` as the
+                 * last position) is parsed as block.expr, not a statement.
+                 * emit it so the handler arm's last action runs. */
+                if (earm->body->block.expr) {
+                    sb_indent(s, depth + 3);
+                    emit_expr(s, earm->body->block.expr, depth + 3);
+                    sb_add(s, ";\n");
+                }
             } else if (earm->body) {
                 sb_indent(s, depth + 3);
                 emit_expr(s, earm->body, depth + 3);

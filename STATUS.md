@@ -243,15 +243,14 @@ burns. Fix one, and this list gets shorter.
   bytecode VM and more conservative about call depth (500 frames,
   tunable via `XS_MAX_DEPTH`). For anything compute-heavy or
   long-running, pass `--vm`. Pre-v1.0, we will not flip the default.
-- **Effect handlers are broken on the JS target.** The transpiler
-  wraps the `handle` body in a `function*()` IIFE but the statements
-  inside get nested inside a plain arrow `(() => { ... })()`, so the
-  emitted `yield { __effect: ... }` sits in a non-generator and the
-  output fails to parse under Node (`SyntaxError: Unexpected token
-  '{'`). This applies to direct performs in the `handle` body too, not
-  just helper-function performs. Do not rely on effects on the JS
-  target; use `--vm` or the interpreter until the handle lowering is
-  reworked.
+- **Effect handlers on the JS target work via generator delegation.**
+  The transpiler wraps the handled expression in a `function*()` and
+  uses `yield*` to forward through any nested generators, so
+  `perform` lowers to a plain `yield` and resumes correctly. Direct
+  performs in the `handle` body and performs from helper functions
+  both round-trip; the prior parse error is gone. Effects in code
+  paths the C target reaches (the runtime preamble doesn't model
+  continuations) are still VM-only.
 - **WASM backend only runs trivial programs.** Arithmetic and direct
   function calls are fine; anything touching GC, strings, closures,
   async, or effects does not yet work. Do not ship.
@@ -261,12 +260,6 @@ burns. Fix one, and this list gets shorter.
   walk dominates pause time, set `XS_GC_CONCURRENT=1` to move the
   sweep onto a worker thread; mark stays inline because it's already
   fast. Pause-time SLO documented at the top of `src/core/gc_concurrent.h`.
-- **`where` contracts only fire under `--interp`.** The bytecode VM
-  doesn't yet emit the contract checks at function entry / let
-  binding, so a violation that the interpreter would throw runs to
-  completion under `--vm` (the default). Run with `--interp` if you
-  rely on contracts as runtime invariants; the VM compiler getting
-  contract emission is queued for a follow-up.
 - **`{` inside double-quoted strings is interpolation.** `"a {x} b"`
   evaluates `x`. To pass a literal `{` (e.g. a JSON blob), use a
   backtick raw string: `` `{"a": 1}` ``. The interpolation grammar
@@ -314,7 +307,7 @@ burns. Fix one, and this list gets shorter.
 - Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
 - Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
 - `match` does not support map patterns yet: destructure tuples, arrays, structs, and enums, but build a struct wrapper if you need to match map-shaped data.
-- JS transpiler's `perform`/`handle` story is currently broken: the emitted JS puts `yield` inside a non-generator arrow IIFE, so even a direct `perform` inside a `handle` fails to parse under Node (SyntaxError). Use `--vm` or the interpreter for effects until the handle lowering is reworked.
+- JS transpiler effect handlers wrap the handled expression in a generator and use `yield*` delegation, so a `perform` lowers to `yield` cleanly when the handle body itself yields. Direct top-level `perform` outside a `handle` still has no surrounding generator and will be a parse error under Node, mirroring the language rule that `perform` only makes sense in a handled context.
 - `http` module exposes client methods (`get`, `post`, ...) on a
   shared keep-alive pool, plus `http.serve(port, handler)` for a
   small request loop. The richer async router in

@@ -1421,25 +1421,47 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_MATCH: {
-        /* match as expression -> GCC statement expression with if/else chain */
+        /* match as expression -> GCC statement expression with do-while(0) + break.
+           Each arm is its own `if` (NOT else-if): on guard failure we fall through
+           to the next arm. `break` exits the do-while when an arm fully matches. */
         sb_add(s, "({ xs_val __subject = ");
         emit_expr(s, n->match.subject, depth);
         sb_add(s, ";\n");
         sb_indent(s, depth + 1);
         sb_add(s, "xs_val __match_result = XS_NULL;\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "do {\n");
         for (int i = 0; i < n->match.arms.len; i++) {
             MatchArm *arm = &n->match.arms.items[i];
-            sb_indent(s, depth + 1);
+            sb_indent(s, depth + 2);
+            sb_add(s, "if (");
+            emit_pattern_cond(s, arm->pattern, "__subject", depth + 2);
+            sb_add(s, ") {\n");
+            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 3);
             if (arm->guard) {
-                if (i == 0) sb_add(s, "if (");
-                else sb_add(s, "else if (");
-                emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-                sb_add(s, ") {\n");
-                emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                sb_indent(s, depth + 2);
+                sb_indent(s, depth + 3);
                 sb_add(s, "if (xs_truthy(");
-                emit_expr(s, arm->guard, depth + 2);
+                emit_expr(s, arm->guard, depth + 3);
                 sb_add(s, ")) {\n");
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
+                    emit_block_body(s, arm->body, depth + 4);
+                    if (arm->body->block.expr) {
+                        sb_indent(s, depth + 4);
+                        sb_add(s, "__match_result = ");
+                        emit_expr(s, arm->body->block.expr, depth + 4);
+                        sb_add(s, ";\n");
+                    }
+                } else if (arm->body) {
+                    sb_indent(s, depth + 4);
+                    sb_add(s, "__match_result = ");
+                    emit_expr(s, arm->body, depth + 4);
+                    sb_add(s, ";\n");
+                }
+                sb_indent(s, depth + 4);
+                sb_add(s, "break;\n");
+                sb_indent(s, depth + 3);
+                sb_add(s, "}\n");
+            } else {
                 if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
                     emit_block_body(s, arm->body, depth + 3);
                     if (arm->body->block.expr) {
@@ -1454,34 +1476,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
                     emit_expr(s, arm->body, depth + 3);
                     sb_add(s, ";\n");
                 }
-                sb_indent(s, depth + 2);
-                sb_add(s, "}\n");
-                sb_indent(s, depth + 1);
-                sb_add(s, "}\n");
-            } else {
-                if (i == 0) sb_add(s, "if (");
-                else sb_add(s, "else if (");
-                emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-                sb_add(s, ") {\n");
-                emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
-                    emit_block_body(s, arm->body, depth + 2);
-                    if (arm->body->block.expr) {
-                        sb_indent(s, depth + 2);
-                        sb_add(s, "__match_result = ");
-                        emit_expr(s, arm->body->block.expr, depth + 2);
-                        sb_add(s, ";\n");
-                    }
-                } else if (arm->body) {
-                    sb_indent(s, depth + 2);
-                    sb_add(s, "__match_result = ");
-                    emit_expr(s, arm->body, depth + 2);
-                    sb_add(s, ";\n");
-                }
-                sb_indent(s, depth + 1);
-                sb_add(s, "}\n");
+                sb_indent(s, depth + 3);
+                sb_add(s, "break;\n");
             }
+            sb_indent(s, depth + 2);
+            sb_add(s, "}\n");
         }
+        sb_indent(s, depth + 1);
+        sb_add(s, "} while (0);\n");
         sb_indent(s, depth + 1);
         sb_add(s, "__match_result;\n");
         sb_indent(s, depth);
@@ -2006,11 +2008,26 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     /* emit block.expr as return (implicit return) */
                     if (n->fn_decl.body->block.expr) {
                         Node *be = n->fn_decl.body->block.expr;
-                        /* statement-like exprs need special handling */
-                        if (VAL_TAG(be) == NODE_IF || VAL_TAG(be) == NODE_MATCH ||
-                            VAL_TAG(be) == NODE_FOR || VAL_TAG(be) == NODE_WHILE ||
-                            VAL_TAG(be) == NODE_LOOP || VAL_TAG(be) == NODE_BLOCK) {
+                        /* NODE_IF and NODE_MATCH have working expression forms
+                           (ternary / GCC statement-expr). NODE_FOR/WHILE/LOOP
+                           don't yield a useful value -> emit as statement. */
+                        if (VAL_TAG(be) == NODE_FOR || VAL_TAG(be) == NODE_WHILE ||
+                            VAL_TAG(be) == NODE_LOOP) {
                             emit_stmt(s, be, depth + 1);
+                        } else if (VAL_TAG(be) == NODE_BLOCK) {
+                            /* inline the block: emit its stmts then return the trailing expr */
+                            for (int bi = 0; bi < be->block.stmts.len; bi++)
+                                emit_stmt(s, be->block.stmts.items[bi], depth + 1);
+                            if (be->block.expr) {
+                                sb_indent(s, depth + 1);
+                                sb_add(s, "xs_run_defers(__saved_defer_top);\n");
+                                sb_indent(s, depth + 1);
+                                sb_add(s, "xs_pop_frame();\n");
+                                sb_indent(s, depth + 1);
+                                sb_add(s, "return ");
+                                emit_expr(s, be->block.expr, depth + 1);
+                                sb_add(s, ";\n");
+                            }
                         } else if (VAL_TAG(be) == NODE_RETURN) {
                             emit_stmt(s, be, depth + 1);
                         } else {
@@ -2149,26 +2166,39 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, "}\n");
         break;
     case NODE_MATCH: {
+        /* statement-form match: do-while(0) + break for fall-through-on-guard-fail */
         sb_indent(s, depth);
         sb_add(s, "{\n");
         sb_indent(s, depth + 1);
         sb_add(s, "xs_val __subject = ");
         emit_expr(s, n->match.subject, depth + 1);
         sb_add(s, ";\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "do {\n");
         for (int i = 0; i < n->match.arms.len; i++) {
             MatchArm *arm = &n->match.arms.items[i];
-            sb_indent(s, depth + 1);
+            sb_indent(s, depth + 2);
+            sb_add(s, "if (");
+            emit_pattern_cond(s, arm->pattern, "__subject", depth + 2);
+            sb_add(s, ") {\n");
+            emit_pattern_bindings(s, arm->pattern, "__subject", depth + 3);
             if (arm->guard) {
-                /* for guards, bind pattern vars first then check guard */
-                if (i == 0) sb_add(s, "if (");
-                else sb_add(s, "else if (");
-                emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-                sb_add(s, ") {\n");
-                emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                sb_indent(s, depth + 2);
+                sb_indent(s, depth + 3);
                 sb_add(s, "if (xs_truthy(");
-                emit_expr(s, arm->guard, depth + 2);
+                emit_expr(s, arm->guard, depth + 3);
                 sb_add(s, ")) {\n");
+                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
+                    emit_block_body(s, arm->body, depth + 4);
+                else if (arm->body) {
+                    sb_indent(s, depth + 4);
+                    emit_expr(s, arm->body, depth + 4);
+                    sb_add(s, ";\n");
+                }
+                sb_indent(s, depth + 4);
+                sb_add(s, "break;\n");
+                sb_indent(s, depth + 3);
+                sb_add(s, "}\n");
+            } else {
                 if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
                     emit_block_body(s, arm->body, depth + 3);
                 else if (arm->body) {
@@ -2176,27 +2206,14 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     emit_expr(s, arm->body, depth + 3);
                     sb_add(s, ";\n");
                 }
-                sb_indent(s, depth + 2);
-                sb_add(s, "}\n");
-                sb_indent(s, depth + 1);
-                sb_add(s, "}\n");
-            } else {
-                if (i == 0) sb_add(s, "if (");
-                else sb_add(s, "else if (");
-                emit_pattern_cond(s, arm->pattern, "__subject", depth + 1);
-                sb_add(s, ") {\n");
-                emit_pattern_bindings(s, arm->pattern, "__subject", depth + 2);
-                if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK)
-                    emit_block_body(s, arm->body, depth + 2);
-                else if (arm->body) {
-                    sb_indent(s, depth + 2);
-                    emit_expr(s, arm->body, depth + 2);
-                    sb_add(s, ";\n");
-                }
-                sb_indent(s, depth + 1);
-                sb_add(s, "}\n");
+                sb_indent(s, depth + 3);
+                sb_add(s, "break;\n");
             }
+            sb_indent(s, depth + 2);
+            sb_add(s, "}\n");
         }
+        sb_indent(s, depth + 1);
+        sb_add(s, "} while (0);\n");
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
@@ -2790,6 +2807,7 @@ char *transpile_c(Node *program, const char *filename) {
         "/* forward declare heap types */\n"
         "typedef struct { xs_val *items; int len; int cap; } xs_arr;\n"
         "typedef struct { char **keys; xs_val *vals; int len; int cap; } xs_hmap;\n\n"
+        "static const char *xs_to_str(xs_val v);\n\n"
         "static int xs_eq(xs_val a, xs_val b) {\n"
         "    if (a.tag != b.tag) return 0;\n"
         "    switch (a.tag) {\n"
@@ -2824,6 +2842,14 @@ char *transpile_c(Node *program, const char *filename) {
         "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
         "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
         "        return XS_FLOAT(af + bf);\n"
+        "    }\n"
+        "    if (a.tag == 2 || b.tag == 2) {\n"
+        "        const char *as = a.tag == 2 ? (a.s ? a.s : \"\") : xs_to_str(a);\n"
+        "        const char *bs = b.tag == 2 ? (b.s ? b.s : \"\") : xs_to_str(b);\n"
+        "        size_t la = strlen(as), lb = strlen(bs);\n"
+        "        char *out = (char*)malloc(la + lb + 1);\n"
+        "        memcpy(out, as, la); memcpy(out + la, bs, lb); out[la + lb] = 0;\n"
+        "        return XS_STR(out);\n"
         "    }\n"
         "    return XS_INT(a.i + b.i);\n"
         "}\n\n"
@@ -3125,7 +3151,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    return v;\n"
         "}\n\n"
         "static int xs_iter_next(xs_val *iter, xs_val *out) {\n"
-        "    if (VAL_TAG(iter) != 5 || !iter->p) return 0;\n"
+        "    if (iter->tag != 5 || !iter->p) return 0;\n"
         "    xs_arr *state = (xs_arr*)iter->p;\n"
         "    if (state->len < 2) return 0;\n"
         "    xs_val src = state->items[0];\n"
@@ -3158,7 +3184,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    return (xs_val){.tag=6, .p=m};\n"
         "}\n\n"
         "static void xs_map_put(xs_val *map, xs_val key, xs_val val) {\n"
-        "    if (VAL_TAG(map) != 6 || !map->p) return;\n"
+        "    if (map->tag != 6 || !map->p) return;\n"
         "    xs_hmap *m = (xs_hmap*)map->p;\n"
         "    const char *ks = key.tag == 2 ? key.s : xs_to_str(key);\n"
         "    for (int i = 0; i < m->len; i++) {\n"
