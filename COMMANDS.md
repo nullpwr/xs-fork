@@ -523,8 +523,11 @@ xs update http-client   # update specific package
 
 ### `xs publish`
 
-Publish the current package to the XS registry. Requires `[registry]`
-configuration in `xs.toml`.
+Publish the current package to the XS registry. The hosted endpoint at
+`reg.xslang.org` is live, but the CLI doesn't yet POST tarballs to it;
+in v0.7.x `xs publish` builds the tarball locally and prints the path.
+Set `[registry] url = "https://reg.xslang.org"` in `xs.toml` once the
+client wiring lands.
 
 ```bash
 xs publish
@@ -532,8 +535,9 @@ xs publish
 
 ### `xs search <query>`
 
-Search the package registry. Requires `[registry]` in `xs.toml`; otherwise
-prints `xs search: no registry configured`.
+Search the package registry. The hosted endpoint at `reg.xslang.org` is
+live, but the CLI client is still a stub in v0.7.x and prints
+`xs search: no registry configured` until HTTP wiring lands.
 
 ```bash
 xs search json

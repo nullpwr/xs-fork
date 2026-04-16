@@ -204,7 +204,7 @@ diffs the three outputs.
 | Profiler (`xs profile`) | works |
 | Coverage (`xs coverage`) | works |
 | Doc generator (`xs doc`) | works |
-| Package manager (`xs install/remove/update`) | basic: registry not live |
+| Package manager (`xs install/remove/update`) | basic: hosted registry endpoint is live, client HTTP wiring still pending |
 
 ## Platform Support
 
@@ -281,10 +281,13 @@ burns. Fix one, and this list gets shorter.
   on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
   `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
   are not implemented.
-- **Package registry is a stub.** `xs publish` / `xs search` print
-  "no registry configured" unless `[registry]` is set in `xs.toml`.
-  `xsi` can install from local paths today; the hosted registry at
-  registry.xslang.org is not live yet.
+- **Package registry endpoint is live, the CLI client isn't wired
+  yet.** The hosted registry runs at `reg.xslang.org` and is ready to
+  accept publishes / lookups, but `xs publish` and `xs search` in v0.7.x
+  still write a local tarball and print `no registry configured`
+  respectively, because `src/pkg/pkg.c` doesn't make HTTP calls. `xsi`
+  can install from local paths today. Wiring the CLI to talk to the
+  endpoint is on the v0.9.0 list.
 - **JIT is opcode-subsetted.** The register-allocating pipeline
   handles the subset listed in the JIT Compiler section above: basic
   arithmetic, compares, loads/stores, branches, returns, and direct
@@ -301,7 +304,7 @@ burns. Fix one, and this list gets shorter.
 - JIT lowers a fixed opcode subset (see the JIT Compiler section
   above); anything else runs on the bytecode VM for that proto.
 - WASM transpiler only handles basic programs
-- `xs publish` and `xs search` print "no registry configured" unless `[registry]` is set in `xs.toml`
+- `xs publish` and `xs search` don't yet talk to `reg.xslang.org`; the registry endpoint is live but the CLI HTTP client wiring is pending
 - VM effects use snapshot/restore (single-shot only, no nested effects)
 - VM actors use flattened state (not full closure capture like the interpreter)
 - Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
