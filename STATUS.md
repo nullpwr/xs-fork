@@ -176,7 +176,7 @@ diffs the three outputs.
 | Closures, arrow lambdas | works |
 | Arrays, maps | works |
 | Concurrency | partial |
-| Algebraic effects (perform/handle) | broken: emits `yield` inside a non-generator arrow, fails to parse in Node |
+| Algebraic effects (perform/handle) | works: handle body lowers to `function*()` and `yield*` delegates through nested performs |
 | Everything else | rough |
 
 ## WebAssembly Transpiler
