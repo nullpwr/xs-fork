@@ -1831,7 +1831,12 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         }
         if (!is_actor_spawn) {
             sb_indent(s, depth);
-            sb_add(s, "const xs_val ");
+            /* xs lets you mutate the contents of a let-bound container
+             * (push/index-assign/etc) even though the binding itself is
+             * immutable. emit a plain xs_val so taking &x in xs_map_put
+             * doesn't discard a const qualifier; the sema layer already
+             * rejects rebinding before we get here. */
+            sb_add(s, "xs_val ");
             if (n->let.name) sb_add(s, n->let.name);
             else if (n->let.pattern) emit_expr(s, n->let.pattern, depth);
             else sb_add(s, "_");
@@ -1882,7 +1887,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     }
     case NODE_CONST:
         sb_indent(s, depth);
-        sb_printf(s, "const xs_val %s", n->const_.name);
+        /* same story as NODE_LET above: const protects rebinding only,
+         * which sema already enforces, and emitting a C const breaks
+         * mutation through index/field assigns that xs allows. */
+        sb_printf(s, "xs_val %s", n->const_.name);
         if (n->const_.value) {
             sb_add(s, " = ");
             emit_expr(s, n->const_.value, depth);
@@ -3184,7 +3192,17 @@ char *transpile_c(Node *program, const char *filename) {
         "    return (xs_val){.tag=6, .p=m};\n"
         "}\n\n"
         "static void xs_map_put(xs_val *map, xs_val key, xs_val val) {\n"
-        "    if (map->tag != 6 || !map->p) return;\n"
+        "    if (!map || !map->p) return;\n"
+        "    if (map->tag == 5) {\n"
+        "        xs_arr *a = (xs_arr*)map->p;\n"
+        "        if (key.tag != 0) return;\n"
+        "        long long k = key.i;\n"
+        "        if (k < 0) k += a->len;\n"
+        "        if (k < 0 || k >= a->len) return;\n"
+        "        a->items[k] = val;\n"
+        "        return;\n"
+        "    }\n"
+        "    if (map->tag != 6) return;\n"
         "    xs_hmap *m = (xs_hmap*)map->p;\n"
         "    const char *ks = key.tag == 2 ? key.s : xs_to_str(key);\n"
         "    for (int i = 0; i < m->len; i++) {\n"
