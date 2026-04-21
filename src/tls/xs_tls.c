@@ -272,12 +272,26 @@ xs_tls_conn *xs_tls_connect(int fd, const char *hostname) {
 
     br_ssl_client_init_full(&c->sc, &c->xc, g_ta.anchors, (size_t)g_ta.n);
 
-    if (g_insecure_mode || g_ta.load_failed || g_ta.n == 0) {
-        /* wrap the minimal engine with a vtable that accepts any chain */
+    /* Trust chain is enforced by default: br_ssl_client_init_full above
+     * wires br_x509_minimal against the embedded CA bundle, so unknown
+     * issuers, expired certs and bad signatures all get rejected at
+     * handshake time. The insecure vtable below is only used if the
+     * caller explicitly asked for it (XS_TLS_INSECURE=1 or
+     * xs_tls_set_insecure(1)); a silent fallback when the bundle fails
+     * to load would let traffic flow without validation, so we refuse
+     * to connect instead and surface a clear error. */
+    if (g_insecure_mode) {
         memset(&g_ix509, 0, sizeof(g_ix509));
         g_ix509.vtable = &insecure_vtable;
         memcpy(&g_ix509.inner, &c->xc, sizeof(br_x509_minimal_context));
         br_ssl_engine_set_x509(&c->sc.eng, (const br_x509_class **)&g_ix509);
+    } else if (g_ta.load_failed || g_ta.n == 0) {
+        fprintf(stderr,
+            "xs: tls: CA bundle missing or unparseable for %s; "
+            "set XS_TLS_INSECURE=1 to bypass at your own risk\n",
+            hostname ? hostname : "(no host)");
+        free(c);
+        return NULL;
     }
 
     br_ssl_engine_set_buffer(&c->sc.eng, c->iobuf, sizeof(c->iobuf), 1);

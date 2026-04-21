@@ -48,9 +48,17 @@ run_xs_dir() {
     # enough context to diagnose without re-running locally.
     for f in "$dir"/*.xs; do
         [ -f "$f" ] || continue
-        local name base_rc=0
+        local name base_rc=0 skip_jit=0
         name=$(basename "$f" .xs)
+        # A test can opt out of the JIT leg by including a top-of-file
+        # marker. Use this for regressions that exercise interp/vm
+        # behaviour where the JIT lowering still needs work; the test
+        # still runs under interp+vm so the bug stays locked in.
+        if head -3 "$f" 2>/dev/null | grep -q "skip-backend: *jit"; then
+            skip_jit=1
+        fi
         for mode in interp vm jit; do
+            if [ "$mode" = "jit" ] && [ $skip_jit -eq 1 ]; then continue; fi
             out=$(./xs --$mode "$f" 2>&1)
             rc=$?
             if [ $rc -ne 0 ]; then
@@ -63,7 +71,11 @@ run_xs_dir() {
             fi
         done
         if [ $base_rc -eq 0 ]; then
-            echo "  ok    $name (interp+vm+jit)"
+            if [ $skip_jit -eq 1 ]; then
+                echo "  ok    $name (interp+vm)"
+            else
+                echo "  ok    $name (interp+vm+jit)"
+            fi
         fi
     done
     if [ $fail -eq 0 ]; then

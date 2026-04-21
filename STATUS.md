@@ -161,7 +161,7 @@ diffs the three outputs.
 | Pattern matching with guards | works |
 | Channels, actors, spawn, nursery | works |
 | Async/await (sequential) | works |
-| Closures capturing mutable state | partial: works for single-scope files |
+| Closures capturing mutable state | works |
 | Generators | not yet |
 | Algebraic effects | not yet |
 | Plugins | not supported (requires runtime) |
@@ -299,17 +299,18 @@ burns. Fix one, and this list gets shorter.
 
 ## Known Limitations
 
-- Struct operator overloading only works when both operands are structs (not mixed struct+int)
-- C transpiler closures break when the same variable name is captured in multiple functions in one file
 - JIT lowers a fixed opcode subset (see the JIT Compiler section
-  above); anything else runs on the bytecode VM for that proto.
+  above); anything else runs on the bytecode VM for that proto. Actor
+  methods that close over outer locals are also still on the VM-only
+  side; tracked alongside generators and shadowed-local lowering.
 - WASM transpiler only handles basic programs
 - `xs publish` and `xs search` don't yet talk to `reg.xslang.org`; the registry endpoint is live but the CLI HTTP client wiring is pending
-- VM effects use snapshot/restore (single-shot only, no nested effects)
-- VM actors use flattened state (not full closure capture like the interpreter)
+- VM effects: nested perform/handle pairs route correctly because each
+  perform pushes a snapshot, but a continuation is still single-shot.
+  Calling `resume` more than once needs the VM to deep-snapshot mutable
+  heap state and is on the v0.9 list.
 - Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
 - Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
-- `match` does not support map patterns yet: destructure tuples, arrays, structs, and enums, but build a struct wrapper if you need to match map-shaped data.
 - JS transpiler effect handlers wrap the handled expression in a generator and use `yield*` delegation, so a `perform` lowers to `yield` cleanly when the handle body itself yields. Direct top-level `perform` outside a `handle` still has no surrounding generator and will be a parse error under Node, mirroring the language rule that `perform` only makes sense in a handled context.
 - `http` module exposes client methods (`get`, `post`, ...) on a
   shared keep-alive pool, plus `http.serve(port, handler)` for a
