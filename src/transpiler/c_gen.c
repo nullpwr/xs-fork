@@ -168,6 +168,43 @@ static void add_boxed_var(const char *name) {
     if (n_boxed < MAX_BOXED) boxed_vars[n_boxed++] = name;
 }
 
+/* Top-level let/var/const names. Emitted as static xs_val at file scope
+ * so named functions and the lambdas inside them can resolve them; the
+ * old behaviour declared them as locals of the wrapped main(), making
+ * everything outside main fail to compile or pick up the wrong scope. */
+#define MAX_TOP_VARS 256
+static const char *top_level_vars[MAX_TOP_VARS];
+static int n_top_vars = 0;
+
+static int is_top_level_var(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < n_top_vars; i++)
+        if (strcmp(top_level_vars[i], name) == 0) return 1;
+    return 0;
+}
+static void add_top_level_var(const char *name) {
+    if (!name) return;
+    for (int i = 0; i < n_top_vars; i++)
+        if (strcmp(top_level_vars[i], name) == 0) return;
+    if (n_top_vars < MAX_TOP_VARS) top_level_vars[n_top_vars++] = name;
+}
+
+/* Walk only the direct children of a NODE_PROGRAM and register any
+ * binding names introduced at that level. Anything nested inside a
+ * function body, lambda, struct decl, etc. is intentionally skipped. */
+static void scan_top_level_vars(Node *program) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st) continue;
+        if (VAL_TAG(st) == NODE_LET || VAL_TAG(st) == NODE_VAR) {
+            if (st->let.name) add_top_level_var(st->let.name);
+        } else if (VAL_TAG(st) == NODE_CONST) {
+            if (st->const_.name) add_top_level_var(st->const_.name);
+        }
+    }
+}
+
 /* actor field rewriting: when emitting actor method bodies, identifiers
    that match state fields get rewritten to self->field */
 static const char **actor_fields = NULL;
@@ -1160,7 +1197,15 @@ static void emit_expr(SB *s, Node *n, int depth) {
                       lid, linfo->n_captures);
             for (int ci = 0; ci < linfo->n_captures; ci++) {
                 sb_indent(s, depth + 1);
-                sb_printf(s, "__cenv_%d[%d] = __box_%s;\n", lid, ci, linfo->captures[ci]);
+                /* top-level vars live in file scope as `static xs_val NAME`
+                 * so closure captures take their address directly; nothing
+                 * else needs boxing because the variable already outlives
+                 * any lambda. local captures still go through __box_NAME. */
+                const char *cap = linfo->captures[ci];
+                if (is_top_level_var(cap))
+                    sb_printf(s, "__cenv_%d[%d] = &%s;\n", lid, ci, cap);
+                else
+                    sb_printf(s, "__cenv_%d[%d] = __box_%s;\n", lid, ci, cap);
             }
             sb_indent(s, depth);
             sb_printf(s, "xs_fn_new(__xs_lambda_%d, __cenv_%d); })", lid, lid);
@@ -1711,6 +1756,26 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
         sb_addc(s, ')');
         break;
     }
+    case NODE_PAT_MAP: {
+        /* tag 6 = map. require every named key to exist; without `..`
+         * also reject extra keys so a tighter pattern doesn't accept a
+         * superset map silently. */
+        sb_printf(s, "(%s.tag == 6", subject);
+        for (int i = 0; i < pat->pat_map.nfields; i++) {
+            const char *k = pat->pat_map.keys[i];
+            sb_printf(s, " && xs_truthy(xs_map_has(%s, XS_STR(\"%s\")))",
+                      subject, k ? k : "");
+            if (pat->pat_map.sub[i]) {
+                char sub[256];
+                snprintf(sub, sizeof sub,
+                         "xs_index(%s, XS_STR(\"%s\"))", subject, k ? k : "");
+                sb_add(s, " && ");
+                emit_pattern_cond(s, pat->pat_map.sub[i], sub, depth);
+            }
+        }
+        sb_addc(s, ')');
+        break;
+    }
     default:
         sb_add(s, "1");
         break;
@@ -1761,6 +1826,23 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
             emit_pattern_bindings(s, pat->pat_enum.args.items[i], sub, depth);
         }
         break;
+    case NODE_PAT_SLICE:
+        for (int i = 0; i < pat->pat_slice.elems.len; i++) {
+            char sub[256];
+            snprintf(sub, sizeof sub, "xs_index(%s, XS_INT(%d))", subject, i);
+            emit_pattern_bindings(s, pat->pat_slice.elems.items[i], sub, depth);
+        }
+        break;
+    case NODE_PAT_MAP:
+        for (int i = 0; i < pat->pat_map.nfields; i++) {
+            if (!pat->pat_map.sub[i]) continue;
+            char sub[256];
+            snprintf(sub, sizeof sub,
+                     "xs_index(%s, XS_STR(\"%s\"))",
+                     subject, pat->pat_map.keys[i] ? pat->pat_map.keys[i] : "");
+            emit_pattern_bindings(s, pat->pat_map.sub[i], sub, depth);
+        }
+        break;
     default:
         break;
     }
@@ -1799,6 +1881,17 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     if (!n) return;
     switch (VAL_TAG(n)) {
     case NODE_LET: {
+        /* top-level binding: storage is the file-scope `static xs_val NAME`
+         * declared earlier; here we just initialise it. lambdas that
+         * capture it grab `&NAME` directly (handled in lambda emission). */
+        if (n->let.name && is_top_level_var(n->let.name)) {
+            sb_indent(s, depth);
+            sb_printf(s, "%s = ", n->let.name);
+            if (n->let.value) emit_expr(s, n->let.value, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, ";\n");
+            break;
+        }
         /* check if captured by lambda (needs boxing for closures) */
         if (n->let.name) {
             int is_captured = 0;
@@ -1851,6 +1944,15 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_VAR: {
+        /* top-level: storage is the file-scope `static xs_val NAME`. */
+        if (n->let.name && is_top_level_var(n->let.name)) {
+            sb_indent(s, depth);
+            sb_printf(s, "%s = ", n->let.name);
+            if (n->let.value) emit_expr(s, n->let.value, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, ";\n");
+            break;
+        }
         /* check if this variable is captured by any lambda */
         int is_captured = 0;
         if (n->let.name) {
@@ -1886,10 +1988,18 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_CONST:
-        sb_indent(s, depth);
         /* same story as NODE_LET above: const protects rebinding only,
          * which sema already enforces, and emitting a C const breaks
          * mutation through index/field assigns that xs allows. */
+        if (n->const_.name && is_top_level_var(n->const_.name)) {
+            sb_indent(s, depth);
+            sb_printf(s, "%s = ", n->const_.name);
+            if (n->const_.value) emit_expr(s, n->const_.value, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, ";\n");
+            break;
+        }
+        sb_indent(s, depth);
         sb_printf(s, "xs_val %s", n->const_.name);
         if (n->const_.value) {
             sb_add(s, " = ");
@@ -3383,8 +3493,10 @@ char *transpile_c(Node *program, const char *filename) {
     n_lambdas = 0;
     lambda_counter = 0;
     n_fn_sigs = 0;
+    n_top_vars = 0;
     prescan_stmts(program);
     scan_lambdas(program);
+    scan_top_level_vars(program);
 
     /* emit actor struct + method definitions at file scope */
     if (VAL_TAG(program) == NODE_PROGRAM) {
@@ -3559,6 +3671,15 @@ char *transpile_c(Node *program, const char *filename) {
     }
 
     if (needs_main_wrap) {
+        /* hoist top-level let/var/const names to file scope so named
+         * functions and the lambdas inside them can resolve them. main
+         * still does the actual init in source order. */
+        if (n_top_vars > 0) {
+            for (int i = 0; i < n_top_vars; i++)
+                sb_printf(&s, "static xs_val %s;\n", top_level_vars[i]);
+            sb_addc(&s, '\n');
+        }
+
         /* emit file-scope declarations first */
         if (VAL_TAG(program) == NODE_PROGRAM) {
             for (int i = 0; i < program->program.stmts.len; i++) {

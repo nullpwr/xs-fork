@@ -1225,6 +1225,21 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
         sb_addc(s, ')');
         break;
     }
+    case NODE_PAT_MAP: {
+        sb_printf(s, "(%s instanceof Map", subject);
+        for (int i = 0; i < pat->pat_map.nfields; i++) {
+            const char *k = pat->pat_map.keys[i] ? pat->pat_map.keys[i] : "";
+            sb_printf(s, " && %s.has(\"%s\")", subject, k);
+            if (pat->pat_map.sub[i]) {
+                char sub[256];
+                snprintf(sub, sizeof sub, "%s.get(\"%s\")", subject, k);
+                sb_add(s, " && ");
+                emit_pattern_cond(s, pat->pat_map.sub[i], sub, depth);
+            }
+        }
+        sb_addc(s, ')');
+        break;
+    }
     default:
         sb_add(s, "true");
         break;
@@ -1286,6 +1301,15 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
         break;
     case NODE_PAT_GUARD:
         emit_pattern_bindings(s, pat->pat_guard.pattern, subject, depth);
+        break;
+    case NODE_PAT_MAP:
+        for (int i = 0; i < pat->pat_map.nfields; i++) {
+            if (!pat->pat_map.sub[i]) continue;
+            char sub[256];
+            snprintf(sub, sizeof sub, "%s.get(\"%s\")",
+                     subject, pat->pat_map.keys[i] ? pat->pat_map.keys[i] : "");
+            emit_pattern_bindings(s, pat->pat_map.sub[i], sub, depth);
+        }
         break;
     default:
         break;
