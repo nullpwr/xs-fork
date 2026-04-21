@@ -413,6 +413,30 @@ char *value_repr(Value *v) {
                 if (tag_v && VAL_TAG(tag_v) == XS_STR && type_v && VAL_TAG(type_v) == XS_STR) {
                     Value *val_v = map_get(v->map, "_val");
                     if (val_v && VAL_TAG(val_v) != XS_NULL) {
+                        /* multi-arg variants are stored as a tuple in _val
+                         * by the VM compiler. Unwrap the tuple so the
+                         * stringified form matches the interp's output
+                         * (`Shape::Rect(3, 4)` instead of the wrapped
+                         * `Shape::Rect((3, 4))`). single-arg variants
+                         * keep their value as-is. */
+                        if (VAL_TAG(val_v) == XS_TUPLE && val_v->arr) {
+                            size_t n = strlen(type_v->s) + 2 + strlen(tag_v->s) + 4;
+                            char **parts = xs_calloc(val_v->arr->len, sizeof(char*));
+                            for (int ti = 0; ti < val_v->arr->len; ti++) {
+                                parts[ti] = value_repr(val_v->arr->items[ti]);
+                                n += strlen(parts[ti]) + 2;
+                            }
+                            char *out = xs_malloc(n);
+                            int pos = snprintf(out, n, "%s::%s(", type_v->s, tag_v->s);
+                            for (int ti = 0; ti < val_v->arr->len; ti++) {
+                                if (ti > 0) { out[pos++] = ','; out[pos++] = ' '; }
+                                pos += snprintf(out + pos, n - pos, "%s", parts[ti]);
+                                free(parts[ti]);
+                            }
+                            free(parts);
+                            out[pos++] = ')'; out[pos] = '\0';
+                            return out;
+                        }
                         char *vs = value_repr(val_v);
                         size_t n = strlen(type_v->s) + 2 + strlen(tag_v->s) + 1 + strlen(vs) + 2;
                         char *out = xs_malloc(n);

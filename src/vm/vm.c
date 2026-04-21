@@ -1490,6 +1490,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__add__", b)) != NULL) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "+", b)) != NULL) {
             } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "+", b)) != NULL) {
+            /* mixed-type fallback when LHS is not an instance: let the
+             * RHS's class handle the op. The receiver becomes b so the
+             * user's method runs as `self.+(other_lhs)`; commutative
+             * intent is on the user, but the call gets dispatched. */
+            } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "+", a)) != NULL) {
             } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
                        (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
                 double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
@@ -1514,6 +1519,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 /* dunder */
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "-", b)) != NULL) {
             } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "-", b)) != NULL) {
+            } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "-", a)) != NULL) {
             } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
                        (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
                 double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
@@ -1538,6 +1544,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 /* dunder */
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "*", b)) != NULL) {
             } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "*", b)) != NULL) {
+            } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "*", a)) != NULL) {
             } else if (VAL_TAG(a)==XS_STR && VAL_TAG(b)==XS_INT) {
                 int64_t count = VAL_INT(b);
                 if (count <= 0) { r = xs_str(""); }
@@ -1576,6 +1583,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__div__", b)) != NULL) {
                 /* dunder */
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "/", b)) != NULL) {
+            } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "/", a)) != NULL) {
             } else {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
@@ -1599,6 +1607,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_dunder(vm, a, "__mod__", b)) != NULL) {
                 /* dunder */
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "%", b)) != NULL) {
+            } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "%", a)) != NULL) {
             } else {
                 r = xs_numeric_mod(a, b);
             }
@@ -1645,23 +1654,34 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
 
         // --- comparisons
+        /* For instance-shaped maps we try the dunder first (`__eq__`,
+         * `__lt__`, ...), then the literal operator method (`==`, `<`)
+         * declared in the user's `impl` block. Without the second lookup,
+         * arithmetic ops dispatched correctly but comparisons silently
+         * fell back to value_equal / value_cmp on the struct fields. */
         case OP_EQ:  { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__eq__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"==",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_equal(a,b))); value_decref(a);value_decref(b); } break; }
         case OP_NEQ: { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ne__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"!=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(!value_equal(a,b))); value_decref(a);value_decref(b); } break; }
         case OP_LT:  { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__lt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"<",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)<0));  value_decref(a);value_decref(b); } break; }
         case OP_GT:  { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__gt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,">",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)>0));  value_decref(a);value_decref(b); } break; }
         case OP_LTE: { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__le__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"<=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)<=0)); value_decref(a);value_decref(b); } break; }
         case OP_GTE: { Value *b=POP(),*a=POP(); Value *r;
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ge__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
+                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,">=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(value_cmp(a,b)>=0)); value_decref(a);value_decref(b); } break; }
 
         /* collections */
