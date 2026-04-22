@@ -280,11 +280,17 @@ jobs:
           WASI_VERSION_FULL=25.0
           curl -sL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux.tar.gz | tar xz
           sudo mv wasi-sdk-${WASI_VERSION_FULL}-x86_64-linux /opt/wasi-sdk
-      - name: Build WASM
-        run: make wasm
-      - name: Generate SHA256 for WASM
-        run: sha256sum xs.wasm > xs.wasm.sha256
-      - name: Sign WASM
+      - name: Install binaryen for wasm-opt
+        run: sudo apt-get install -y binaryen
+      - name: Build WASM (full + browser-optimised)
+        run: |
+          make wasm
+          make wasm-browser
+      - name: Generate SHA256s
+        run: |
+          sha256sum xs.wasm > xs.wasm.sha256
+          sha256sum xs-browser.wasm > xs-browser.wasm.sha256
+      - name: Sign artefacts
         if: env.XS_MINISIGN_KEY != ''
         env:
           XS_MINISIGN_KEY: ${{ secrets.XS_MINISIGN_KEY }}
@@ -294,18 +300,25 @@ jobs:
           printf '%s' "$XS_MINISIGN_KEY" > /tmp/minisign.key
           chmod 600 /tmp/minisign.key
           echo "$XS_MINISIGN_PASSWORD" | minisign -S -s /tmp/minisign.key -m xs.wasm -t "xs release"
+          echo "$XS_MINISIGN_PASSWORD" | minisign -S -s /tmp/minisign.key -m xs-browser.wasm -t "xs release (browser)"
           rm -f /tmp/minisign.key
-      - name: Upload WASM to release
+      - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             xs.wasm
             xs.wasm.sha256
             xs.wasm.minisig
+            xs-browser.wasm
+            xs-browser.wasm.sha256
+            xs-browser.wasm.minisig
       - name: Notify static repo
+        if: env.XS_STATIC_DISPATCH_TOKEN != ''
+        env:
+          XS_STATIC_DISPATCH_TOKEN: ${{ secrets.XS_STATIC_DISPATCH_TOKEN }}
         run: |
           curl -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: token $XS_STATIC_DISPATCH_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/xs-lang0/static/dispatches \
             -d '{"event_type":"release"}' || true

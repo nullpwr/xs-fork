@@ -179,14 +179,26 @@ diffs the three outputs.
 | Algebraic effects (perform/handle) | works: handle body lowers to `function*()` and `yield*` delegates through nested performs |
 | Everything else | rough |
 
-## WebAssembly Transpiler
+## WebAssembly
 
-`xs --emit wasm file.xs`: early stage.
+The path to running xs in a browser is the runtime build, not the
+AOT transpiler.
 
-| Feature | Status |
-|---------|--------|
-| Basic arithmetic, function calls | works |
-| Everything else | not yet |
+| Build | What it gives you | Where |
+|-------|-------------------|-------|
+| `make wasm` | full runtime as `xs.wasm` (~1.4 MB), wasi target. Same feature set as the native binary. | release artefact |
+| `make wasm-browser` | stripped runtime as `xs-browser.wasm` (~600 kB after wasm-opt). TLS / x509 / RSA / EC / http_server / pkg / lint / doc / coverage are dropped, hashes / mac / kdf / symcipher kept. | release artefact, hosted at `static.xslang.org/xs.wasm` |
+
+The browser SDK at `static.xslang.org/xs.js` wraps `xs-browser.wasm`
+with a virtual filesystem, captured stdout/stderr, and a `loadXS()` /
+`xs.run()` / `xs.exec()` API. Releases publish both artefacts, and the
+static repo's daily sync workflow picks up the browser build.
+
+`xs --emit wasm` (the AOT transpiler) is staying parked. The runtime
+path covers the browser story; the C transpiler covers AOT. The
+existing emitter handles arithmetic and direct calls, but bringing it
+to full parity competes with the runtime path on every backend choice
+without giving users something they can't already get cheaper.
 
 ## Tooling
 
@@ -251,9 +263,13 @@ burns. Fix one, and this list gets shorter.
   both round-trip; the prior parse error is gone. Effects in code
   paths the C target reaches (the runtime preamble doesn't model
   continuations) are still VM-only.
-- **WASM backend only runs trivial programs.** Arithmetic and direct
-  function calls are fine; anything touching GC, strings, closures,
-  async, or effects does not yet work. Do not ship.
+- **`xs --emit wasm` is the AOT path, not the browser path.** Browsers
+  run `xs-browser.wasm` (the runtime build) via the SDK at
+  `static.xslang.org/xs.js`; that's full parity with the native VM
+  because it *is* the native VM, just compiled to wasm32-wasi. The
+  transpiler-emit `--emit wasm` only handles arithmetic and direct
+  function calls and is intentionally not being filled in further;
+  use `--emit c` for AOT.
 - **Cycle collector is opt-in for concurrent mode.** The default GC
   catches reference cycles synchronously (CPython-style trial deletion)
   on a generational schedule. For workloads where the multi-ms free
@@ -265,8 +281,12 @@ burns. Fix one, and this list gets shorter.
   backtick raw string: `` `{"a": 1}` ``. The interpolation grammar
   doesn't have an escape sequence for a single `{`; `{{` collapses
   to one but the inner content is still parsed as an expression.
-- **Regex is POSIX-extended, not PCRE.** No `\d`, `\w`, lookaround, or
-  backreferences. Use `[0-9]`, `[a-zA-Z_]`, etc.
+- **Regex is POSIX-extended, not PCRE - this is the v1.0 answer.** No
+  `\d`, `\w`, lookaround, or backreferences. Use `[0-9]`, `[a-zA-Z_]`,
+  etc. PCRE adds 30 kB of code for shorthand and a much larger surface
+  for catastrophic backtracking; POSIX gives a safer perf envelope.
+  If you need the bigger feature set, write a plugin against the regex
+  module. Not changing the default pre-1.0.
 - **HTTPS server uses BearSSL termination.** Pass a PEM cert + key
   to `http_server_use_tls(server, "cert.pem", "key.pem")` before
   calling `http_server_start`, and the listener attaches a per-
@@ -277,17 +297,22 @@ burns. Fix one, and this list gets shorter.
   (`sse_send_event`, `ws_send_frame`) still take a raw fd and so
   bypass TLS for now; threading them through HTTPConnection is the
   remaining piece.
-- **Unicode is byte-oriented.** `.len()`, `.slice()`, indexing all work
-  on bytes. Multi-byte UTF-8 sequences round-trip correctly, but
-  `.upper()`/`.lower()` are ASCII-only and grapheme-aware operations
-  are not implemented.
+- **Unicode is byte-oriented and that is the v1.0 answer.** `.len()`,
+  `.slice()`, indexing all work on bytes. Multi-byte UTF-8 sequences
+  round-trip correctly through every operation that doesn't need
+  case-mapping. `.upper()` / `.lower()` are ASCII-only; grapheme-aware
+  operations are not implemented. Adding a full ICU-style codepoint /
+  grapheme layer balloons the binary and the API surface, and the
+  byte model lines up with how real-world text is read off disk and
+  socket. If you need graphemes, a stdlib module on top is fine; the
+  string primitive stays bytes.
 - **Package registry endpoint is live, the CLI client isn't wired
-  yet.** The hosted registry runs at `reg.xslang.org` and is ready to
-  accept publishes / lookups, but `xs publish` and `xs search` in v0.7.x
-  still write a local tarball and print `no registry configured`
-  respectively, because `src/pkg/pkg.c` doesn't make HTTP calls. `xsi`
-  can install from local paths today. Wiring the CLI to talk to the
-  endpoint is on the v0.9.0 list.
+  yet.** The hosted registry runs at `reg.xslang.org` (search, publish,
+  fetch-by-name endpoints all up). `src/pkg/pkg.c` doesn't make HTTP
+  calls yet, so `xs publish` writes a local tarball and `xs search`
+  prints `no registry configured`. Git-based + local installs work
+  today; wiring publish/search/install through to the registry is
+  v0.9.x rolling work.
 - **JIT is opcode-subsetted.** The register-allocating pipeline
   handles the subset listed in the JIT Compiler section above: basic
   arithmetic, compares, loads/stores, branches, returns, and direct
@@ -303,7 +328,7 @@ burns. Fix one, and this list gets shorter.
   above); anything else runs on the bytecode VM for that proto. Actor
   methods that close over outer locals are also still on the VM-only
   side; tracked alongside generators and shadowed-local lowering.
-- WASM transpiler only handles basic programs
+- `xs --emit wasm` is parked: arithmetic + direct calls work, the rest doesn't. Use `--emit c` for AOT and `xs-browser.wasm` (the runtime build) for browsers
 - `xs publish` and `xs search` don't yet talk to `reg.xslang.org`; the registry endpoint is live but the CLI HTTP client wiring is pending
 - VM effects: nested perform/handle pairs route correctly because each
   perform pushes a snapshot, but a continuation is still single-shot.
