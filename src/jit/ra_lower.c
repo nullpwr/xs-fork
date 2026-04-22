@@ -256,11 +256,12 @@ static int pc_to_block(const int *starts, int n, int pc) {
  * our supported bytecode avoids), and keeps the lowerer simple. */
 
 IRFunc *ralow_lower(XSProto *proto) {
-    /* Bail out on unsupported opcodes or things that make the simple
-     * per-block stack simulation unsafe (try/catch, generators, etc).
-     * The bail is represented by returning NULL -- caller uses the
-     * template JIT instead. */
-    if (proto->is_generator) return NULL;
+    /* Generators were skipped wholesale here for a long time. With
+     * OP_YIELD now lowered through IR_VM_STEP_CF (see op_supported
+     * above), the body of a `fn*` can JIT like any other function;
+     * the suspend/resume hand-off itself stays inside vm_dispatch.
+     * Bail out only on unsupported opcodes - that's the template
+     * JIT's job. */
     for (int i = 0; i < proto->chunk.len; i++) {
         Opcode op = INSTR_OPCODE(proto->chunk.code[i]);
         if (!op_supported(op)) return NULL;
