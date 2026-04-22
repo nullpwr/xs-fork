@@ -216,7 +216,7 @@ without giving users something they can't already get cheaper.
 | Profiler (`xs profile`) | works |
 | Coverage (`xs coverage`) | works |
 | Doc generator (`xs doc`) | works |
-| Package manager (`xs install/remove/update`) | basic: hosted registry endpoint is live, client HTTP wiring still pending |
+| Package manager (`xs install/remove/update`) | works: git + local + reg.xslang.org via `xs install <name>`, `xs search`, `xs publish` (with `XS_REGISTRY_TOKEN`) |
 
 ## Platform Support
 
@@ -306,34 +306,36 @@ burns. Fix one, and this list gets shorter.
   byte model lines up with how real-world text is read off disk and
   socket. If you need graphemes, a stdlib module on top is fine; the
   string primitive stays bytes.
-- **Package registry endpoint is live, the CLI client isn't wired
-  yet.** The hosted registry runs at `reg.xslang.org` (search, publish,
-  fetch-by-name endpoints all up). `src/pkg/pkg.c` doesn't make HTTP
-  calls yet, so `xs publish` writes a local tarball and `xs search`
-  prints `no registry configured`. Git-based + local installs work
-  today; wiring publish/search/install through to the registry is
-  v0.9.x rolling work.
-- **JIT is opcode-subsetted.** The register-allocating pipeline
-  handles the subset listed in the JIT Compiler section above: basic
-  arithmetic, compares, loads/stores, branches, returns, and direct
-  calls. Anything outside the subset (generators, capturing writes to
-  locals shadowed into inner closures) falls back to the bytecode VM
-  for that proto. Tight arithmetic/branch loops get 5-8x over VM;
-  call-heavy workloads sit closer to VM parity until call-site fast
-  paths land. Both x86-64 and aarch64 are supported.
+- **Package manager: hosted + git + local.**
+  `xs install <name>` hits `https://reg.xslang.org/api/pkg/<name>/latest`,
+  pulls the tarball off Supabase storage, and unpacks into `.xs_lib/`.
+  `xs search <query>` queries `/api/search`. `xs publish` builds the
+  package tarball, base64-encodes it, and POSTs to
+  `/api/pkg/<name>/publish` with `Authorization: Bearer
+  $XS_REGISTRY_TOKEN`; without the env var it keeps the legacy
+  "tarball next to xs.toml" behaviour for testing or third-party
+  hosting. GitHub shorthand (`user/repo`) and `https://...git` keep
+  working as before. Override the registry with
+  `-DPKG_REGISTRY_URL=...` at build time.
+- **JIT covers most of the bytecode.** The register-allocating
+  pipeline now lowers generators (`fn*`/`yield`) and shadowed-local
+  cases through `IR_VM_STEP_CF`. Anything genuinely unsupported
+  (e.g. actor methods that close over outer locals - bug026 still
+  needs the call-emission rework) bails to the bytecode VM for that
+  proto. Tight arithmetic/branch loops get 5-8x over VM; call-heavy
+  workloads sit closer to VM parity until call-site fast paths land.
+  Both x86-64 and aarch64 are supported.
 
 ## Known Limitations
 
-- JIT lowers a fixed opcode subset (see the JIT Compiler section
-  above); anything else runs on the bytecode VM for that proto. Actor
-  methods that close over outer locals are also still on the VM-only
-  side; tracked alongside generators and shadowed-local lowering.
+- JIT lowers a fixed opcode subset; generators + shadowed locals now
+  pass through, but actor methods that close over outer locals still
+  bail to the bytecode VM (bug026's `skip-backend: jit` marker).
 - `xs --emit wasm` is parked: arithmetic + direct calls work, the rest doesn't. Use `--emit c` for AOT and `xs-browser.wasm` (the runtime build) for browsers
-- `xs publish` and `xs search` don't yet talk to `reg.xslang.org`; the registry endpoint is live but the CLI HTTP client wiring is pending
 - VM effects: nested perform/handle pairs route correctly because each
   perform pushes a snapshot, but a continuation is still single-shot.
   Calling `resume` more than once needs the VM to deep-snapshot mutable
-  heap state and is on the v0.9 list.
+  heap state and is on the v1.0 list.
 - Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand, use `[0-9]`, `[a-zA-Z_]`)
 - Interpreter call-depth cap is 500 frames (raise with `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow` rather than segfaulting; the VM has its own growable stack.
 - JS transpiler effect handlers wrap the handled expression in a generator and use `yield*` delegation, so a `perform` lowers to `yield` cleanly when the handle body itself yields. Direct top-level `perform` outside a `handle` still has no surrounding generator and will be a parse error under Node, mirroring the language rule that `perform` only makes sense in a handled context.
@@ -345,6 +347,10 @@ burns. Fix one, and this list gets shorter.
   not yet exposed through the XS-side `http` module surface; that
   rewire is pending.
 - TLS server termination uses BearSSL via
-  `http_server_use_tls(server, cert_pem, key_pem)`. SSE and WebSocket
-  helpers still take a raw fd, so streaming endpoints over HTTPS
-  need to be threaded through the engine in a follow-up.
+  `http_server_use_tls(server, cert_pem, key_pem)`, and SSE +
+  WebSocket helpers (`sse_send_event`, `ws_send_frame`,
+  `ws_send_text`, `ws_send_close`, `ws_send_ping`, `ws_send_pong`)
+  now go through the per-connection bridge so streaming endpoints
+  encrypt over HTTPS without each call site doing TLS plumbing. The
+  fd-based variants (`sse_send_event_fd`, `sse_send_retry_fd`)
+  remain for callers that genuinely run on plain sockets.
