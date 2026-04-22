@@ -2382,48 +2382,62 @@ int sse_begin(int fd) {
     return (int)w;
 }
 
-int sse_send_event(int fd, const char *event, const char *data, int64_t id) {
-    char buf[8192];
+/* Build the wire bytes for an SSE event into `buf`, returning the
+ * length. Pure formatting, no I/O - lets the SSE / WS senders go
+ * through conn_send (which dispatches TLS via http_tls_write when
+ * the connection is HTTPS) without each helper having to know
+ * about the TLS bridge. */
+static int sse_format_event(char *buf, int buf_size,
+                            const char *event, const char *data, int64_t id) {
     int pos = 0;
-
     if (id >= 0) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "id: %lld\n",
-                       (long long)id);
+        pos += snprintf(buf + pos, buf_size - pos, "id: %lld\n",
+                        (long long)id);
     }
     if (event && event[0]) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "event: %s\n", event);
+        pos += snprintf(buf + pos, buf_size - pos, "event: %s\n", event);
     }
-
-    const char *p = data;
+    const char *p = data ? data : "";
     while (*p) {
         const char *nl = strchr(p, '\n');
-        if (nl) {
-            int llen = (int)(nl - p);
-            if (pos + llen + 8 >= (int)sizeof(buf)) break;
-            memcpy(buf + pos, "data: ", 6);
-            pos += 6;
-            memcpy(buf + pos, p, llen);
-            pos += llen;
-            buf[pos++] = '\n';
-            p = nl + 1;
-        } else {
-            int llen = (int)strlen(p);
-            if (pos + llen + 8 >= (int)sizeof(buf)) break;
-            memcpy(buf + pos, "data: ", 6);
-            pos += 6;
-            memcpy(buf + pos, p, llen);
-            pos += llen;
-            buf[pos++] = '\n';
-            break;
-        }
+        int llen = nl ? (int)(nl - p) : (int)strlen(p);
+        if (pos + llen + 8 >= buf_size) break;
+        memcpy(buf + pos, "data: ", 6);
+        pos += 6;
+        memcpy(buf + pos, p, llen);
+        pos += llen;
+        buf[pos++] = '\n';
+        if (!nl) break;
+        p = nl + 1;
     }
+    if (pos < buf_size) buf[pos++] = '\n';
+    return pos;
+}
 
-    buf[pos++] = '\n';
+int sse_send_event(HTTPConnection *c, const char *event,
+                   const char *data, int64_t id) {
+    if (!c) return -1;
+    char buf[8192];
+    int pos = sse_format_event(buf, sizeof(buf), event, data, id);
+    return (int)conn_send(c, buf, (size_t)pos);
+}
+
+int sse_send_event_fd(int fd, const char *event,
+                      const char *data, int64_t id) {
+    char buf[8192];
+    int pos = sse_format_event(buf, sizeof(buf), event, data, id);
     ssize_t w = write(fd, buf, pos);
     return (int)w;
 }
 
-int sse_send_retry(int fd, int retry_ms) {
+int sse_send_retry(HTTPConnection *c, int retry_ms) {
+    if (!c) return -1;
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "retry: %d\n\n", retry_ms);
+    return (int)conn_send(c, buf, (size_t)len);
+}
+
+int sse_send_retry_fd(int fd, int retry_ms) {
     char buf[64];
     int len = snprintf(buf, sizeof(buf), "retry: %d\n\n", retry_ms);
     ssize_t w = write(fd, buf, len);
@@ -2512,6 +2526,55 @@ void ws_unmask(uint8_t *data, int len, const uint8_t *mask) {
     for (int i = 0; i < len; i++) {
         data[i] ^= mask[i & 3];
     }
+}
+
+/* WebSocket send helpers go through conn_send so HTTPS WebSocket
+ * (wss://) endpoints encrypt the frames via the BearSSL bridge. The
+ * raw fd-based writers stay around for callers that genuinely run on
+ * plain sockets (e.g. internal IPC). */
+int ws_send_frame(HTTPConnection *c, int opcode,
+                  const uint8_t *payload, int payload_len) {
+    if (!c) return -1;
+    /* upper bound on header is 10 bytes */
+    int cap = 10 + payload_len;
+    uint8_t stack_buf[2048];
+    uint8_t *buf = (cap <= (int)sizeof(stack_buf)) ? stack_buf : (uint8_t *)malloc((size_t)cap);
+    if (!buf) return -1;
+    int n = ws_encode_frame(buf, cap, opcode, payload, payload_len);
+    int rc = -1;
+    if (n > 0) rc = (int)conn_send(c, buf, (size_t)n);
+    if (buf != stack_buf) free(buf);
+    return rc;
+}
+
+int ws_send_text(HTTPConnection *c, const char *s) {
+    if (!s) return ws_send_frame(c, WS_OP_TEXT, (const uint8_t *)"", 0);
+    return ws_send_frame(c, WS_OP_TEXT, (const uint8_t *)s, (int)strlen(s));
+}
+
+int ws_send_close(HTTPConnection *c, int code, const char *reason) {
+    uint8_t buf[128];
+    int n = 0;
+    if (code > 0) {
+        buf[0] = (uint8_t)((code >> 8) & 0xFF);
+        buf[1] = (uint8_t)(code & 0xFF);
+        n = 2;
+        if (reason) {
+            int rlen = (int)strlen(reason);
+            if (n + rlen > (int)sizeof(buf)) rlen = (int)sizeof(buf) - n;
+            memcpy(buf + n, reason, rlen);
+            n += rlen;
+        }
+    }
+    return ws_send_frame(c, WS_OP_CLOSE, buf, n);
+}
+
+int ws_send_ping(HTTPConnection *c, const uint8_t *payload, int payload_len) {
+    return ws_send_frame(c, WS_OP_PING, payload, payload_len);
+}
+
+int ws_send_pong(HTTPConnection *c, const uint8_t *payload, int payload_len) {
+    return ws_send_frame(c, WS_OP_PONG, payload, payload_len);
 }
 
 /* ================================================================
