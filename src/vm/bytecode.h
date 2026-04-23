@@ -157,6 +157,14 @@ struct XSProto {
     char      **param_names;   /* owned, NULL-terminated slots */
     int         n_params;
     int         is_generator;  /* 1 if declared with `fn*` */
+    int         is_actor_method; /* 1 if body of an `actor { ... }` method.
+                                  * The JIT bails on these: the actor
+                                  * dispatcher feeds them an implicit
+                                  * self-as-arg plus state-field locals
+                                  * that the current call-emission path
+                                  * doesn't model, so lowering segfaults
+                                  * at runtime when the method also
+                                  * captures outer upvalues. */
     int         is_variadic;
     /* Cached pointer to the proto's tier-2 JIT entry (int(*)(VM*)).
      * Populated by jit_compile when lowering succeeds; read by the

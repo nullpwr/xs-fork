@@ -1,4 +1,3 @@
--- skip-backend: jit (actor-method closures still segfault the JIT; v0.9 work)
 -- bug026: VM actors used to compile with flattened state and dropped
 -- captures of outer-scope variables, so a method that referenced an
 -- outer `let` either crashed or read garbage. The interpreter handled

@@ -1080,10 +1080,27 @@ VM *vm_new(void) {
     return vm;
 }
 
+static void eff_cont_release_snapshot(EffectCont *ec) {
+    if (!ec || !ec->stack_snapshot) return;
+    for (int i = 0; i < ec->snapshot_len; i++) {
+        if (ec->stack_snapshot[i]) value_decref(ec->stack_snapshot[i]);
+    }
+    free(ec->stack_snapshot);
+    ec->stack_snapshot = NULL;
+    ec->snapshot_len = 0;
+    ec->snapshot_cap = 0;
+}
+
 void vm_free(VM *vm) {
     if (!vm) return;
     vm->eff_cont.valid = 0;
+    eff_cont_release_snapshot(&vm->eff_cont);
     free(vm->eff_cont.frames);
+    for (int i = 0; i < vm->eff_stack_count; i++) {
+        eff_cont_release_snapshot(&vm->eff_stack[i]);
+        free(vm->eff_stack[i].frames);
+    }
+    free(vm->eff_stack);
     if (vm->globals) { map_free(vm->globals); vm->globals = NULL; }
     free(vm->stack);
     free(vm->frames);
@@ -4279,42 +4296,99 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *eff_args[16];
             for (int i = argc_eff - 1; i >= 0; i--) eff_args[i] = POP();
 
-            /* save full continuation (frames + stack pointer) */
-            vm->eff_cont.frame_count = vm->frame_count;
-            if (vm->eff_cont.frames_cap < vm->frame_count) {
-                vm->eff_cont.frames_cap = vm->frame_count;
-                vm->eff_cont.frames = realloc(vm->eff_cont.frames,
-                    vm->eff_cont.frames_cap * sizeof(CallFrame));
+            /* Push a fresh continuation onto the LIFO stack so nested
+             * perform/handle pairs each get their own snapshot. The
+             * outer perform's snapshot stays untouched while the inner
+             * handler runs; resume in the outer handler still rewinds
+             * to its own saved body state. */
+            if (vm->eff_stack_count >= vm->eff_stack_cap) {
+                int new_cap = vm->eff_stack_cap ? vm->eff_stack_cap * 2 : 8;
+                vm->eff_stack = realloc(vm->eff_stack,
+                    (size_t)new_cap * sizeof(EffectCont));
+                memset(vm->eff_stack + vm->eff_stack_cap, 0,
+                       (size_t)(new_cap - vm->eff_stack_cap) * sizeof(EffectCont));
+                vm->eff_stack_cap = new_cap;
             }
-            memcpy(vm->eff_cont.frames, vm->frames,
-                   sizeof(CallFrame) * (size_t)vm->frame_count);
-            vm->eff_cont.sp_off = (int)(vm->sp - vm->stack);
-            vm->eff_cont.valid = 1;
-
             Value *eff_val = (argc_eff > 0) ? eff_args[0] : value_incref(XS_NULL_VAL);
             for (int i = 1; i < argc_eff; i++) value_decref(eff_args[i]);
+
+            /* Reserve a slot on the LIFO continuation stack BEFORE we
+             * scan for a handler, so the matched-handler block can
+             * just bump the count and write into the reserved entry. */
+            if (vm->eff_stack_count >= vm->eff_stack_cap) {
+                int new_cap = vm->eff_stack_cap ? vm->eff_stack_cap * 2 : 8;
+                vm->eff_stack = realloc(vm->eff_stack,
+                    (size_t)new_cap * sizeof(EffectCont));
+                memset(vm->eff_stack + vm->eff_stack_cap, 0,
+                       (size_t)(new_cap - vm->eff_stack_cap) * sizeof(EffectCont));
+                vm->eff_stack_cap = new_cap;
+            }
 
             /* find handler (scan try stack) */
             int eff_handled = 0;
             for (int fi = vm->frame_count - 1; fi >= 0; fi--) {
                 CallFrame *cf = &vm->frames[fi];
                 if (cf->try_depth > 0) {
-                    TryEntry *te = &cf->try_stack[--cf->try_depth];
+                    TryEntry *te = &cf->try_stack[cf->try_depth - 1];
+                    /* Capture frames + suspended-body stack slice now
+                     * that we know which handler matched. We snapshot
+                     * BEFORE the try entry is consumed, so resume can
+                     * re-enter the handler context (a second perform
+                     * inside the same handle still finds the same
+                     * try entry to dispatch on). The slice is
+                     * [te->stack_top, vm->sp): everything above the
+                     * handler frame's TRY_BEGIN sp belongs to the
+                     * suspended body and inner calls. The handler's
+                     * own frame stays untouched so closure mutations
+                     * the arm body performs persist past resume. */
+                    EffectCont *cur = &vm->eff_stack[vm->eff_stack_count++];
+                    cur->frame_count = vm->frame_count;
+                    if (cur->frames_cap < vm->frame_count) {
+                        cur->frames_cap = vm->frame_count;
+                        cur->frames = realloc(cur->frames,
+                            (size_t)cur->frames_cap * sizeof(CallFrame));
+                    }
+                    memcpy(cur->frames, vm->frames,
+                           sizeof(CallFrame) * (size_t)vm->frame_count);
+                    /* Now consume the try entry from the live frames. */
+                    cf->try_depth--;
+                    cur->sp_off = (int)(vm->sp - vm->stack);
+                    cur->stack_top_off = (int)(te->stack_top - vm->stack);
+                    cur->valid = 1;
+                    {
+                        int lo = cur->stack_top_off;
+                        int hi = cur->sp_off;
+                        if (lo < 0) lo = 0;
+                        if (hi < lo) hi = lo;
+                        int n = hi - lo;
+                        if (cur->snapshot_cap < n) {
+                            cur->stack_snapshot = realloc(cur->stack_snapshot,
+                                (size_t)n * sizeof(Value *));
+                            cur->snapshot_cap = n;
+                        }
+                        for (int si = 0; si < n; si++) {
+                            Value *sv = vm->stack[lo + si];
+                            cur->stack_snapshot[si] =
+                                sv ? value_incref(sv) : NULL;
+                        }
+                        cur->snapshot_len = n;
+                    }
+                    /* mirror into legacy single slot. */
+                    vm->eff_cont = *cur;
+                    vm->eff_cont.frames = NULL;
+                    vm->eff_cont.frames_cap = 0;
+                    vm->eff_cont.stack_snapshot = NULL;
+                    vm->eff_cont.snapshot_cap = 0;
+                    vm->eff_cont.snapshot_len = 0;
+                    vm->eff_cont.valid = 0;
+
                     /* DON'T truncate sp to te->stack_top: the memory
-                       between there and sp_off is the suspended nested
-                       frames' live local slots. Overwriting them (the
-                       handler's PUSHes start at the new sp and grow) and
-                       then restoring via memcpy on resume leaves those
-                       frames seeing handler-pushed values in their
-                       local slots, which cascades into OP_STORE_LOCAL
-                       decref'ing the wrong old value and ultimately a
-                       use-after-free on a compiler const.
-                       Instead, leave sp alone, drop eff_val above the
-                       suspended frames' locals (where handler's STORE_
-                       LOCAL will pick it up), and let OP_EFFECT_RESUME
-                       rewind cleanly via sp_off. */
-                    (void)te; /* te->stack_top no longer used here */
+                     * between there and sp_off is the suspended nested
+                     * frames' live local slots. Resume will rewind
+                     * cleanly via sp_off + the snapshot. */
                     PUSH(eff_val);
+                    Value *eff_name_v = PROTO->chunk.consts[INSTR_Bx(instr)];
+                    PUSH(value_incref(eff_name_v));
                     vm->frame_count = fi + 1;
                     frame = cf;
                     frame->ip = te->catch_ip;
@@ -4331,20 +4405,52 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_EFFECT_RESUME: {
             Value *resume_val = POP();
-            if (vm->eff_cont.valid) {
-                /* restore continuation: all frames and stack pointer */
-                if (vm->frames_cap < vm->eff_cont.frame_count) {
-                    vm->frames_cap = vm->eff_cont.frame_count;
+            EffectCont *cur = NULL;
+            if (vm->eff_stack_count > 0) {
+                cur = &vm->eff_stack[vm->eff_stack_count - 1];
+                if (!cur->valid) cur = NULL;
+            }
+            if (cur) {
+                /* Restore frames. */
+                if (vm->frames_cap < cur->frame_count) {
+                    vm->frames_cap = cur->frame_count;
                     vm->frames = realloc(vm->frames,
-                        vm->frames_cap * sizeof(CallFrame));
+                        (size_t)vm->frames_cap * sizeof(CallFrame));
                 }
-                memcpy(vm->frames, vm->eff_cont.frames,
-                       sizeof(CallFrame) * (size_t)vm->eff_cont.frame_count);
-                vm->frame_count = vm->eff_cont.frame_count;
-                vm->sp = vm->stack + vm->eff_cont.sp_off;
+                memcpy(vm->frames, cur->frames,
+                       sizeof(CallFrame) * (size_t)cur->frame_count);
+                vm->frame_count = cur->frame_count;
+
+                /* Replay captured suspended-body slice
+                 * [stack_top_off .. sp_off). Slots below
+                 * stack_top_off belong to the handler frame and any
+                 * outer scopes whose mutations during the arm body
+                 * must persist past resume. */
+                int lo = cur->stack_top_off;
+                int hi = cur->sp_off;
+                if (lo < 0) lo = 0;
+                if (hi < lo) hi = lo;
+                if (cur->stack_snapshot) {
+                    for (int si = 0; si < cur->snapshot_len; si++) {
+                        Value *prev = vm->stack[lo + si];
+                        Value *snap = cur->stack_snapshot[si];
+                        Value *next = snap ? value_incref(snap) : NULL;
+                        if (prev && prev != next) value_decref(prev);
+                        vm->stack[lo + si] = next;
+                    }
+                }
+                vm->sp = vm->stack + hi;
                 frame = FRAME;
+
+                /* Pop the continuation off the stack: resume is
+                 * single-shot relative to handler frame lifetime.
+                 * Nested handlers each had their own slot so this
+                 * pop only consumes the innermost. */
+                eff_cont_release_snapshot(cur);
+                cur->valid = 0;
+                vm->eff_stack_count--;
                 vm->eff_cont.valid = 0;
-                /* push resume value as result of the perform expression */
+
                 PUSH(resume_val);
             } else {
                 PUSH(resume_val);

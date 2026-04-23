@@ -57,8 +57,18 @@ typedef struct {
     CallFrame  *frames;
     int         frames_cap;
     int         frame_count;
-    int         sp_off; /* offset from stack base */
+    int         sp_off;          /* offset from stack base */
+    int         stack_top_off;   /* handler frame's sp at TRY_BEGIN */
     int         valid;
+    /* Multi-shot snapshot: stack values for the suspended-body range
+     * [stack_top_off .. sp_off) at perform time, each ref-counted.
+     * Capturing only that slice (rather than the whole stack) leaves
+     * the handler's own frame state untouched so a closure-mutated
+     * outer var in the arm body persists across resume; the second
+     * resume still sees the captured suspended-frames slots. */
+    Value     **stack_snapshot;
+    int         snapshot_len;
+    int         snapshot_cap;
 } EffectCont;
 
 typedef struct VM {
@@ -76,6 +86,15 @@ typedef struct VM {
     VMTask      tasks[VM_MAX_TASKS];
     int         n_tasks;
     EffectCont  eff_cont;
+    /* LIFO stack of suspended continuations. Nested perform/handle
+     * pairs each push a fresh snapshot so the inner handler's resume
+     * lands on the inner body, and the outer handler's resume still
+     * has its own captured frames + stack to rewind to. Heap-allocated
+     * to keep the VM struct small (the JIT hardcodes a few VM offsets;
+     * a fixed inline array would shift the rest of the struct). */
+    EffectCont *eff_stack;
+    int         eff_stack_count;
+    int         eff_stack_cap;
 #ifdef XSC_ENABLE_TRACER
     XSTracer   *tracer;
 #endif

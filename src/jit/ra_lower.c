@@ -261,7 +261,44 @@ IRFunc *ralow_lower(XSProto *proto) {
      * above), the body of a `fn*` can JIT like any other function;
      * the suspend/resume hand-off itself stays inside vm_dispatch.
      * Bail out only on unsupported opcodes - that's the template
-     * JIT's job. */
+     * JIT's job.
+     *
+     * Actor methods still bail: the actor dispatcher passes an
+     * implicit self plus prepends the state fields as locals, and
+     * the call-emission path the JIT uses doesn't lay the frame out
+     * the way the dispatcher built it. Letting it through segfaults
+     * the moment the method also captures an outer upvalue.
+     *
+     * The outer proto that BUILDS the actor also bails when any of
+     * its inner protos is an actor method, because constructing the
+     * closure + spawning the actor reaches into the dispatcher with
+     * data layouts the JIT-emitted prologue is unaware of. */
+    if (proto->is_actor_method) return NULL;
+    /* transitively bail any proto that builds an actor anywhere
+     * downstream. spawning + dispatching an actor with an
+     * upvalue-bearing method confuses the JIT prologue. */
+    {
+        int worklist_cap = proto->n_inner > 16 ? proto->n_inner : 16;
+        XSProto **worklist = malloc((size_t)worklist_cap * sizeof(XSProto *));
+        int worklist_len = 0;
+        for (int i = 0; i < proto->n_inner; i++)
+            if (proto->inner[i]) worklist[worklist_len++] = proto->inner[i];
+        int has_actor = 0;
+        while (worklist_len > 0) {
+            XSProto *p = worklist[--worklist_len];
+            if (!p) continue;
+            if (p->is_actor_method) { has_actor = 1; break; }
+            for (int j = 0; j < p->n_inner; j++) {
+                if (worklist_len >= worklist_cap) {
+                    worklist_cap *= 2;
+                    worklist = realloc(worklist, (size_t)worklist_cap * sizeof(XSProto *));
+                }
+                if (p->inner[j]) worklist[worklist_len++] = p->inner[j];
+            }
+        }
+        free(worklist);
+        if (has_actor) return NULL;
+    }
     for (int i = 0; i < proto->chunk.len; i++) {
         Opcode op = INSTR_OPCODE(proto->chunk.code[i]);
         if (!op_supported(op)) return NULL;

@@ -2262,6 +2262,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 int method_arity = m->fn_decl.params.len + 1; /* +1 for self */
                 XSProto *parent = c->current->proto;
                 XSProto *inner = proto_new(m->fn_decl.name ? m->fn_decl.name : "<actor_method>", method_arity);
+                inner->is_actor_method = 1;
                 if (parent->n_inner == parent->cap_inner) {
                     parent->cap_inner = parent->cap_inner ? parent->cap_inner * 2 : 4;
                     parent->inner = xs_realloc(parent->inner, (size_t)parent->cap_inner * sizeof(XSProto *));
@@ -2371,25 +2372,68 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
 
 
     case NODE_HANDLE: {
+        /* OP_EFFECT_CALL leaves [..., eff_val, eff_name_str] on the
+         * stack at catch entry. Compile a name-dispatch chain so each
+         * arm only runs for its own effect; the previous code only
+         * ever compiled arm[0], which made multi-arm handlers route
+         * everything to the first arm. Last arm (or only arm) acts
+         * as a catch-all so single-arm `handle` keeps the old
+         * "catches anything" semantics. */
         int try_start = emit_jump(c, OP_TRY_BEGIN);
         compile_node(c, n->handle.expr, want_value);
         emit(c, MAKE_A(OP_TRY_END, 0, 0));
         int over_handler = emit_jump(c, OP_JUMP);
         patch_jump(c, try_start);
         emit(c, MAKE_A(OP_CATCH, 0, 0));
-        if (n->handle.arms.len > 0) {
-            EffectArm *earm = &n->handle.arms.items[0];
-            if (earm->params.len > 0) {
-                int slot = local_add(c->current, earm->params.items[0].name);
-                emit_a(c, OP_STORE_LOCAL, slot);
-            } else {
-                emit(c, MAKE_A(OP_POP, 0, 0));
-            }
-            compile_node(c, earm->body, want_value);
-        } else {
-            emit(c, MAKE_A(OP_POP, 0, 0));
+
+        int n_arms = n->handle.arms.len;
+        if (n_arms == 0) {
+            emit(c, MAKE_A(OP_POP, 0, 0)); /* drop eff_name */
+            emit(c, MAKE_A(OP_POP, 0, 0)); /* drop eff_val */
             if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+        } else {
+            int *out_jumps = xs_calloc((size_t)n_arms, sizeof(int));
+            int n_out = 0;
+
+            for (int ai = 0; ai < n_arms; ai++) {
+                EffectArm *earm = &n->handle.arms.items[ai];
+                int is_last = (ai == n_arms - 1);
+                int skip = -1;
+
+                if (!is_last) {
+                    /* dup eff_name, push expected, compare, skip on
+                     * mismatch. Stack stays at depth 2 on the skip
+                     * path so the next arm's check sees the same
+                     * input. */
+                    char fullname[256];
+                    snprintf(fullname, sizeof fullname, "%s.%s",
+                             earm->effect_name ? earm->effect_name : "?",
+                             earm->op_name ? earm->op_name : "?");
+                    emit(c, MAKE_A(OP_DUP, 0, 0));
+                    emit_const(c, xs_str(fullname));
+                    emit(c, MAKE_A(OP_EQ, 0, 0));
+                    skip = emit_jump(c, OP_JUMP_IF_FALSE);
+                }
+
+                /* matched (or last arm fallthrough): drop eff_name,
+                 * bind eff_val to the arm's first param. */
+                emit(c, MAKE_A(OP_POP, 0, 0));
+                if (earm->params.len > 0) {
+                    int slot = local_add(c->current, earm->params.items[0].name);
+                    emit_a(c, OP_STORE_LOCAL, slot);
+                } else {
+                    emit(c, MAKE_A(OP_POP, 0, 0));
+                }
+                compile_node(c, earm->body, want_value);
+                out_jumps[n_out++] = emit_jump(c, OP_JUMP);
+
+                if (skip != -1) patch_jump(c, skip);
+            }
+
+            for (int i = 0; i < n_out; i++) patch_jump(c, out_jumps[i]);
+            free(out_jumps);
         }
+
         patch_jump(c, over_handler);
         return;
     }
