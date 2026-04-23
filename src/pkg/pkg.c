@@ -16,9 +16,17 @@
 #define PKG_REGISTRY_URL "https://reg.xslang.org"
 #endif
 
+/* http_do_request lives in builtins_net.c behind the same guard
+ * (no raw POSIX sockets in mingw / wasi); registry features are
+ * skipped on those targets and surface a clear error instead. */
+#if !defined(__MINGW32__) && !defined(__wasi__)
+#define PKG_HAS_REGISTRY_HTTP 1
 extern Value *http_do_request(const char *method, const char *url,
                               XSMap *extra_headers, const char *body,
                               size_t body_len);
+#else
+#define PKG_HAS_REGISTRY_HTTP 0
+#endif
 
 /* tiny JSON-ish field grabber for known-shape registry responses. The
  * registry returns
@@ -69,6 +77,7 @@ static char *json_field(const char *body, const char *key) {
     return NULL;
 }
 
+#if PKG_HAS_REGISTRY_HTTP
 /* Pull body / status out of an http_do_request response map. */
 static int registry_get(const char *url, char **body_out, int *status_out) {
     *body_out = NULL;
@@ -89,6 +98,7 @@ static int registry_get(const char *url, char **body_out, int *status_out) {
     value_decref(resp);
     return 0;
 }
+#endif /* PKG_HAS_REGISTRY_HTTP */
 
 static int write_file(const char *path, const char *content) {
     FILE *f = fopen(path, "w");
@@ -475,6 +485,13 @@ int pkg_install(const char *package_name) {
         }
         printf("installed %s from %s\n", pkg_name, package_name);
     } else {
+#if !PKG_HAS_REGISTRY_HTTP
+        fprintf(stderr,
+            "xs install: registry fetch is not available on this build "
+            "(no raw sockets); install from a git URL or local path "
+            "instead.\n");
+        return 1;
+#else
         /* Plain "name" -> hosted registry at reg.xslang.org. Hit
          * /api/pkg/{name}/latest, fish the tarball URL out of the JSON
          * envelope, download, unpack into .xs_lib/{name}. */
@@ -590,6 +607,7 @@ int pkg_install(const char *package_name) {
                version ? version : "",
                PKG_REGISTRY_URL);
         free(tarball); free(version);
+#endif /* PKG_HAS_REGISTRY_HTTP */
     }
     return 0;
 }
@@ -600,6 +618,13 @@ int pkg_search(const char *query) {
         fprintf(stderr, "xs search: missing query\n");
         return 1;
     }
+#if !PKG_HAS_REGISTRY_HTTP
+    fprintf(stderr,
+        "xs search: registry queries are not available on this build "
+        "(no raw sockets).\n");
+    (void)query;
+    return 1;
+#else
     /* very small URL-escape: replace spaces with '+' and stop on quote
      * / backslash since the registry rejects those anyway. */
     char esc[512];
@@ -663,6 +688,7 @@ int pkg_search(const char *query) {
         printf("(%d results from %s)\n", found, PKG_REGISTRY_URL);
     }
     return 0;
+#endif /* PKG_HAS_REGISTRY_HTTP */
 }
 
 int pkg_remove(const char *package_name) {
@@ -977,6 +1003,11 @@ int pkg_publish(const char *path) {
     printf("  files:   %d\n", file_count);
     printf("  tarball: %s\n", tarball);
 
+#if !PKG_HAS_REGISTRY_HTTP
+    printf("\nregistry uploads are not available on this build "
+           "(no raw sockets); tarball '%s' kept locally.\n", tarball);
+    return 0;
+#else
     /* If a publish token is in the environment, hand the tarball off to
      * the registry. Token is expected to be a Supabase JWT scoped to the
      * caller's account; the registry validates it server-side and rejects
@@ -1086,4 +1117,5 @@ int pkg_publish(const char *path) {
     }
     value_decref(resp);
     return 1;
+#endif /* PKG_HAS_REGISTRY_HTTP */
 }
