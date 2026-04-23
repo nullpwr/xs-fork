@@ -16,14 +16,54 @@
 #define PKG_REGISTRY_URL "https://reg.xslang.org"
 #endif
 
-/* http_do_request lives in builtins_net.c behind the same guard
- * (no raw POSIX sockets in mingw / wasi); registry features are
- * skipped on those targets and surface a clear error instead. */
-#if !defined(__MINGW32__) && !defined(__wasi__)
+/* On POSIX the registry CLI uses builtins_net.c's http_do_request.
+ * On Windows that module's guards exclude mingw, so we go through the
+ * standalone client in pkg_http.c which calls into BearSSL via xs_tls
+ * the same way. wasi has no TCP at all. */
+#if !defined(__wasi__)
 #define PKG_HAS_REGISTRY_HTTP 1
+#  if !defined(__MINGW32__) && !defined(_WIN32)
 extern Value *http_do_request(const char *method, const char *url,
                               XSMap *extra_headers, const char *body,
                               size_t body_len);
+#  else
+#    include "pkg/pkg_http.h"
+static Value *http_do_request(const char *method, const char *url,
+                              XSMap *extra_headers, const char *body,
+                              size_t body_len) {
+    /* Flatten the headers map into "Name: value" lines for pkg_http. */
+    char **lines = NULL;
+    int nl = 0;
+    if (extra_headers) {
+        int nk = 0;
+        char **ks = map_keys(extra_headers, &nk);
+        lines = malloc((size_t)nk * sizeof(char *));
+        for (int i = 0; i < nk; i++) {
+            Value *vv = map_get(extra_headers, ks[i]);
+            if (vv && VAL_TAG(vv) == XS_STR && vv->s) {
+                size_t L = strlen(ks[i]) + 2 + strlen(vv->s) + 1;
+                lines[nl] = malloc(L);
+                snprintf(lines[nl], L, "%s: %s", ks[i], vv->s);
+                nl++;
+            }
+            free(ks[i]);
+        }
+        free(ks);
+    }
+    PkgHttpResponse pr = {0};
+    int rc = pkg_http_request(method, url,
+                              (const char *const *)lines, nl,
+                              body, body_len, &pr);
+    for (int i = 0; i < nl; i++) free(lines[i]);
+    free(lines);
+    if (rc != 0) return NULL;
+    Value *m = xs_map_new();
+    Value *sv = xs_int(pr.status);  map_set(m->map, "status", sv); value_decref(sv);
+    Value *bv = xs_str(pr.body ? pr.body : ""); map_set(m->map, "body", bv); value_decref(bv);
+    pkg_http_response_free(&pr);
+    return m;
+}
+#  endif
 #else
 #define PKG_HAS_REGISTRY_HTTP 0
 #endif
@@ -31,47 +71,99 @@ extern Value *http_do_request(const char *method, const char *url,
 /* tiny JSON-ish field grabber for known-shape registry responses. The
  * registry returns
  *   {"package":{...}, "version":{"version":"0.2.1","tarball_url":"https://...", ...}}
- * so we walk char-by-char looking for "key":"value" with rudimentary
- * escape handling. avoids dragging the full json builtin into pkg.c. */
+ * so we walk the body tracking whether we're inside a string value and
+ * only treat "key":"..." matches that occur at structural positions
+ * (after { , : space). Without that, a value like "description":"see
+ * tarball_url at..." would falsely match when grabbing tarball_url.
+ *
+ * Output is capped (8MB) so a malicious / corrupt registry can't drive
+ * us to OOM via an unterminated string. */
+#define JSON_FIELD_MAX (8u * 1024u * 1024u)
 static char *json_field(const char *body, const char *key) {
     if (!body || !key) return NULL;
     size_t klen = strlen(key);
     const char *p = body;
+    int in_str = 0;       /* inside a quoted JSON string */
+    int at_key_pos = 1;   /* next quote opens a key (start of object) */
+
     while (*p) {
-        if (*p == '"' && strncmp(p + 1, key, klen) == 0 &&
-            p[1 + klen] == '"') {
-            const char *q = p + 1 + klen + 1;
-            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
-            if (*q != ':') { p++; continue; }
-            q++;
-            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
-            if (*q != '"') { p++; continue; }
-            q++;
-            const char *start = q;
-            char *out = malloc(strlen(q) + 1);
-            if (!out) return NULL;
-            char *w = out;
-            while (*q && *q != '"') {
-                if (*q == '\\' && q[1]) {
-                    char c = q[1];
-                    switch (c) {
-                        case '"': *w++ = '"'; break;
-                        case '\\': *w++ = '\\'; break;
-                        case '/': *w++ = '/'; break;
-                        case 'n': *w++ = '\n'; break;
-                        case 't': *w++ = '\t'; break;
-                        case 'r': *w++ = '\r'; break;
-                        default: *w++ = c; break;
-                    }
-                    q += 2;
-                } else {
-                    *w++ = *q++;
-                }
-            }
-            *w = '\0';
-            (void)start;
-            return out;
+        char c = *p;
+        if (in_str) {
+            if (c == '\\' && p[1]) { p += 2; continue; }
+            if (c == '"') { in_str = 0; p++; continue; }
+            p++; continue;
         }
+        if (c == '"') {
+            if (at_key_pos && strncmp(p + 1, key, klen) == 0 &&
+                p[1 + klen] == '"') {
+                const char *q = p + 1 + klen + 1;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+                if (*q != ':') { in_str = 1; p++; continue; }
+                q++;
+                while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+                if (*q != '"') { in_str = 1; p++; continue; }
+                q++;
+                size_t cap = strlen(q) + 1;
+                if (cap > JSON_FIELD_MAX) cap = JSON_FIELD_MAX;
+                char *out = malloc(cap);
+                if (!out) return NULL;
+                char *w = out;
+                char *end = out + cap - 1;
+                while (*q && *q != '"' && w < end) {
+                    if (*q == '\\' && q[1]) {
+                        char e = q[1];
+                        switch (e) {
+                            case '"': *w++ = '"'; break;
+                            case '\\': *w++ = '\\'; break;
+                            case '/': *w++ = '/'; break;
+                            case 'n': *w++ = '\n'; break;
+                            case 't': *w++ = '\t'; break;
+                            case 'r': *w++ = '\r'; break;
+                            case 'b': *w++ = '\b'; break;
+                            case 'f': *w++ = '\f'; break;
+                            case 'u':
+                                /* basic \uXXXX -> ASCII passthrough; full
+                                 * unicode handling lives in the json
+                                 * builtin and pkg.c only sees urls and
+                                 * version strings. */
+                                if (q[2] && q[3] && q[4] && q[5]) {
+                                    unsigned u = 0;
+                                    for (int i = 0; i < 4; i++) {
+                                        char h = q[2 + i];
+                                        u <<= 4;
+                                        if (h >= '0' && h <= '9') u |= (unsigned)(h - '0');
+                                        else if (h >= 'a' && h <= 'f') u |= (unsigned)(h - 'a' + 10);
+                                        else if (h >= 'A' && h <= 'F') u |= (unsigned)(h - 'A' + 10);
+                                        else { u = 0xFFFD; break; }
+                                    }
+                                    if (u < 0x80) *w++ = (char)u;
+                                    else if (w + 1 < end) {
+                                        *w++ = '?';
+                                    }
+                                    q += 6;
+                                    continue;
+                                }
+                                *w++ = e;
+                                break;
+                            default: *w++ = e; break;
+                        }
+                        q += 2;
+                    } else {
+                        *w++ = *q++;
+                    }
+                }
+                *w = '\0';
+                return out;
+            }
+            in_str = 1;
+            at_key_pos = 0;
+            p++;
+            continue;
+        }
+        /* structural: { , reset to "next quote is a key" */
+        if (c == '{' || c == ',') at_key_pos = 1;
+        else if (c == ':' || c == '[' || c == ']' || c == '}') at_key_pos = 0;
+        /* whitespace doesn't change at_key_pos */
         p++;
     }
     return NULL;
@@ -1015,10 +1107,16 @@ int pkg_publish(const char *path) {
      * the legacy "tarball lives next to xs.toml" behaviour so the local
      * step is still useful for testing or third-party hosting. */
     const char *token = getenv("XS_REGISTRY_TOKEN");
+    char stored[8192]; stored[0] = 0;
     if (!token || !*token) {
-        printf("\nXS_REGISTRY_TOKEN not set: tarball '%s' kept locally.\n",
-               tarball);
-        printf("  export XS_REGISTRY_TOKEN=<jwt>  # then xs publish to send.\n");
+        if (pkg_creds_read(stored, sizeof stored) == 0 && stored[0]) {
+            token = stored;
+        }
+    }
+    if (!token || !*token) {
+        printf("\nNot logged in: tarball '%s' kept locally.\n", tarball);
+        printf("  xs login                         # store credentials\n");
+        printf("  export XS_REGISTRY_TOKEN=<jwt>   # or pass via env\n");
         return 0;
     }
 
@@ -1118,4 +1216,139 @@ int pkg_publish(const char *path) {
     value_decref(resp);
     return 1;
 #endif /* PKG_HAS_REGISTRY_HTTP */
+}
+
+/* Credential file lives at $HOME/.xs/credentials. Plain-text by design:
+ * the token is a Supabase JWT; chmod 600 is the only protection we
+ * offer. Set XS_REGISTRY_TOKEN if you'd rather not persist it. */
+static int creds_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home || !*home) home = getenv("USERPROFILE");
+#endif
+    if (!home || !*home) {
+        fprintf(stderr, "xs login: HOME is not set\n");
+        return -1;
+    }
+    int n = snprintf(out, cap, "%s/.xs/credentials", home);
+    if (n <= 0 || (size_t)n >= cap) return -1;
+    return 0;
+}
+
+int pkg_creds_read(char *out, size_t cap) {
+    char path[1024];
+    if (creds_path(path, sizeof path) < 0) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(out, (int)cap, f)) { fclose(f); return -1; }
+    fclose(f);
+    size_t L = strlen(out);
+    while (L > 0 && (out[L - 1] == '\n' || out[L - 1] == '\r' || out[L - 1] == ' ')) {
+        out[--L] = 0;
+    }
+    return 0;
+}
+
+int pkg_login(void) {
+    char path[1024];
+    if (creds_path(path, sizeof path) < 0) return 1;
+    char dir[1024];
+    snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = 0;
+        mkdir(dir, 0700);
+    }
+
+    const char *envtok = getenv("XS_REGISTRY_TOKEN");
+    char buf[8192];
+    if (envtok && *envtok) {
+        snprintf(buf, sizeof buf, "%s", envtok);
+    } else {
+        printf("Paste your registry token (from %s/account):\n> ", PKG_REGISTRY_URL);
+        fflush(stdout);
+        if (!fgets(buf, sizeof buf, stdin)) {
+            fprintf(stderr, "\nxs login: no token provided\n");
+            return 1;
+        }
+    }
+    size_t L = strlen(buf);
+    while (L > 0 && (buf[L - 1] == '\n' || buf[L - 1] == '\r' || buf[L - 1] == ' ')) {
+        buf[--L] = 0;
+    }
+    if (L == 0) {
+        fprintf(stderr, "xs login: empty token\n");
+        return 1;
+    }
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "xs login: cannot write '%s'\n", path);
+        return 1;
+    }
+    fputs(buf, f);
+    fputc('\n', f);
+    fclose(f);
+    chmod(path, 0600);
+    printf("saved token to %s\n", path);
+    return 0;
+}
+
+int pkg_logout(void) {
+    char path[1024];
+    if (creds_path(path, sizeof path) < 0) return 1;
+    if (unlink(path) != 0 && errno != ENOENT) {
+        fprintf(stderr, "xs logout: cannot remove '%s': %s\n", path, strerror(errno));
+        return 1;
+    }
+    printf("removed %s\n", path);
+    return 0;
+}
+
+int pkg_whoami(void) {
+#if !PKG_HAS_REGISTRY_HTTP
+    fprintf(stderr, "xs whoami: registry HTTP not available on this build\n");
+    return 1;
+#else
+    char tok[8192]; tok[0] = 0;
+    const char *envtok = getenv("XS_REGISTRY_TOKEN");
+    const char *use = (envtok && *envtok) ? envtok :
+                       (pkg_creds_read(tok, sizeof tok) == 0 && tok[0]) ? tok : NULL;
+    if (!use) {
+        printf("not logged in (run 'xs login')\n");
+        return 1;
+    }
+    char auth[10240];
+    snprintf(auth, sizeof auth, "Bearer %s", use);
+    XSMap *headers = map_new();
+    Value *av = xs_str(auth);
+    map_set(headers, "Authorization", av);
+    value_decref(av);
+    char url[512];
+    snprintf(url, sizeof url, "%s/api/whoami", PKG_REGISTRY_URL);
+    Value *resp = http_do_request("GET", url, headers, NULL, 0);
+    map_free(headers);
+    if (!resp || VAL_TAG(resp) != XS_MAP || !resp->map) {
+        fprintf(stderr, "xs whoami: could not reach %s\n", PKG_REGISTRY_URL);
+        if (resp) value_decref(resp);
+        return 1;
+    }
+    Value *st = map_get(resp->map, "status");
+    Value *bd = map_get(resp->map, "body");
+    int status = (st && VAL_TAG(st) == XS_INT) ? (int)VAL_INT(st) : 0;
+    if (status >= 200 && status < 300 && bd && VAL_TAG(bd) == XS_STR && bd->s) {
+        char *username = json_field(bd->s, "username");
+        char *email = json_field(bd->s, "email");
+        if (username) { printf("logged in as %s", username); free(username); }
+        else printf("logged in");
+        if (email) { printf(" (%s)", email); free(email); }
+        printf("\n");
+        value_decref(resp);
+        return 0;
+    }
+    fprintf(stderr, "xs whoami: registry returned %d\n", status);
+    if (bd && VAL_TAG(bd) == XS_STR && bd->s) fprintf(stderr, "  %s\n", bd->s);
+    value_decref(resp);
+    return 1;
+#endif
 }

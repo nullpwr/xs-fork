@@ -131,6 +131,7 @@ DIAG_SRCS = src/diagnostic/diagnostic.c \
 TOOL_SRCS = src/fmt/fmt.c \
             src/doc/docgen.c \
             src/pkg/pkg.c \
+            src/pkg/pkg_http.c \
             src/profiler/profiler.c \
             src/coverage/coverage.c \
             src/optimizer/optimizer.c \
@@ -140,7 +141,7 @@ TOOL_SRCS = src/fmt/fmt.c \
 
 DB_SRCS = src/db/xsdb.c
 
-NET_SRCS = src/net/http_server.c src/net/http_tls.c
+NET_SRCS = src/net/http_server.c src/net/http_tls.c src/net/sock_compat.c
 
 REGEX_SRCS = src/core/regex.c
 

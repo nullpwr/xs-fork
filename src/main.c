@@ -966,7 +966,16 @@ int main(int argc, char **argv) {
                                "Update all dependencies or a specific package to latest version.\n")
                 H("publish",   "Usage: xs publish\n\n"
                                "Publish the current package to the XS registry.\n"
-                               "Requires [registry] configuration in xs.toml.\n")
+                               "Reads token from XS_REGISTRY_TOKEN env var or ~/.xs/credentials.\n"
+                               "Run `xs login` once to store the token persistently.\n")
+                H("login",     "Usage: xs login\n\n"
+                               "Store registry credentials at ~/.xs/credentials (chmod 600).\n"
+                               "Reads XS_REGISTRY_TOKEN if set, otherwise prompts on stdin.\n"
+                               "Get the token from the registry web UI account page.\n")
+                H("logout",    "Usage: xs logout\n\n"
+                               "Delete ~/.xs/credentials.\n")
+                H("whoami",    "Usage: xs whoami\n\n"
+                               "Print the username/email associated with the stored token.\n")
                 H("search",    "Usage: xs search <query>\n\n"
                                "Search the XS package registry.\n")
                 H("lsp",       "Usage: xs lsp\n\n"
@@ -1917,6 +1926,30 @@ test_again: ;
             return pkg_publish(sub_argc >= 1 ? sub_arg(0) : ".");
 #else
             fprintf(stderr, "xs publish: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
+            return 1;
+#endif
+
+        } else if (strcmp(sub, "login") == 0) {
+#ifdef XSC_ENABLE_PKG
+            return pkg_login();
+#else
+            fprintf(stderr, "xs login: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
+            return 1;
+#endif
+
+        } else if (strcmp(sub, "logout") == 0) {
+#ifdef XSC_ENABLE_PKG
+            return pkg_logout();
+#else
+            fprintf(stderr, "xs logout: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
+            return 1;
+#endif
+
+        } else if (strcmp(sub, "whoami") == 0) {
+#ifdef XSC_ENABLE_PKG
+            return pkg_whoami();
+#else
+            fprintf(stderr, "xs whoami: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
             return 1;
 #endif
 
