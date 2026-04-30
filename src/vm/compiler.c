@@ -2348,6 +2348,16 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         return;
 
     case NODE_SPAWN: {
+        /* `spawn Counter` (a bare identifier referring to an actor class)
+           must instantiate the actor synchronously so the caller sees a
+           usable actor-instance map, not a future to await. Push the
+           identifier directly so OP_SPAWN's actor branch handles it. */
+        if (n->spawn_.expr && n->spawn_.expr->tag == NODE_IDENT) {
+            compile_node(c, n->spawn_.expr, 1);
+            emit(c, MAKE_A(OP_SPAWN, 0, 0));
+            if (!want_value) emit(c, MAKE_A(OP_POP, 0, 0));
+            return;
+        }
         int idx = compile_fn(c, "__spawn__", NULL, n->spawn_.expr);
         emit_make_closure(c, idx);
         emit(c, MAKE_A(OP_SPAWN, 0, 0));
@@ -2356,7 +2366,10 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_NURSERY:
-        compile_node(c, n->nursery_.body, want_value);
+        emit(c, MAKE_A(OP_NURSERY_BEGIN, 0, 0));
+        compile_node(c, n->nursery_.body, 0);
+        emit(c, MAKE_A(OP_NURSERY_END, 0, 0));
+        if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         return;
 
     case NODE_PERFORM: {

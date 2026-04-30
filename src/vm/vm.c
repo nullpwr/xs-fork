@@ -27,7 +27,10 @@
 
 static int vm_dispatch(VM *vm, int stop_frame);
 static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc);
-static VM *g_vm_for_invoke;
+/* Thread-local so per-thread VMs can resolve callback fn-targets without
+   trampling the parent's pointer; native callbacks (array.map, etc.)
+   thread their work through whichever VM the current thread is running. */
+static _Thread_local VM *g_vm_for_invoke;
 
 static Upvalue *upvalue_new_open(Value **slot) {
     Upvalue *u = xs_malloc(sizeof *u);
@@ -631,7 +634,7 @@ static Value *vm_tan(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_fl
 static Value *vm_log_fn(Interp *i, Value **a, int n) { (void)i; return n>=1 ? xs_float(log(VAL_TAG(a[0])==XS_INT?(double)VAL_INT(a[0]):a[0]->f)) : xs_float(0); }
 
 /* plugin loading */
-static VM *g_plugin_vm;
+static _Thread_local VM *g_plugin_vm;
 
 static Value *vm_plugin_global_set(Interp *interp, Value **args, int argc) {
     (void)interp;
@@ -759,11 +762,16 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
 
 static Value *vm_channel(Interp *interp, Value **args, int argc) {
     (void)interp;
+    extern int xs_chan_alloc(void);
     Value *ch = xs_map_new();
     Value *type = xs_str("channel");
     map_set(ch->map, "__type", type); value_decref(type);
     Value *buf = xs_array_new();
     map_set(ch->map, "_buf", buf); value_decref(buf);
+    /* Mutex+cv id so cross-thread send/recv blocks correctly. */
+    int id = xs_chan_alloc();
+    Value *id_v = xs_int(id);
+    map_set(ch->map, "_chan_id", id_v); value_decref(id_v);
     int64_t cap = (argc >= 1 && VAL_TAG(args[0]) == XS_INT) ? VAL_INT(args[0]) : 0;
     Value *cap_v = xs_int(cap);
     map_set(ch->map, "_cap", cap_v); value_decref(cap_v);
@@ -1101,10 +1109,100 @@ void vm_free(VM *vm) {
         free(vm->eff_stack[i].frames);
     }
     free(vm->eff_stack);
+    for (int i = 0; i < vm->nursery_stack_cap; i++) free(vm->nursery_stack[i]);
+    free(vm->nursery_stack);
+    free(vm->nursery_lens);
+    free(vm->nursery_caps);
     if (vm->globals) { map_free(vm->globals); vm->globals = NULL; }
     free(vm->stack);
     free(vm->frames);
     free(vm);
+}
+
+/* Worker VM for spawn: shares the parent's globals map (so stdlib /
+   user-defined globals stay live without redoing register_stdlib) but
+   keeps its own stack, frames, and effect continuations. The shared
+   pointer is borrowed -- vm_free_child clears it before vm_free runs so
+   the parent retains ownership. */
+VM *vm_new_child(VM *parent) {
+    /* singletons are already initialised by the main thread; calling
+       value_init_singletons here would race the parent and leak. */
+    VM *vm = xs_malloc(sizeof *vm);
+    memset(vm, 0, sizeof *vm);
+    vm->stack_cap  = VM_STACK_INIT;
+    vm->stack      = xs_malloc(vm->stack_cap * sizeof(Value *));
+    memset(vm->stack, 0, vm->stack_cap * sizeof(Value *));
+    vm->sp         = vm->stack;
+    vm->stack_soft_limit = vm->stack + (vm->stack_cap - 16);
+    vm->frames_cap = VM_FRAMES_INIT;
+    vm->frames     = xs_malloc(vm->frames_cap * sizeof(CallFrame));
+    memset(vm->frames, 0, vm->frames_cap * sizeof(CallFrame));
+    vm->globals    = parent ? parent->globals : map_new();
+    vm->n_tasks    = 0;
+    vm->pending_throw_frame = -1;
+    return vm;
+}
+
+void vm_free_child(VM *vm) {
+    if (!vm) return;
+    /* Don't free shared globals; the parent owns them. */
+    vm->globals = NULL;
+    vm->eff_cont.valid = 0;
+    eff_cont_release_snapshot(&vm->eff_cont);
+    free(vm->eff_cont.frames);
+    for (int i = 0; i < vm->eff_stack_count; i++) {
+        eff_cont_release_snapshot(&vm->eff_stack[i]);
+        free(vm->eff_stack[i].frames);
+    }
+    free(vm->eff_stack);
+    for (int i = 0; i < vm->nursery_stack_cap; i++) free(vm->nursery_stack[i]);
+    free(vm->nursery_stack);
+    free(vm->nursery_lens);
+    free(vm->nursery_caps);
+    while (vm->sp > vm->stack) value_decref(*--vm->sp);
+    free(vm->stack);
+    free(vm->frames);
+    free(vm);
+}
+
+/* Public wrapper around the file-static vm_invoke so vm_thread.c can
+   drive the same dispatch path the in-process callbacks use. The fresh
+   worker VM starts with main_called=0, which would make OP_RETURN at
+   the top frame try to dispatch a "main" entry point on the way out;
+   pre-mark it as already called so the spawn body's RETURN unwinds
+   cleanly back to us. We also push a sentinel frame so vm_dispatch's
+   "frame_count <= stop_frame" check at the spawn body's RETURN treats
+   the spawn frame as a nested call (PUSH result + return) instead of
+   the top-level "decref the trailing main return" path. */
+Value *vm_invoke_public(VM *vm, Value *fn, Value **args, int argc) {
+    VM *saved_invoke = g_vm_for_invoke;
+    VM *saved_plugin = g_plugin_vm;
+    g_vm_for_invoke = vm;
+    g_plugin_vm = vm;
+    int saved_main_called = vm->main_called;
+    vm->main_called = 1;
+
+    /* Sentinel frame so the spawn body's OP_RETURN sees a non-empty
+       call stack underneath and pushes its result back instead of
+       falling into the "main entry" cleanup. */
+    if (vm->frame_count >= vm->frames_cap) {
+        int new_cap = vm->frames_cap > 0 ? vm->frames_cap * 2 : 64;
+        vm->frames = realloc(vm->frames, new_cap * sizeof(CallFrame));
+        memset(vm->frames + vm->frames_cap, 0,
+               (size_t)(new_cap - vm->frames_cap) * sizeof(CallFrame));
+        vm->frames_cap = new_cap;
+    }
+    CallFrame *sentinel = &vm->frames[vm->frame_count++];
+    memset(sentinel, 0, sizeof(*sentinel));
+    sentinel->base = vm->sp;
+
+    Value *r = vm_invoke(vm, fn, args, argc);
+
+    vm->frame_count--;     /* drop the sentinel */
+    vm->main_called = saved_main_called;
+    g_vm_for_invoke = saved_invoke;
+    g_plugin_vm = saved_plugin;
+    return r;
 }
 
 void vm_grow_stack(VM *vm) {
@@ -1377,6 +1475,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 vm->frame_count--;
             }
             if (!handled) {
+                if (vm->is_thread_worker) {
+                    /* Capture for the spawn-thread's future to surface
+                       on await; otherwise stderr races between threads
+                       and an unjoined spawn would print every time. */
+                    vm->uncaught_thread_exc = exc;
+                    return 1;
+                }
                 char *s = value_str(exc);
                 fprintf(stderr, "uncaught: %s\n", s);
                 free(s);
@@ -2551,60 +2656,21 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"send")==0 && mc_argc>=1) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        Value *buf = map_get(mc_obj->map, "_buf");
-                        if (buf && VAL_TAG(buf) == XS_ARRAY) array_push(buf->arr, value_incref(mc_args[0]));
+                        extern Value *xs_chan_send(Value *, Value *);
+                        Value *r = xs_chan_send(mc_obj, mc_args[0]);
+                        if (r) value_decref(r);
                         mc_result = value_incref(XS_NULL_VAL);
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"recv")==0 || strcmp(mc_name,"try_recv")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        Value *buf = map_get(mc_obj->map, "_buf");
                         int nonblocking = (mc_name[0] == 't');
-                        if (buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len > 0) {
-                            mc_result = value_incref(buf->arr->items[0]);
-                            value_decref(buf->arr->items[0]);
-                            for (int j = 1; j < buf->arr->len; j++) buf->arr->items[j-1] = buf->arr->items[j];
-                            buf->arr->len--;
-                        } else if (nonblocking) {
-                            mc_result = value_incref(XS_NULL_VAL);
+                        if (nonblocking) {
+                            extern Value *xs_chan_try_recv(Value *);
+                            mc_result = xs_chan_try_recv(mc_obj);
                         } else {
-                            /* No cooperative scheduler: throw instead of
-                               silently returning null so the caller does
-                               not mistake "nothing to read" for data. */
-                            Value *err = xs_map_new();
-                            Value *kind = xs_str("ChannelEmpty");
-                            map_set(err->map, "kind", kind); value_decref(kind);
-                            Value *msg = xs_str("recv on empty channel would deadlock "
-                                                "(no concurrent sender); use try_recv() for non-blocking");
-                            map_set(err->map, "message", msg); value_decref(msg);
-                            /* clean up stack: args + callee */
-                            for (int j = 0; j < mc_argc; j++) value_decref(POP());
-                            value_decref(POP());
-                            /* inline unwind to nearest try */
-                            int handled = 0;
-                            while (vm->frame_count > 0) {
-                                CallFrame *cf = &vm->frames[vm->frame_count - 1];
-                                if (cf->try_depth > 0) {
-                                    TryEntry *te = &cf->try_stack[--cf->try_depth];
-                                    while (vm->sp > te->stack_top) value_decref(POP());
-                                    PUSH(err);
-                                    cf->ip = te->catch_ip;
-                                    frame = cf;
-                                    handled = 1;
-                                    break;
-                                }
-                                upvalue_close_all(&vm->open_upvalues, cf->base);
-                                while (vm->sp > cf->base) value_decref(POP());
-                                value_decref(cf->closure_val);
-                                vm->frame_count--;
-                            }
-                            if (!handled) {
-                                fprintf(stderr, "uncaught ChannelEmpty: %s\n",
-                                        "recv on empty channel");
-                                value_decref(err);
-                                return 1;
-                            }
-                            break; /* exit the OP_METHOD_CALL switch case */
+                            extern Value *xs_chan_recv(Value *, struct Interp *);
+                            mc_result = xs_chan_recv(mc_obj, NULL);
                         }
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"is_empty")==0) {
@@ -4187,6 +4253,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 vm->frame_count--;
             }
             if (!handled) {
+                if (vm->is_thread_worker) {
+                    vm->uncaught_thread_exc = exc;
+                    return 1;
+                }
                 char *s = value_str(exc);
                 fprintf(stderr, "uncaught: %s\n", s);
                 free(s);
@@ -4462,7 +4532,40 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_AWAIT: {
             Value *task = POP();
             if (VAL_TAG(task) == XS_MAP) {
+                Value *kind = map_get(task->map, "_kind");
                 Value *tid_val = map_get(task->map, "_task_id");
+                /* Threaded spawn future: kind=="task" + _task_id refers to
+                   the OS-thread task table. Block on its condvar until
+                   the worker finishes, surfacing any captured throw. */
+                if (kind && VAL_TAG(kind) == XS_STR && strcmp(kind->s, "task") == 0
+                    && tid_val && VAL_TAG(tid_val) == XS_INT) {
+                    extern Value *vm_await_task(int task_id, int *errored_out, Value **err_out);
+                    int tid = (int)VAL_INT(tid_val);
+                    int errored = 0;
+                    Value *err = NULL;
+                    Value *r = vm_await_task(tid, &errored, &err);
+                    /* Mirror the result into the future map so callers
+                       can read _status / _result after await. */
+                    {
+                        Value *sv = xs_str(errored ? "error" : "done");
+                        map_set(task->map, "_status", sv); value_decref(sv);
+                    }
+                    if (errored && err) {
+                        map_set(task->map, "_error", err);
+                        value_decref(task);
+                        if (r) value_decref(r);
+                        /* Re-raise the captured throw on the awaiter's
+                           VM so try/catch around the await sees it. */
+                        g_xs_pending_throw = err;
+                        break;
+                    }
+                    if (err) value_decref(err);
+                    if (r) map_set(task->map, "_result", r);
+                    else { Value *nv = value_incref(XS_NULL_VAL); map_set(task->map, "_result", nv); value_decref(nv); }
+                    value_decref(task);
+                    PUSH(r ? r : value_incref(XS_NULL_VAL));
+                    break;
+                }
                 if (tid_val && VAL_TAG(tid_val) == XS_INT) {
                     int tid = (int)VAL_INT(tid_val);
                     for (int t = 0; t <= tid && t < vm->n_tasks; t++) {
@@ -4567,77 +4670,62 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_SPAWN: {
             Value *fn = POP();
-            Value *task = xs_map_new();
-            if (VAL_TAG(fn) == XS_NATIVE || VAL_TAG(fn) == XS_CLOSURE) {
-                /* immediately execute spawn blocks */
-                if (VAL_TAG(fn) == XS_CLOSURE) {
-                    int cl_arity = fn->cl->proto->arity;
-                    if (cl_arity < 0) cl_arity = -(cl_arity + 1);
-                    if (cl_arity == 0) {
-                        Value *result = vm_invoke(vm, fn, NULL, 0);
-                        frame = FRAME;
-                        /* check if result is an actor: unwrap as actor instance */
-                        if (result && VAL_TAG(result) == XS_MAP && map_get(result->map, "__actor_name")) {
-                            Value *actor_inst = xs_map_new();
-                            Value *state = map_get(result->map, "__state");
-                            if (state && VAL_TAG(state) == XS_MAP)
-                                for (int aj = 0; aj < state->map->cap; aj++)
-                                    if (state->map->keys[aj])
-                                        map_set(actor_inst->map, state->map->keys[aj],
-                                                value_incref(state->map->vals[aj]));
-                            Value *methods = map_get(result->map, "__methods");
-                            if (methods && VAL_TAG(methods) == XS_MAP)
-                                map_set(actor_inst->map, "__methods", value_incref(methods));
-                            Value *aname = map_get(result->map, "__actor_name");
-                            if (aname) map_set(actor_inst->map, "__type", value_incref(aname));
-                            value_decref(result);
-                            value_decref(task);
-                            value_decref(fn);
-                            PUSH(actor_inst);
-                            break;
-                        }
-                        { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
-                        map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
-                        if (result) value_decref(result);
-                    } else {
-                        { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
-                        map_set(task->map, "_result", value_incref(XS_NULL_VAL));
-                    }
-                } else if (VAL_TAG(fn) == XS_NATIVE) {
-                    Value *result = fn->native(NULL, NULL, 0);
-                    { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
-                    map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
-                    if (result) value_decref(result);
-                }
-                if (1) { /* immediate execution done above, skip old deferred path */
-                } else {
-                    if (VAL_TAG(fn) == XS_NATIVE) {
-                        Value *result = fn->native(NULL, NULL, 0);
-                        { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
-                        map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
-                        if (result) value_decref(result);
-                    } else {
-                        int cl_arity = fn->cl->proto->arity;
-                        if (cl_arity < 0) cl_arity = -(cl_arity + 1);
-                        if (cl_arity == 0) {
-                            PUSH(task);
-                            value_incref(fn);
-                            if (call_frame_push(vm, fn, 0) == 0) {
-                                value_decref(fn);
-                                frame = FRAME;
-                                vm->spawn_task = value_incref(task);
-                                break;
+            /* The closure path runs the body on a real OS thread so two
+               sleep / IO bound spawns actually overlap. Synchronous
+               execution is wrong even ignoring parallelism: it lets a
+               throw inside the body unwind all the way out and crash the
+               parent. The thread captures any uncaught error on the
+               returned future instead. */
+            if (VAL_TAG(fn) == XS_CLOSURE) {
+                int cl_arity = fn->cl->proto->arity;
+                if (cl_arity < 0) cl_arity = -(cl_arity + 1);
+                if (cl_arity == 0) {
+                    extern Value *vm_spawn_real(VM *vm, Value *closure);
+                    Value *fut = vm_spawn_real(vm, fn);
+                    value_decref(fn);
+                    /* Register the new task with the enclosing nursery (if
+                       any) so its OP_NURSERY_END will join on it. */
+                    if (vm->nursery_depth > 0 && fut && VAL_TAG(fut) == XS_MAP) {
+                        Value *tid_v = map_get(fut->map, "_task_id");
+                        if (tid_v && VAL_TAG(tid_v) == XS_INT) {
+                            int d = vm->nursery_depth - 1;
+                            if (vm->nursery_lens[d] >= vm->nursery_caps[d]) {
+                                int nc = vm->nursery_caps[d] > 0 ? vm->nursery_caps[d] * 2 : 16;
+                                vm->nursery_stack[d] = realloc(vm->nursery_stack[d], nc * sizeof(int));
+                                vm->nursery_caps[d] = nc;
                             }
-                            value_decref(fn);
-                            Value *saved_task = POP();
-                            { Value *sv = xs_str("error"); map_set(saved_task->map, "_status", sv); value_decref(sv); }
-                            PUSH(saved_task);
-                        } else {
-                            { Value *sv = xs_str("pending"); map_set(task->map, "_status", sv); value_decref(sv); }
-                            map_set(task->map, "_fn", fn);
+                            vm->nursery_stack[d][vm->nursery_lens[d]++] = (int)VAL_INT(tid_v);
                         }
                     }
+                    PUSH(fut);
+                    break;
                 }
+                /* Closures with required arguments can't be spawned with
+                   no caller-supplied args; preserve the historical
+                   "future with no body" placeholder so the remaining
+                   tests that exercise this path don't lose semantics. */
+                Value *task = xs_map_new();
+                { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
+                map_set(task->map, "_result", value_incref(XS_NULL_VAL));
+                value_decref(fn);
+                PUSH(task);
+                break;
+            }
+            if (VAL_TAG(fn) == XS_NATIVE) {
+                /* Native callables bypass the threaded path: they're
+                   typically used as actor message handlers and rely on
+                   running synchronously under the parent's GIL. */
+                Value *task = xs_map_new();
+                Value *result = fn->native(NULL, NULL, 0);
+                { Value *sv = xs_str("done"); map_set(task->map, "_status", sv); value_decref(sv); }
+                map_set(task->map, "_result", result ? result : value_incref(XS_NULL_VAL));
+                if (result) value_decref(result);
+                value_decref(fn);
+                PUSH(task);
+                break;
+            }
+            Value *task = xs_map_new();
+            if (0) {
             } else if (VAL_TAG(fn) == XS_MAP && map_get(fn->map, "__actor_name")) {
                 /* spawn an actor: create instance with state + methods merged */
                 value_decref(task);
@@ -4664,6 +4752,48 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
             value_decref(fn);
             PUSH(task);
+            break;
+        }
+
+        case OP_NURSERY_BEGIN: {
+            if (vm->nursery_depth >= vm->nursery_stack_cap) {
+                int newcap = vm->nursery_stack_cap > 0 ? vm->nursery_stack_cap * 2 : 4;
+                vm->nursery_stack = realloc(vm->nursery_stack, newcap * sizeof(int *));
+                vm->nursery_lens  = realloc(vm->nursery_lens, newcap * sizeof(int));
+                vm->nursery_caps  = realloc(vm->nursery_caps, newcap * sizeof(int));
+                for (int i = vm->nursery_stack_cap; i < newcap; i++) {
+                    vm->nursery_stack[i] = NULL;
+                    vm->nursery_lens[i] = 0;
+                    vm->nursery_caps[i] = 0;
+                }
+                vm->nursery_stack_cap = newcap;
+            }
+            vm->nursery_lens[vm->nursery_depth] = 0;
+            vm->nursery_depth++;
+            break;
+        }
+
+        case OP_NURSERY_END: {
+            if (vm->nursery_depth <= 0) break;
+            int d = vm->nursery_depth - 1;
+            int *ids = vm->nursery_stack[d];
+            int n = vm->nursery_lens[d];
+            extern Value *vm_await_task(int task_id, int *errored_out, Value **err_out);
+            for (int i = 0; i < n; i++) {
+                int err = 0;
+                Value *e = NULL;
+                Value *r = vm_await_task(ids[i], &err, &e);
+                if (r) value_decref(r);
+                if (err && e) {
+                    /* Surface the first error encountered as a throw on
+                       the parent. The remaining tasks still got drained
+                       so we don't leave orphans behind. */
+                    if (!g_xs_pending_throw) g_xs_pending_throw = e;
+                    else value_decref(e);
+                } else if (e) value_decref(e);
+            }
+            vm->nursery_lens[d] = 0;
+            vm->nursery_depth--;
             break;
         }
 

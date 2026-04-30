@@ -124,6 +124,20 @@ typedef struct VM {
        on CallFrame so the JIT's hardcoded FRAME_SIZE stays stable. */
     int         pending_throw_frame;
     Value      *pending_throw_exc;
+    /* When non-zero, an unhandled OP_THROW captures the exception value
+       on this VM (uncaught_thread_exc) instead of printing it to stderr.
+       Used by spawn workers so a throw can be surfaced via the future. */
+    int         is_thread_worker;
+    Value      *uncaught_thread_exc;
+    /* Stack of in-flight nurseries. Each entry collects the spawn task
+       ids registered while its body was executing; OP_NURSERY_END awaits
+       every id then drops the entry. Lets `nursery { spawn x; spawn y; }`
+       run children in parallel and still join before the block exits. */
+    int       **nursery_stack;
+    int        *nursery_lens;
+    int        *nursery_caps;
+    int         nursery_depth;
+    int         nursery_stack_cap;
 } VM;
 
 VM  *vm_new(void);

@@ -787,7 +787,12 @@ static void sigint_handler(int sig) {
     exit(130);
 }
 
+extern void vm_drain_tasks(void);
+
 static void xs_shutdown(void) {
+    /* Wait for any unjoined spawn workers so a fire-and-forget
+       spawn { ... } actually completes before the process exits. */
+    vm_drain_tasks();
     /* Release process-lifetime allocations so leak checkers don't
        flag the pinned value singletons, the GC nodemap, and the int
        recycler freelist. Order matters: drop GC side-tables before
@@ -1192,6 +1197,7 @@ int main(int argc, char **argv) {
                     }
                     VM *vm = vm_new();
                     vm_run(vm, proto);
+                    vm_drain_tasks();
                     vm_free(vm);
                     proto_free(proto);
                     return 0;
@@ -2487,6 +2493,7 @@ run_file:;
                 if (fn) {
                     VM *vm = vm_new();
                     int jit_rc = vm_run_with(vm, proto, fn);
+                    vm_drain_tasks();
                     vm_free(vm);
                     jit_free(jit);
                     proto_free(proto);
@@ -2506,6 +2513,9 @@ run_file:;
 #endif
         VM *vm = vm_new();
         int rc = vm_run(vm, proto);
+        /* Drain unjoined spawn workers before freeing the parent VM,
+           otherwise their borrowed globals pointer becomes dangling. */
+        vm_drain_tasks();
         vm_free(vm);
         proto_free(proto);
         node_free(program);

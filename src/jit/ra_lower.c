@@ -155,6 +155,8 @@ static int op_supported(Opcode op) {
         case OP_EFFECT_HANDLE:
         case OP_DEFER_PUSH:
         case OP_DEFER_RUN:
+        case OP_NURSERY_BEGIN:
+        case OP_NURSERY_END:
             return 1;
         default:
             return 0;

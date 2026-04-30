@@ -58,9 +58,10 @@ static Value *native_time_sleep_ms(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1) return value_incref(XS_NULL_VAL);
     int64_t ms=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
-    struct timespec ts;
-    ts.tv_sec=ms/1000; ts.tv_nsec=(ms%1000)*1000000L;
-    nanosleep(&ts,NULL);
+    if (ms <= 0) return value_incref(XS_NULL_VAL);
+    /* Goes through xs_sleep_seconds so the GIL drops while we wait,
+       letting parallel spawn workers actually progress in parallel. */
+    xs_sleep_seconds((double)ms / 1000.0);
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_time_format(Interp *ig, Value **a, int n) {

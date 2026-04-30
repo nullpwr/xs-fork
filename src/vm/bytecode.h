@@ -121,6 +121,12 @@ typedef enum {
                             so that loop-iteration locals captured by a
                             closure get their own value. */
 
+    OP_NURSERY_BEGIN, /* push a fresh task-id collector onto the nursery
+                         stack. spawn ops inside the body register their
+                         task ids on the topmost collector. */
+    OP_NURSERY_END,   /* await every task collected since BEGIN, then pop
+                         the collector. */
+
     OP__MAX
 } Opcode;
 
