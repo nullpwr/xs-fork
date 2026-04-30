@@ -12,6 +12,7 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <errno.h>
 #include <time.h>
 #include "core/xs_regex.h"
 
@@ -123,9 +124,48 @@ static Value *vm_int_fn(Interp *interp, Value **args, int argc) {
     if (argc < 1) return xs_int(0);
     Value *v = args[0];
     if (VAL_TAG(v) == XS_INT)   return xs_int(VAL_INT(v));
-    if (VAL_TAG(v) == XS_FLOAT) return xs_int((int64_t)v->f);
-    if (VAL_TAG(v) == XS_STR)   return xs_int(atoll(v->s));
-    return xs_int(0);
+    if (VAL_TAG(v) == XS_BOOL)  return xs_int(VAL_INT(v) ? 1 : 0);
+    if (VAL_TAG(v) == XS_FLOAT) {
+        /* NaN -> exposed LLONG_MIN under C cast. Reject explicitly. */
+        if (isnan(v->f) || isinf(v->f)) {
+            xs_runtime_error(span_zero(), "TypeError", NULL,
+                             "int(): can't convert non-finite float");
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_int((int64_t)v->f);
+    }
+    if (VAL_TAG(v) == XS_STR) {
+        const char *s = v->s;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): empty string");
+            return value_incref(XS_NULL_VAL);
+        }
+        char *end = NULL;
+        errno = 0;
+        long long iv = strtoll(s, &end, 0);
+        if (end == s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): invalid literal: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        while (end && (*end == ' ' || *end == '\t')) end++;
+        if (end && *end) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): trailing characters in '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        if (errno == ERANGE) {
+            xs_runtime_error(span_zero(), "OverflowError", NULL,
+                             "int(): value out of range: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_int((int64_t)iv);
+    }
+    xs_runtime_error(span_zero(), "TypeError", NULL,
+                     "int(): cannot convert from this type");
+    return value_incref(XS_NULL_VAL);
 }
 
 static Value *vm_float_fn(Interp *interp, Value **args, int argc) {
@@ -133,9 +173,34 @@ static Value *vm_float_fn(Interp *interp, Value **args, int argc) {
     if (argc < 1) return xs_float(0.0);
     Value *v = args[0];
     if (VAL_TAG(v) == XS_INT)   return xs_float((double)VAL_INT(v));
+    if (VAL_TAG(v) == XS_BOOL)  return xs_float(VAL_INT(v) ? 1.0 : 0.0);
     if (VAL_TAG(v) == XS_FLOAT) return xs_float(v->f);
-    if (VAL_TAG(v) == XS_STR)   return xs_float(atof(v->s));
-    return xs_float(0.0);
+    if (VAL_TAG(v) == XS_STR) {
+        const char *s = v->s;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): empty string");
+            return value_incref(XS_NULL_VAL);
+        }
+        char *end = NULL;
+        double d = strtod(s, &end);
+        if (end == s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): invalid literal: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        while (end && (*end == ' ' || *end == '\t')) end++;
+        if (end && *end) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): trailing characters in '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_float(d);
+    }
+    xs_runtime_error(span_zero(), "TypeError", NULL,
+                     "float(): cannot convert from this type");
+    return value_incref(XS_NULL_VAL);
 }
 
 static Value *vm_type(Interp *interp, Value **args, int argc) {
@@ -1667,14 +1732,19 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(a) == XS_MAP && (r = vm_try_map_op(vm, a, "*", b)) != NULL) {
             } else if (VAL_TAG(a) == XS_STRUCT_VAL && (r = vm_try_struct_op(vm, a, "*", b)) != NULL) {
             } else if (VAL_TAG(b) == XS_MAP && (r = vm_try_map_op(vm, b, "*", a)) != NULL) {
-            } else if (VAL_TAG(a)==XS_STR && VAL_TAG(b)==XS_INT) {
-                int64_t count = VAL_INT(b);
+            } else if ((VAL_TAG(a)==XS_STR && VAL_TAG(b)==XS_INT)
+                    || (VAL_TAG(b)==XS_STR && VAL_TAG(a)==XS_INT)) {
+                /* Make repetition commutative: 3 * "ab" should match
+                   "ab" * 3 since users expect it to mirror Python. */
+                Value *sv = VAL_TAG(a)==XS_STR ? a : b;
+                Value *iv = VAL_TAG(a)==XS_STR ? b : a;
+                int64_t count = VAL_INT(iv);
                 if (count <= 0) { r = xs_str(""); }
                 else {
-                    size_t slen = strlen(a->s);
+                    size_t slen = strlen(sv->s);
                     char *buf = xs_malloc(slen * (size_t)count + 1);
                     buf[0] = '\0';
-                    for (int64_t ci = 0; ci < count; ci++) memcpy(buf + slen * (size_t)ci, a->s, slen);
+                    for (int64_t ci = 0; ci < count; ci++) memcpy(buf + slen * (size_t)ci, sv->s, slen);
                     buf[slen * (size_t)count] = '\0';
                     r = xs_str(buf); free(buf);
                 }
@@ -1903,12 +1973,39 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             Value *val = POP(), *idx = POP(), *col = POP();
             if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_INT) {
                 int64_t i = VAL_INT(idx);
-                if (i>=0 && i<col->arr->len) {
+                int64_t n = col->arr->len;
+                /* allow Python-style negative indexing on assign too */
+                if (i < 0) i += n;
+                if (i>=0 && i<n) {
                     value_decref(col->arr->items[i]);
                     col->arr->items[i] = value_incref(val);
+                } else {
+                    /* Out-of-bounds set used to silently no-op, masking
+                       bugs (e.g. growing the array via assign at idx==N
+                       was expected but not supported). Raise instead. */
+                    int64_t orig_idx = VAL_INT(idx);
+                    value_decref(val); value_decref(idx); value_decref(col);
+                    xs_runtime_error(span_zero(), "IndexError", NULL,
+                                     "index %lld out of bounds (len %lld)",
+                                     (long long)orig_idx, (long long)n);
+                    break;
                 }
-            } else if (VAL_TAG(col)==XS_MAP && VAL_TAG(idx)==XS_STR) {
-                map_set(col->map, idx->s, val);
+            } else if (VAL_TAG(col)==XS_MAP && (VAL_TAG(idx)==XS_STR || VAL_TAG(idx)==XS_INT
+                                                || VAL_TAG(idx)==XS_BOOL || VAL_TAG(idx)==XS_NULL
+                                                || VAL_TAG(idx)==XS_FLOAT)) {
+                if (VAL_TAG(idx)==XS_STR) {
+                    map_set(col->map, idx->s, val);
+                } else {
+                    /* Stringify non-string keys so the literal-vs-runtime
+                       asymmetry (`m[1]=...` vs `#{1: "one"}`) matches up:
+                       both produce the stringified key. */
+                    char kbuf[64];
+                    if (VAL_TAG(idx)==XS_INT) snprintf(kbuf, sizeof kbuf, "%lld", (long long)VAL_INT(idx));
+                    else if (VAL_TAG(idx)==XS_BOOL) snprintf(kbuf, sizeof kbuf, "%s", VAL_INT(idx)?"true":"false");
+                    else if (VAL_TAG(idx)==XS_NULL) snprintf(kbuf, sizeof kbuf, "null");
+                    else snprintf(kbuf, sizeof kbuf, "%g", idx->f);
+                    map_set(col->map, kbuf, val);
+                }
             }
             value_decref(val); value_decref(idx); value_decref(col); break;
         }
@@ -3151,9 +3248,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         buf[n2]='\0'; mc_result=xs_str(buf); free(buf);
                     }
                 } else if (strcmp(mc_name,"reverse")==0) {
+                    /* Walk codepoints in reverse so multi-byte UTF-8
+                       sequences stay intact (byte-level reverse breaks them). */
                     char *r=xs_malloc((size_t)slen+1);
-                    for(int j=0;j<slen;j++) r[j]=s[slen-1-j];
-                    r[slen]='\0'; mc_result=xs_str(r); free(r);
+                    int wpos = 0;
+                    int i2 = slen;
+                    while (i2 > 0) {
+                        int start = i2 - 1;
+                        while (start > 0 && (((unsigned char)s[start] & 0xC0) == 0x80)) start--;
+                        int n2 = i2 - start;
+                        memcpy(r + wpos, s + start, (size_t)n2);
+                        wpos += n2;
+                        i2 = start;
+                    }
+                    r[wpos]='\0'; mc_result=xs_str(r); free(r);
                 } else if (strcmp(mc_name,"join")==0&&mc_argc>=1) {
                     /* "sep".join(arr) */
                     if(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE){
@@ -4199,8 +4307,56 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_BOR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) | VAL_INT(b))); value_decref(a);value_decref(b); break; }
         case OP_BXOR: { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) ^ VAL_INT(b))); value_decref(a);value_decref(b); break; }
         case OP_BNOT: { Value *a=POP(); PUSH(xs_int(~VAL_INT(a))); value_decref(a); break; }
-        case OP_SHL:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) << (VAL_INT(b) & 63))); value_decref(a);value_decref(b); break; }
-        case OP_SHR:  { Value *b=POP(),*a=POP(); PUSH(xs_int(VAL_INT(a) >> (VAL_INT(b) & 63))); value_decref(a);value_decref(b); break; }
+        case OP_SHL:  {
+            Value *b=POP(),*a=POP();
+            int64_t n2 = VAL_INT(b);
+            if (n2 < 0) {
+                value_decref(a); value_decref(b);
+                xs_runtime_error(span_zero(), "ValueError", NULL,
+                                 "shift count cannot be negative");
+                PUSH(value_incref(XS_NULL_VAL));
+                break;
+            }
+            if (n2 >= 64) {
+                /* Result is logically 0 (or overflowed bigint); avoid
+                   the C-undefined `<< 64+` and just emit 0. */
+                value_decref(a); value_decref(b);
+                PUSH(xs_int(0));
+                break;
+            }
+            int64_t av = VAL_INT(a);
+            /* Detect signed overflow before doing the shift; promote to
+               bigint when the result wouldn't fit in i64. */
+            if (n2 > 0 && (av >> (63 - n2)) != 0 && (av >> (63 - n2)) != -1) {
+                XSBigInt *bi = bigint_from_i64(av);
+                XSBigInt *out = bigint_shl(bi, (int)n2);
+                bigint_free(bi);
+                PUSH(xs_bigint_val(out));
+            } else {
+                PUSH(xs_int(av << n2));
+            }
+            value_decref(a); value_decref(b); break;
+        }
+        case OP_SHR:  {
+            Value *b=POP(),*a=POP();
+            int64_t n2 = VAL_INT(b);
+            if (n2 < 0) {
+                value_decref(a); value_decref(b);
+                xs_runtime_error(span_zero(), "ValueError", NULL,
+                                 "shift count cannot be negative");
+                PUSH(value_incref(XS_NULL_VAL));
+                break;
+            }
+            if (n2 >= 64) {
+                /* Arithmetic shift: -1 stays -1, otherwise 0. */
+                int64_t av = VAL_INT(a);
+                value_decref(a); value_decref(b);
+                PUSH(xs_int(av < 0 ? -1 : 0));
+                break;
+            }
+            PUSH(xs_int(VAL_INT(a) >> n2));
+            value_decref(a); value_decref(b); break;
+        }
 
         case OP_TRY_BEGIN: {
             if (frame->try_depth < VM_TRY_STACK_MAX) {

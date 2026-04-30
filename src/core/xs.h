@@ -77,6 +77,12 @@ struct XSMap {
     int      len;
     int      cap;
     int      refcount;
+    /* Insertion-order index list. order[i] is the bucket-position of
+       the i-th key that was inserted (and not yet deleted). Iteration
+       walks `order[0..len)` instead of the bucket array so users see
+       the keys in the order they were added rather than hash order. */
+    int     *order;
+    int      order_cap;
 };
 
 struct XSFunc {

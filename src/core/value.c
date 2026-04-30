@@ -778,6 +778,8 @@ XSMap *map_new(void) {
     m->cap  = 8;
     m->keys = xs_calloc(m->cap, sizeof(char*));
     m->vals = xs_calloc(m->cap, sizeof(Value*));
+    m->order_cap = 8;
+    m->order = xs_calloc(m->order_cap, sizeof(int));
     return m;
 }
 
@@ -792,18 +794,26 @@ static void map_grow(XSMap *m) {
     int   old_cap  = m->cap;
     char  **old_k  = m->keys;
     Value **old_v  = m->vals;
+    int   *old_order = m->order;
+    int    old_len = m->len;
     m->cap  = old_cap * 2;
     m->keys = xs_calloc(m->cap, sizeof(char*));
     m->vals = xs_calloc(m->cap, sizeof(Value*));
     m->len  = 0;
-    for (int i = 0; i < old_cap; i++) {
-        if (!old_k[i]) continue;
-        map_set(m, old_k[i], old_v[i]);
-        free(old_k[i]);
-        value_decref(old_v[i]);
+    /* Reinsert in original insertion order so the new bucket indices
+       end up appended to m->order in the same sequence. The order[]
+       buffer itself can be reused -- map_set rebuilds it. */
+    m->order = xs_calloc(m->order_cap, sizeof(int));
+    for (int oi = 0; oi < old_len; oi++) {
+        int bi = old_order[oi];
+        if (!old_k[bi]) continue;
+        map_set(m, old_k[bi], old_v[bi]);
+        free(old_k[bi]);
+        value_decref(old_v[bi]);
     }
     free(old_k);
     free(old_v);
+    free(old_order);
 }
 
 void map_set(XSMap *m, const char *k, Value *v) {
@@ -819,6 +829,11 @@ void map_set(XSMap *m, const char *k, Value *v) {
     }
     m->keys[idx] = xs_strdup(k);
     m->vals[idx] = value_incref(v);
+    if (m->len >= m->order_cap) {
+        m->order_cap = m->order_cap > 0 ? m->order_cap * 2 : 8;
+        m->order = xs_realloc(m->order, m->order_cap * sizeof(int));
+    }
+    m->order[m->len] = (int)idx;
     m->len++;
 }
 
@@ -850,6 +865,15 @@ void map_del(XSMap *m, const char *k) {
             value_decref(m->vals[idx]);
             m->keys[idx] = NULL;
             m->vals[idx] = NULL;
+            /* Drop this slot from order[]. Linear scan is fine for
+               typical map sizes; preserves the relative order of the
+               remaining keys. */
+            for (int oi = 0; oi < m->len; oi++) {
+                if (m->order[oi] == (int)idx) {
+                    for (int j = oi; j + 1 < m->len; j++) m->order[j] = m->order[j + 1];
+                    break;
+                }
+            }
             m->len--;
             return;
         }
@@ -861,8 +885,12 @@ char **map_keys(XSMap *m, int *len_out) {
     if (!m) { *len_out = 0; return NULL; }
     char **ks = xs_malloc(sizeof(char*) * (m->len + 1));
     int n = 0;
-    for (int i = 0; i < m->cap; i++)
-        if (m->keys[i]) ks[n++] = xs_strdup(m->keys[i]);
+    /* Walk insertion order so callers see keys in the same sequence
+       they were assigned, not hash-bucket order. */
+    for (int oi = 0; oi < m->len; oi++) {
+        int bi = m->order[oi];
+        if (bi >= 0 && bi < m->cap && m->keys[bi]) ks[n++] = xs_strdup(m->keys[bi]);
+    }
     ks[n] = NULL;
     *len_out = n;
     return ks;
@@ -877,6 +905,7 @@ void map_free(XSMap *m) {
     }
     free(m->keys);
     free(m->vals);
+    free(m->order);
     free(m);
 }
 

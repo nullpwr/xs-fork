@@ -181,35 +181,105 @@ static char *sb_finish(StrBuf *sb) {
 }
 
 /* escape sequences */
-static char lex_escape(Lexer *l) {
+/* Encode `cp` as UTF-8 into `sb`. Used by `\u` and `\u{...}` escape
+   handling so multi-byte characters land in the string body intact. */
+static void sb_push_utf8(StrBuf *sb, int cp) {
+    if (cp < 0)            return;
+    if (cp < 0x80)         { sb_push(sb, (char)cp); return; }
+    if (cp < 0x800) {
+        sb_push(sb, (char)(0xC0 | (cp >> 6)));
+        sb_push(sb, (char)(0x80 | (cp & 0x3F)));
+        return;
+    }
+    if (cp < 0x10000) {
+        sb_push(sb, (char)(0xE0 | (cp >> 12)));
+        sb_push(sb, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        sb_push(sb, (char)(0x80 | (cp & 0x3F)));
+        return;
+    }
+    if (cp < 0x110000) {
+        sb_push(sb, (char)(0xF0 | (cp >> 18)));
+        sb_push(sb, (char)(0x80 | ((cp >> 12) & 0x3F)));
+        sb_push(sb, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        sb_push(sb, (char)(0x80 | (cp & 0x3F)));
+        return;
+    }
+    /* Out-of-range: drop. Callers won't see this for valid \u escapes. */
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Resolve a single backslash-escape into the destination buffer. The
+   slash itself has already been consumed. Most escapes emit one byte
+   via sb_push; \u and \u{...} emit a UTF-8 sequence. */
+static void lex_escape_to(Lexer *l, StrBuf *sb) {
     char esc = ladvance(l);
     switch (esc) {
-    case 'n': return '\n';
-    case 't': return '\t';
-    case 'r': return '\r';
-    case '\\': return '\\';
-    case '"': return '"';
-    case '\'': return '\'';
-    case '0': return '\0';
-    case 'a': return '\a';
-    case 'b': return '\b';
-    case 'f': return '\f';
-    case 'v': return '\v';
-    case 'e': return '\033';
+    case 'n':  sb_push(sb, '\n'); return;
+    case 't':  sb_push(sb, '\t'); return;
+    case 'r':  sb_push(sb, '\r'); return;
+    case '\\': sb_push(sb, '\\'); return;
+    case '"':  sb_push(sb, '"');  return;
+    case '\'': sb_push(sb, '\''); return;
+    case '0':  sb_push(sb, '\0'); return;
+    case 'a':  sb_push(sb, '\a'); return;
+    case 'b':  sb_push(sb, '\b'); return;
+    case 'f':  sb_push(sb, '\f'); return;
+    case 'v':  sb_push(sb, '\v'); return;
+    case 'e':  sb_push(sb, '\033'); return;
     case 'x': {
         int val = 0;
         for (int hi = 0; hi < 2 && l->pos < l->source_len; hi++) {
-            char c = lpeek(l, 0);
-            if (c >= '0' && c <= '9')      val = val * 16 + (c - '0');
-            else if (c >= 'a' && c <= 'f') val = val * 16 + (c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') val = val * 16 + (c - 'A' + 10);
-            else break;
+            int d = hex_digit(lpeek(l, 0));
+            if (d < 0) break;
+            val = val * 16 + d;
             ladvance(l);
         }
-        return (char)val;
+        sb_push(sb, (char)val);
+        return;
     }
-    default:  return esc;
+    case 'u': {
+        int cp = 0;
+        if (lpeek(l, 0) == '{') {
+            ladvance(l);
+            int n = 0;
+            while (l->pos < l->source_len && n < 8) {
+                int d = hex_digit(lpeek(l, 0));
+                if (d < 0) break;
+                cp = cp * 16 + d; ladvance(l); n++;
+            }
+            if (lpeek(l, 0) == '}') ladvance(l);
+        } else {
+            for (int hi = 0; hi < 4 && l->pos < l->source_len; hi++) {
+                int d = hex_digit(lpeek(l, 0));
+                if (d < 0) break;
+                cp = cp * 16 + d; ladvance(l);
+            }
+        }
+        sb_push_utf8(sb, cp);
+        return;
     }
+    default: sb_push(sb, esc); return;
+    }
+}
+
+/* Backwards-compatible single-byte interface: returns the resolved byte
+   for legacy callers that only need a char (e.g., expression-context
+   escape handling in the interpolation literal-mode path). For `\u`
+   escapes this picks up only the low 8 bits, so call sites that need
+   full UTF-8 should use lex_escape_to instead. */
+static char lex_escape(Lexer *l) {
+    StrBuf tmp; sb_init(&tmp);
+    lex_escape_to(l, &tmp);
+    char *s = sb_finish(&tmp);
+    char r = s[0];
+    free(s);
+    return r;
 }
 
 /* Lex a string body. Keeps {expr} interpolation markers in the raw
@@ -259,11 +329,10 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
         char c = ladvance(l);
 
         if (interp_depth > 0) {
-            /* Inside `{...}` interpolation: if the user writes `\"` or `\'`
-               (a reflex carried from outer-string escaping), skip the
-               backslash and emit the bare quote. Do NOT enter the inner-string
-               consume path, since the user's intent is a single character,
-               not the start of a nested literal. */
+            /* Inside `{...}` interpolation: a `\\"` (escaped quote) is
+               likely a reflex from outer-string escaping; emit the
+               bare quote so the inner expression parser doesn't see
+               the stray backslash. Other escapes pass through. */
             int quote_was_escaped = 0;
             if (c == '\\' && (lpeek(l, 0) == '"' || lpeek(l, 0) == '\'')) {
                 c = ladvance(l);
@@ -273,7 +342,6 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
             if (c == '{') interp_depth++;
             else if (c == '}') { interp_depth--; }
             else if (!quote_was_escaped && (c == '"' || c == '\'')) {
-                /* consume inner string verbatim */
                 char iq = c;
                 while (l->pos < (int)strlen(l->source)) {
                     char nc = ladvance(l);
@@ -284,6 +352,55 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
             }
         } else {
             if (c == '{') {
+                /* If the brace is immediately followed by a backslash,
+                   the user is almost certainly writing a JSON-style
+                   literal like "{\"a\":1}" rather than an interpolated
+                   expression. Drop into literal-text mode for this
+                   group: copy bytes until the matching `}`, processing
+                   escapes the same way the outer string would. */
+                if (lpeek(l, 0) == '\\') {
+                    /* Emit the opening brace as a literal (sentinel
+                       \x01{ tells the parser "this is a literal brace,
+                       not the start of an interpolation"). Then copy
+                       through the matched-brace region with normal
+                       string-escape handling. */
+                    sb_push(&sb, '\x01');
+                    sb_push(&sb, '{');
+                    int depth = 1;
+                    while (l->pos < (int)strlen(l->source) && depth > 0) {
+                        char nc = ladvance(l);
+                        if (nc == '\\') {
+                            char esc = lpeek(l, 0);
+                            if (esc == '{') {
+                                ladvance(l);
+                                sb_push(&sb, '\x01');
+                                sb_push(&sb, '{');
+                                depth++;
+                            } else if (esc == '}') {
+                                ladvance(l);
+                                sb_push(&sb, '\x01');
+                                sb_push(&sb, '}');
+                                depth--;
+                            } else {
+                                sb_push(&sb, lex_escape(l));
+                            }
+                        } else if (nc == '{') {
+                            depth++;
+                            sb_push(&sb, '\x01');
+                            sb_push(&sb, '{');
+                        } else if (nc == '}') {
+                            depth--;
+                            sb_push(&sb, '\x01');
+                            sb_push(&sb, '}');
+                        } else if (nc == quote) {
+                            l->pos--; l->col--;
+                            break;
+                        } else {
+                            sb_push(&sb, nc);
+                        }
+                    }
+                    continue;
+                }
                 *out_interp = 1;
                 interp_depth++;
                 sb_push(&sb, c);
@@ -297,7 +414,9 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
                     ladvance(l);
                     sb_push(&sb, '\x01'); sb_push(&sb, '}');
                 } else {
-                    sb_push(&sb, lex_escape(l));
+                    /* `\u`-style escapes emit multi-byte UTF-8, so go
+                       through the StrBuf-aware variant. */
+                    lex_escape_to(l, &sb);
                 }
             } else {
                 sb_push(&sb, c);
@@ -847,8 +966,12 @@ static void lex_next(Lexer *l) {
         return;
     }
 
-    /* {- block comment -}: nestable */
-    if (ch=='{' && lpeek(l,1)=='-') {
+    /* {- block comment -}: nestable. Only treat as a comment when the
+       hyphen is followed by whitespace, EOL, or another `-` so we don't
+       eat ordinary `{-x}` expressions (e.g., `a{-1}` array literal,
+       `fn(x){-x}` lambda body). */
+    if (ch=='{' && lpeek(l,1)=='-'
+        && (lpeek(l,2)==' ' || lpeek(l,2)=='\t' || lpeek(l,2)=='\n' || lpeek(l,2)=='\r' || lpeek(l,2)=='-')) {
         int cline = l->line, ccol = l->col;
         StrBuf csb; sb_init(&csb);
         sb_push_str(&csb, "{-");

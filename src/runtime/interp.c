@@ -1856,11 +1856,23 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             if (idx<0||idx>=slen) return value_incref(XS_NULL_VAL);
             return xs_str_n(s+idx,1);
         }
-        /* reverse / reversed */
+        /* reverse / reversed: walk codepoints backward so multi-byte
+           UTF-8 sequences stay intact in the output. Byte-level reverse
+           used to produce invalid UTF-8 like `oll<bad bytes>h`. */
         if (strcmp(method, "reverse") == 0 || strcmp(method, "reversed") == 0) {
-            char *r=xs_strdup(s);
-            for (int l2=0,r2=slen-1;l2<r2;l2++,r2--) { char t=r[l2]; r[l2]=r[r2]; r[r2]=t; }
-            Value *v=xs_str(r); free(r); return v;
+            char *out = xs_malloc((size_t)slen + 1);
+            int wpos = 0;
+            int i2 = slen;
+            while (i2 > 0) {
+                int start = i2 - 1;
+                while (start > 0 && (((unsigned char)s[start] & 0xC0) == 0x80)) start--;
+                int n = i2 - start;
+                memcpy(out + wpos, s + start, (size_t)n);
+                wpos += n;
+                i2 = start;
+            }
+            out[wpos] = '\0';
+            Value *v = xs_str(out); free(out); return v;
         }
         /* truncate(max_len, suffix) */
         if (strcmp(method, "truncate") == 0) {
@@ -4043,8 +4055,28 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='&' && op[1]=='\0') { result=xs_int(a&b); goto done; }
         if (op[0]=='|' && op[1]=='\0') { result=xs_int(a|b); goto done; }
         if (op[0]=='^' && op[1]=='\0') { result=xs_int(a^b); goto done; }
-        if (op[0]=='<' && op[1]=='<') { result=xs_int(a<<b); goto done; }
-        if (op[0]=='>' && op[1]=='>') { result=xs_int(a>>b); goto done; }
+        if (op[0]=='<' && op[1]=='<') {
+            if (b < 0) {
+                xs_runtime_error(n->span, "ValueError", NULL, "shift count cannot be negative");
+                result = value_incref(XS_NULL_VAL); goto done;
+            }
+            if (b >= 64) { result = xs_int(0); goto done; }
+            if (b > 0 && (a >> (63 - b)) != 0 && (a >> (63 - b)) != -1) {
+                XSBigInt *bi = bigint_from_i64(a);
+                XSBigInt *out = bigint_shl(bi, (int)b);
+                bigint_free(bi);
+                result = xs_bigint_val(out); goto done;
+            }
+            result=xs_int(a<<b); goto done;
+        }
+        if (op[0]=='>' && op[1]=='>') {
+            if (b < 0) {
+                xs_runtime_error(n->span, "ValueError", NULL, "shift count cannot be negative");
+                result = value_incref(XS_NULL_VAL); goto done;
+            }
+            if (b >= 64) { result = xs_int(a < 0 ? -1 : 0); goto done; }
+            result=xs_int(a>>b); goto done;
+        }
     }
 
     if ((VAL_TAG(left) == XS_INT || VAL_TAG(left) == XS_BIGINT) &&
@@ -4146,6 +4178,16 @@ static Value *eval_binop(Interp *i, Node *n) {
             for (int j=0;j<n2;j++) strcat(buf,left->s);
             result=xs_str(buf); free(buf); goto done;
         }
+    }
+
+    /* int * str: same as str * int. Make repetition commutative. */
+    if (op[0]=='*' && op[1]=='\0' &&
+        VAL_TAG(left)==XS_INT && VAL_TAG(right)==XS_STR) {
+        int n2 = (int)VAL_INT(left); if (n2<0) n2=0;
+        int slen=(int)strlen(right->s);
+        char *buf=xs_malloc(slen*n2+1); buf[0]='\0';
+        for (int j=0;j<n2;j++) strcat(buf,right->s);
+        result=xs_str(buf); free(buf); goto done;
     }
 
     if (op[0]=='+' && op[1]=='+') {
@@ -4832,11 +4874,19 @@ Value *interp_eval(Interp *i, Node *n) {
             Value *obj = EVAL(i, target->index.obj);
             Value *idx = EVAL(i, target->index.index);
             if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
-                int ai = (int)((VAL_TAG(idx)==XS_INT)?VAL_INT(idx):0);
+                int orig_idx = (int)((VAL_TAG(idx)==XS_INT)?VAL_INT(idx):0);
+                int ai = orig_idx;
                 if (ai < 0) ai = obj->arr->len + ai;
                 if (ai >= 0 && ai < obj->arr->len) {
                     value_decref(obj->arr->items[ai]);
                     obj->arr->items[ai] = value_incref(result);
+                } else {
+                    /* Out-of-bounds set used to silently no-op. */
+                    xs_runtime_error(target->span, "IndexError", NULL,
+                                     "index %d out of bounds (len %d)",
+                                     orig_idx, obj->arr->len);
+                    value_decref(obj); value_decref(idx); value_decref(result);
+                    return value_incref(XS_NULL_VAL);
                 }
             } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 if (VAL_TAG(idx) == XS_STR) {
@@ -5355,7 +5405,11 @@ do_call: ;
 
         if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) {
             XSArray *arr = iter->arr;
-            for (int fi = 0; fi < arr->len; fi++) {
+            /* Snapshot the length so the loop terminates if the body
+               grows the array (push during iteration). Without this we
+               re-read arr->len each iteration and run forever. */
+            int snap_len = arr->len;
+            for (int fi = 0; fi < snap_len && fi < arr->len; fi++) {
                 push_env(i);
                 bind_pattern(i, n->for_loop.pattern, arr->items[fi], i->env, 1);
                 interp_exec(i, n->for_loop.body);

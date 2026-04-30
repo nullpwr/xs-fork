@@ -2,15 +2,18 @@
 
 println("--- Spawn ---")
 
--- spawn runs a block as a task
+-- spawn runs a block as a task on a real OS thread; await blocks
+-- until the task is done and yields its result.
 var results = []
 let task = spawn {
     results.push("spawned!")
     42
 }
 
-println("task result: {task["_result"]}")
+let r = await task
+println("task result: {r}")
 println("task status: {task["_status"]}")
+assert_eq(r, 42)
 assert_eq(task["_result"], 42)
 assert_eq(results[0], "spawned!")
 

@@ -5,6 +5,7 @@
 #include "runtime/builtins.h"
 #include "runtime/error.h"
 #include "core/xs_bigint.h"
+#include "core/utf8.h"
 #include "tls/xs_tls.h"
 #include "core/gc.h"
 #include "core/msgpack.h"
@@ -294,10 +295,46 @@ static Value *builtin_int(Interp *i, Value **args, int argc) {
         if (bigint_fits_i64(v->bigint)) return xs_int(bigint_to_i64(v->bigint));
         return value_incref(v);
     }
-    if (VAL_TAG(v)==XS_FLOAT) return xs_int((int64_t)v->f);
-    if (VAL_TAG(v)==XS_STR) return xs_int(atoll(v->s));
-    if (VAL_TAG(v)==XS_BOOL) return xs_int(VAL_INT(v));
-    return xs_int(0);
+    if (VAL_TAG(v)==XS_BOOL) return xs_int(VAL_INT(v) ? 1 : 0);
+    if (VAL_TAG(v)==XS_FLOAT) {
+        if (isnan(v->f) || isinf(v->f)) {
+            xs_runtime_error(span_zero(), "TypeError", NULL,
+                             "int(): can't convert non-finite float");
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_int((int64_t)v->f);
+    }
+    if (VAL_TAG(v)==XS_STR) {
+        const char *s=v->s;
+        while (*s==' '||*s=='\t') s++;
+        if (!*s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): empty string");
+            return value_incref(XS_NULL_VAL);
+        }
+        char *end=NULL; errno=0;
+        long long iv=strtoll(s, &end, 0);
+        if (end==s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): invalid literal: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        while (end && (*end==' '||*end=='\t')) end++;
+        if (end && *end) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "int(): trailing characters in '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        if (errno==ERANGE) {
+            xs_runtime_error(span_zero(), "OverflowError", NULL,
+                             "int(): value out of range: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_int((int64_t)iv);
+    }
+    xs_runtime_error(span_zero(), "TypeError", NULL,
+                     "int(): cannot convert from this type");
+    return value_incref(XS_NULL_VAL);
 }
 
 static Value *builtin_float(Interp *i, Value **args, int argc) {
@@ -307,8 +344,33 @@ static Value *builtin_float(Interp *i, Value **args, int argc) {
     if (VAL_TAG(v)==XS_FLOAT) return value_incref(v);
     if (VAL_TAG(v)==XS_INT) return xs_float((double)VAL_INT(v));
     if (VAL_TAG(v)==XS_BIGINT) return xs_float(bigint_to_double(v->bigint));
-    if (VAL_TAG(v)==XS_STR) return xs_float(atof(v->s));
-    return xs_float(0.0);
+    if (VAL_TAG(v)==XS_BOOL) return xs_float(VAL_INT(v) ? 1.0 : 0.0);
+    if (VAL_TAG(v)==XS_STR) {
+        const char *s=v->s;
+        while (*s==' '||*s=='\t') s++;
+        if (!*s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): empty string");
+            return value_incref(XS_NULL_VAL);
+        }
+        char *end=NULL;
+        double d=strtod(s, &end);
+        if (end==s) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): invalid literal: '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        while (end && (*end==' '||*end=='\t')) end++;
+        if (end && *end) {
+            xs_runtime_error(span_zero(), "ValueError", NULL,
+                             "float(): trailing characters in '%s'", v->s);
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_float(d);
+    }
+    xs_runtime_error(span_zero(), "TypeError", NULL,
+                     "float(): cannot convert from this type");
+    return value_incref(XS_NULL_VAL);
 }
 
 static Value *builtin_str(Interp *i, Value **args, int argc) {
@@ -418,7 +480,12 @@ static Value *builtin_len(Interp *i, Value **args, int argc) {
     if (argc<1) return xs_int(0);
     Value *v=args[0];
     if (VAL_TAG(v)==XS_ARRAY||VAL_TAG(v)==XS_TUPLE) return xs_int(v->arr->len);
-    if (VAL_TAG(v)==XS_STR) return xs_int((int64_t)strlen(v->s));
+    if (VAL_TAG(v)==XS_STR) {
+        /* Codepoint count, not byte count: matches `chars()` and the
+           VM's len(). For raw byte length use `str.bytes().len`. */
+        int blen = (int)strlen(v->s);
+        return xs_int((int64_t)utf8_strlen(v->s, blen));
+    }
     if (VAL_TAG(v)==XS_MAP||VAL_TAG(v)==XS_MODULE) return xs_int(v->map->len);
     if (VAL_TAG(v)==XS_RANGE) {
         int64_t span = v->range->end - v->range->start;

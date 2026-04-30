@@ -9,9 +9,11 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <math.h>
+#include <errno.h>
 
 /* json module */
-typedef struct { const char *s; int pos; } JsonParser;
+typedef struct { const char *s; int pos; int err; } JsonParser;
 static Value *json_parse_value(JsonParser *p);
 static void json_skip_ws(JsonParser *p) {
     while (p->s[p->pos]==' '||p->s[p->pos]=='\t'||p->s[p->pos]=='\n'||p->s[p->pos]=='\r') p->pos++;
@@ -86,49 +88,64 @@ static Value *json_parse_number(JsonParser *p) {
     if (p->s[p->pos]=='.'){is_float=1;p->pos++;while(isdigit((unsigned char)p->s[p->pos]))p->pos++;}
     if (p->s[p->pos]=='e'||p->s[p->pos]=='E'){is_float=1;p->pos++;if(p->s[p->pos]=='+'||p->s[p->pos]=='-')p->pos++;while(isdigit((unsigned char)p->s[p->pos]))p->pos++;}
     if (is_float) return xs_float(strtod(start,NULL));
-    return xs_int((int64_t)strtoll(start,NULL,10));
+    /* Detect overflow: strtoll silently clamps to LLONG_MAX/MIN. Fall
+       back to a float so callers don't see truncated values. */
+    errno = 0;
+    long long iv = strtoll(start, NULL, 10);
+    if (errno == ERANGE) return xs_float(strtod(start, NULL));
+    return xs_int((int64_t)iv);
 }
 static Value *json_parse_array(JsonParser *p) {
     p->pos++; /* skip [ */
     json_skip_ws(p);
     Value *arr=xs_array_new();
     if (p->s[p->pos]==']'){p->pos++;return arr;}
-    while (p->s[p->pos]) {
+    for (;;) {
         json_skip_ws(p);
         Value *v=json_parse_value(p);
-        if (!v) break;
+        if (!v){p->err=1;value_decref(arr);return NULL;}
         array_push(arr->arr,v);
         json_skip_ws(p);
-        if (p->s[p->pos]==','){p->pos++;continue;}
-        if (p->s[p->pos]==']'){p->pos++;break;}
-        break;
+        if (p->s[p->pos]==','){
+            p->pos++;
+            json_skip_ws(p);
+            /* trailing comma `[1,2,]` is not valid JSON */
+            if (p->s[p->pos]==']'){p->err=1;value_decref(arr);return NULL;}
+            continue;
+        }
+        if (p->s[p->pos]==']'){p->pos++;return arr;}
+        p->err=1;value_decref(arr);return NULL;
     }
-    return arr;
 }
 static Value *json_parse_object(JsonParser *p) {
     p->pos++; /* skip { */
     json_skip_ws(p);
     Value *m=xs_map_new();
     if (p->s[p->pos]=='}'){p->pos++;return m;}
-    while (p->s[p->pos]) {
+    for (;;) {
         json_skip_ws(p);
-        if (p->s[p->pos]!='"') break;
+        if (p->s[p->pos]!='"'){p->err=1;value_decref(m);return NULL;}
         Value *key=json_parse_string(p);
-        if (!key) break;
+        if (!key){p->err=1;value_decref(m);return NULL;}
         json_skip_ws(p);
-        if (p->s[p->pos]!=':'){value_decref(key);break;}
+        if (p->s[p->pos]!=':'){value_decref(key);p->err=1;value_decref(m);return NULL;}
         p->pos++;
         json_skip_ws(p);
         Value *val=json_parse_value(p);
-        if (!val) val=value_incref(XS_NULL_VAL);
+        if (!val){value_decref(key);p->err=1;value_decref(m);return NULL;}
         map_set(m->map,key->s,val); value_decref(val);
         value_decref(key);
         json_skip_ws(p);
-        if (p->s[p->pos]==','){p->pos++;continue;}
-        if (p->s[p->pos]=='}'){p->pos++;break;}
-        break;
+        if (p->s[p->pos]==','){
+            p->pos++;
+            json_skip_ws(p);
+            /* trailing comma `{"a":1,}` is not valid JSON */
+            if (p->s[p->pos]=='}'){p->err=1;value_decref(m);return NULL;}
+            continue;
+        }
+        if (p->s[p->pos]=='}'){p->pos++;return m;}
+        p->err=1;value_decref(m);return NULL;
     }
-    return m;
 }
 static Value *json_parse_value(JsonParser *p) {
     json_skip_ws(p);
@@ -140,6 +157,7 @@ static Value *json_parse_value(JsonParser *p) {
     if (strncmp(p->s+p->pos,"true",4)==0){p->pos+=4;return value_incref(XS_TRUE_VAL);}
     if (strncmp(p->s+p->pos,"false",5)==0){p->pos+=5;return value_incref(XS_FALSE_VAL);}
     if (strncmp(p->s+p->pos,"null",4)==0){p->pos+=4;return value_incref(XS_NULL_VAL);}
+    p->err=1;
     return NULL;
 }
 
@@ -177,6 +195,12 @@ static void json_stringify_val(Value *v, int indent, int depth, char **out, int 
         json_append(out,len,cap,buf,bl); return;
     }
     if (VAL_TAG(v)==XS_FLOAT){
+        /* JSON has no NaN / Infinity; emit null to keep output valid
+           rather than producing tokens no parser will accept. */
+        if (isnan(v->f) || isinf(v->f)) {
+            json_append(out,len,cap,"null",4);
+            return;
+        }
         char buf[64]; int bl=snprintf(buf,sizeof(buf),"%g",v->f);
         json_append(out,len,cap,buf,bl); return;
     }
@@ -219,9 +243,19 @@ static void json_stringify_val(Value *v, int indent, int depth, char **out, int 
 static Value *native_json_parse(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    JsonParser p={a[0]->s,0};
+    JsonParser p={a[0]->s,0,0};
     Value *v=json_parse_value(&p);
-    return v?v:value_incref(XS_NULL_VAL);
+    if (!v || p.err) {
+        if (v) value_decref(v);
+        return value_incref(XS_NULL_VAL);
+    }
+    /* Reject trailing junk: `{}xyz` should not parse to `{}` silently. */
+    json_skip_ws(&p);
+    if (p.s[p.pos] != '\0') {
+        value_decref(v);
+        return value_incref(XS_NULL_VAL);
+    }
+    return v;
 }
 static Value *native_json_stringify(Interp *ig, Value **a, int n) {
     (void)ig;
@@ -241,7 +275,7 @@ static Value *native_json_pretty(Interp *ig, Value **a, int n) {
 static Value *native_json_valid(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
-    JsonParser p={a[0]->s,0};
+    JsonParser p={a[0]->s,0,0};
     Value *v=json_parse_value(&p);
     if (v){value_decref(v);return value_incref(XS_TRUE_VAL);}
     return value_incref(XS_FALSE_VAL);
@@ -249,7 +283,7 @@ static Value *native_json_valid(Interp *ig, Value **a, int n) {
 static Value *native_json_parse_safe(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<1||VAL_TAG(a[0])!=XS_STR) return value_incref(XS_NULL_VAL);
-    JsonParser p={a[0]->s,0};
+    JsonParser p={a[0]->s,0,0};
     Value *v=json_parse_value(&p);
     return v?v:value_incref(XS_NULL_VAL);
 }
@@ -272,7 +306,7 @@ Value *native_io_read_json(Interp *ig, Value **a, int n) {
     fseek(f,0,SEEK_END); long sz=ftell(f); fseek(f,0,SEEK_SET);
     char *buf=xs_malloc(sz+1);
     long nr=(long)fread(buf,1,sz,f); fclose(f); buf[nr]='\0';
-    JsonParser p={buf,0};
+    JsonParser p={buf,0,0};
     json_skip_ws(&p);
     Value *v=json_parse_value(&p);
     free(buf);
