@@ -4117,7 +4117,10 @@ static Value *eval_binop(Interp *i, Node *n) {
         if (op[0]=='-') { result=xs_float(a-b2); goto done; }
         if (op[0]=='*' && op[1]=='\0') { result=xs_float(a*b2); goto done; }
         if (op[0]=='/' && op[1]=='\0') {
-            /* Float division: IEEE 754 yields +/-inf or NaN; no trap. */
+            /* Float division: IEEE 754 rules. 1.0/0 -> Infinity,
+               0.0/0.0 -> NaN. Keeps `nan == nan` true-to-form for
+               numeric code; int/int by zero is the only path that
+               throws (caught earlier in the int-int block). */
             result=xs_float(a/b2); goto done;
         }
         if (op[0]=='%') { result=xs_float(fmod(a,b2)); goto done; }
@@ -5134,10 +5137,19 @@ do_call: ;
                 XSRange *r = idx->range;
                 Value *slice = xs_array_new();
                 int64_t step = r->step ? r->step : 1;
-                int64_t end2 = r->inclusive ? r->end + (step > 0 ? 1 : -1) : r->end;
                 int len = obj->arr->len;
-                for (int64_t j=r->start; step > 0 ? (j<end2 && j<len) : (j>end2 && j>=-1); j += step) {
-                    if (j>=0) array_push(slice->arr, value_incref(array_get(obj->arr,(int)j)));
+                int64_t start = r->start;
+                int64_t end = r->end;
+                /* Wrap negative bounds and clamp the open-end sentinel
+                   to len so `a[-2..]` returns the last two items. */
+                if (start < 0) start += len;
+                if (end < 0) end += len;
+                if (start < 0) start = 0;
+                if (end > len) end = len;
+                int64_t end2 = r->inclusive ? end + (step > 0 ? 1 : -1) : end;
+                if (end2 > len) end2 = len;
+                for (int64_t j = start; step > 0 ? (j < end2 && j < len) : (j > end2 && j >= 0); j += step) {
+                    array_push(slice->arr, value_incref(array_get(obj->arr,(int)j)));
                 }
                 result = slice;
             } else result = value_incref(XS_NULL_VAL);
@@ -5816,7 +5828,9 @@ do_call: ;
 
     case NODE_RANGE: {
         Value *start = n->range.start ? EVAL(i, n->range.start) : xs_int(0);
-        Value *end   = n->range.end   ? EVAL(i, n->range.end)   : xs_int(0);
+        /* Open-ended range like `2..` means "to the end" when used as
+           a slice. INT64_MAX is the sentinel; slicing clamps to len. */
+        Value *end   = n->range.end   ? EVAL(i, n->range.end)   : xs_int(INT64_MAX);
         int64_t sv = (VAL_TAG(start)==XS_INT)?VAL_INT(start):(int64_t)start->f;
         int64_t ev = (VAL_TAG(end)==XS_INT)?VAL_INT(end):(int64_t)end->f;
         value_decref(start); value_decref(end);

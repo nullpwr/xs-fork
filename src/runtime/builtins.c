@@ -402,8 +402,23 @@ static Value *builtin_repr(Interp *i, Value **args, int argc) {
 Value *builtin_abs(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_int(0);
-    if (VAL_TAG(args[0])==XS_INT) return xs_int(VAL_INT(args[0])<0?-VAL_INT(args[0]):VAL_INT(args[0]));
+    if (VAL_TAG(args[0])==XS_INT) {
+        int64_t v = VAL_INT(args[0]);
+        if (v == INT64_MIN) {
+            /* -INT64_MIN doesn't fit in int64; promote to bigint. */
+            XSBigInt *bi = bigint_from_i64(v);
+            XSBigInt *neg = bigint_neg(bi);
+            bigint_free(bi);
+            return xs_bigint_val(neg);
+        }
+        return xs_int(v < 0 ? -v : v);
+    }
     if (VAL_TAG(args[0])==XS_FLOAT) return xs_float(fabs(args[0]->f));
+    if (VAL_TAG(args[0])==XS_BIGINT) {
+        XSBigInt *bi = args[0]->bigint;
+        if (bi->sign) return xs_bigint_val(bigint_neg(bi));
+        return value_incref(args[0]);
+    }
     return value_incref(args[0]);
 }
 

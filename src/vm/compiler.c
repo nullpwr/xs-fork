@@ -1048,8 +1048,14 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_RANGE:
-        compile_node(c, n->range.start, 1);
-        compile_node(c, n->range.end,   1);
+        if (n->range.start) compile_node(c, n->range.start, 1);
+        else emit_const(c, xs_int(0));
+        if (n->range.end) compile_node(c, n->range.end, 1);
+        else {
+            /* `..end`-less range: sentinel meaning "to length" so the
+               slicer clamps to `len(col)` instead of treating it as 0. */
+            emit_const(c, xs_int(INT64_MAX));
+        }
         emit(c, MAKE_A(OP_MAKE_RANGE, n->range.inclusive, 0));
         break;
 

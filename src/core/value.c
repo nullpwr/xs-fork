@@ -370,7 +370,36 @@ char *value_repr(Value *v) {
             return s;  /* already heap-allocated */
         }
         case XS_FLOAT: {
-            snprintf(buf, sizeof(buf), "%g", v->f);
+            double f = v->f;
+            if (f != f) return xs_strdup("NaN");
+            if (f > 0 && f / f != f / f) return xs_strdup("Infinity");
+            if (f < 0 && f / f != f / f) return xs_strdup("-Infinity");
+            /* Find the shortest round-tripping representation. Prefer
+               fixed-point when magnitude is in a friendly range so
+               1000000.0 stays "1000000.0" instead of "1e+06"; only
+               fall back to scientific for very large or very small. */
+            double absf = f < 0 ? -f : f;
+            int use_fixed = (absf == 0.0) || (absf >= 1e-4 && absf < 1e21);
+            char short_buf[64];
+            int found = 0;
+            if (use_fixed) {
+                for (int prec = 0; prec <= 17; prec++) {
+                    snprintf(short_buf, sizeof(short_buf), "%.*f", prec, f);
+                    double parsed = strtod(short_buf, NULL);
+                    if (parsed == f) { found = 1; break; }
+                }
+            }
+            if (!found) {
+                /* Scientific fallback (or non-friendly magnitude). */
+                for (int prec = 1; prec <= 17; prec++) {
+                    snprintf(short_buf, sizeof(short_buf), "%.*g", prec, f);
+                    double parsed = strtod(short_buf, NULL);
+                    if (parsed == f) { found = 1; break; }
+                }
+            }
+            if (!found) snprintf(short_buf, sizeof(short_buf), "%.17g", f);
+            strncpy(buf, short_buf, sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
             return xs_strdup(buf);
         }
         case XS_STR:   return xs_strdup(v->s ? v->s : "");

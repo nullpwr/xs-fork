@@ -238,8 +238,24 @@ static Value *vm_range(Interp *interp, Value **args, int argc) {
 static Value *vm_abs(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_int(0);
-    if (VAL_TAG(args[0])==XS_INT) return xs_int(VAL_INT(args[0]) < 0 ? -VAL_INT(args[0]) : VAL_INT(args[0]));
+    if (VAL_TAG(args[0])==XS_INT) {
+        int64_t v = VAL_INT(args[0]);
+        if (v == INT64_MIN) {
+            /* -INT64_MIN doesn't fit in int64; promote to bigint
+               so abs() never sneakily returns a negative number. */
+            XSBigInt *bi = bigint_from_i64(v);
+            XSBigInt *neg = bigint_neg(bi);
+            bigint_free(bi);
+            return xs_bigint_val(neg);
+        }
+        return xs_int(v < 0 ? -v : v);
+    }
     if (VAL_TAG(args[0])==XS_FLOAT) return xs_float(fabs(args[0]->f));
+    if (VAL_TAG(args[0])==XS_BIGINT) {
+        XSBigInt *bi = args[0]->bigint;
+        if (bi->sign) return xs_bigint_val(bigint_neg(bi));
+        return value_incref(args[0]);
+    }
     return xs_int(0);
 }
 
@@ -1779,7 +1795,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
-                /* Float division: IEEE 754 yields +/-inf or NaN on 0. */
+                /* Float division follows IEEE 754: 1.0/0 -> Infinity,
+                   0.0/0.0 -> NaN. Only int/int by zero throws. */
                 r = xs_float(av / bv);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
