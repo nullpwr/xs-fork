@@ -1,4 +1,5 @@
 *.o
+*.d
 /xs
 /xs.exe
 /xs_*

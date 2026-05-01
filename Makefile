@@ -8,7 +8,7 @@ CC      = gcc
 XS_VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
 
 CFLAGS  = -O2 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
-          -DXS_VERSION='"$(XS_VERSION)"'
+          -DXS_VERSION='"$(XS_VERSION)"' -MMD -MP
 LDFLAGS = -lm -lpthread
 
 # Feature flags (all enabled by default)
@@ -271,14 +271,14 @@ src/tls/bearssl/%.o: src/tls/bearssl/%.c
 	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -Wno-unknown-pragmas -c -o $@ $<
 
 debug: CFLAGS = -g -O0 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
-                -DXS_VERSION='"$(XS_VERSION)"' \
+                -DXS_VERSION='"$(XS_VERSION)"' -MMD -MP \
                 -fsanitize=address -fsanitize=undefined -DDEBUG \
                 $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 debug: LDFLAGS += -fsanitize=address -fsanitize=undefined
 debug: clean $(TARGET)
 
 release: CFLAGS = -O3 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
-                  -DXS_VERSION='"$(XS_VERSION)"' \
+                  -DXS_VERSION='"$(XS_VERSION)"' -MMD -MP \
                   -DNDEBUG -flto \
                   $(foreach f,VM JIT PLUGINS SANDBOX TRACER LSP DAP EFFECTS TRANSPILER FMT PKG PROFILER COVERAGE DOC,-DXSC_ENABLE_$(f))
 # LTO re-runs maybe-uninitialized analysis across TUs; the bearssl
@@ -716,4 +716,7 @@ esp32-component:
 clean:
 	rm -f $(OBJS) $(TARGET)
 	find src -name '*.o' -delete
+	find src -name '*.d' -delete
 	rm -rf build/ios build/android build/esp32
+
+-include $(OBJS:.o=.d)
