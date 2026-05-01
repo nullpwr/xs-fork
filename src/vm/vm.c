@@ -644,26 +644,15 @@ static Value *vm_None_fn(Interp *interp, Value **args, int argc) {
     return r;
 }
 
+/* Defined in builtins.c; reused so format() works the same in both
+   backends without duplicating the spec parser. */
+extern Value *builtin_format(Interp *i, Value **args, int argc);
+
 static Value *vm_format(Interp *interp, Value **args, int argc) {
     (void)interp;
     if (argc < 1) return xs_str("");
     if (VAL_TAG(args[0]) != XS_STR) { char *s = value_str(args[0]); Value *r = xs_str(s); free(s); return r; }
-    const char *fmt = args[0]->s;
-    int argidx = 1;
-    char *result = xs_strdup(""); int rlen = 0;
-    for (const char *p = fmt; *p; ) {
-        if (*p == '{' && *(p+1) == '}') {
-            char *s = (argidx < argc) ? value_str(args[argidx++]) : xs_strdup("{}");
-            int slen = (int)strlen(s);
-            result = xs_realloc(result, rlen + slen + 1);
-            memcpy(result + rlen, s, slen + 1); rlen += slen; free(s);
-            p += 2;
-        } else {
-            result = xs_realloc(result, rlen + 2);
-            result[rlen++] = *p++; result[rlen] = '\0';
-        }
-    }
-    Value *v = xs_str(result); free(result); return v;
+    return builtin_format(NULL, args, argc);
 }
 
 static Value *vm_todo(Interp *interp, Value **args, int argc) {
@@ -4643,6 +4632,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
             }
             if (!eff_handled) {
+                if (vm->is_thread_worker) {
+                    /* Spawn worker has no access to the parent's
+                       handler stack. Surface the unhandled effect as a
+                       throw so `await` can rethrow it on the awaiter
+                       (where a handler may exist). */
+                    Value *err = xs_map_new();
+                    Value *kind = xs_str("UnhandledEffect");
+                    map_set(err->map, "kind", kind); value_decref(kind);
+                    Value *msg = xs_str("effect performed in spawn worker without an in-thread handler");
+                    map_set(err->map, "message", msg); value_decref(msg);
+                    map_set(err->map, "effect", eff_val);
+                    vm->uncaught_thread_exc = err;
+                    return 1;
+                }
                 fprintf(stderr, "unhandled effect\n");
                 value_decref(eff_val);
                 return 1;

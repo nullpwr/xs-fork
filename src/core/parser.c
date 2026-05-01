@@ -182,6 +182,17 @@ static int pp_check2(Parser *p, TokenKind a, TokenKind b) {
 
 static Token *pp_match(Parser *p, TokenKind k) {
     if (pp_check(p, k)) return pp_advance(p);
+    /* Generic-close splitting: `Foo<Bar<T>>` lexes the trailing `>>`
+       as one TK_SHR. When a parser callsite wants a single TK_GT to
+       close its generic, treat a leading SHR as if it were two `>`s:
+       rewrite the token in place to TK_GT (consuming the first `>`)
+       and leave the position alone so the outer matcher picks up the
+       remaining `>`. */
+    if (k == TK_GT && pp_check(p, TK_SHR)) {
+        Token *t = pp_peek(p, 0);
+        t->kind = TK_GT;
+        return t;
+    }
     return NULL;
 }
 

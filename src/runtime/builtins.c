@@ -743,26 +743,165 @@ static Value *builtin_sum(Interp *i, Value **args, int argc) {
 }
 
 /* string helpers */
-static Value *builtin_format(Interp *i, Value **args, int argc) {
+/* Render `v` per a Python-like spec: optional positional index has been
+   parsed by the caller; `spec` is just whatever's after the colon (may
+   be empty). Supports: '<' '>' '^' alignment, '0' zero-pad, width, '.'
+   precision, type 'd' 'x' 'X' 'b' 'o' 'f' 'e' 'g' 's'. */
+static char *format_value_with_spec(Value *v, const char *spec) {
+    char fill = ' ';
+    char align = '\0';   /* default depends on type */
+    int  zero_pad = 0;
+    int  width = 0;
+    int  prec = -1;
+    char type = '\0';
+    const char *s = spec;
+    if (s[0] && (s[1] == '<' || s[1] == '>' || s[1] == '^')) {
+        fill = s[0]; align = s[1]; s += 2;
+    } else if (*s == '<' || *s == '>' || *s == '^') {
+        align = *s++;
+    }
+    if (*s == '0') { zero_pad = 1; s++; }
+    while (*s >= '0' && *s <= '9') { width = width * 10 + (*s - '0'); s++; }
+    if (*s == '.') {
+        s++; prec = 0;
+        while (*s >= '0' && *s <= '9') { prec = prec * 10 + (*s - '0'); s++; }
+    }
+    if (*s) type = *s;
+    char buf[128];
+    char *body;
+    int  bodylen;
+    int free_body = 0;
+    if ((type == 'd' || type == 'x' || type == 'X' || type == 'b' || type == 'o')
+        && (VAL_TAG(v) == XS_INT || VAL_TAG(v) == XS_BOOL)) {
+        long long iv = VAL_INT(v);
+        if (type == 'b') {
+            char tmp[80]; int n = 0;
+            unsigned long long u = (unsigned long long)(iv < 0 ? -iv : iv);
+            if (u == 0) tmp[n++] = '0';
+            while (u) { tmp[n++] = '0' + (u & 1); u >>= 1; }
+            int neg = iv < 0;
+            int total = n + (neg ? 1 : 0);
+            if (total >= (int)sizeof(buf)) total = sizeof(buf) - 1;
+            int j = 0;
+            if (neg) buf[j++] = '-';
+            for (int k = n - 1; k >= 0 && j < (int)sizeof(buf) - 1; k--) buf[j++] = tmp[k];
+            buf[j] = '\0';
+            bodylen = j;
+        } else {
+            const char *fc = type == 'x' ? "%llx"
+                            : type == 'X' ? "%llX"
+                            : type == 'o' ? "%llo"
+                            : "%lld";
+            bodylen = snprintf(buf, sizeof buf, fc, iv);
+        }
+        body = buf;
+    } else if (VAL_TAG(v) == XS_FLOAT
+               || type == 'f' || type == 'e' || type == 'g') {
+        double f = (VAL_TAG(v) == XS_FLOAT) ? v->f
+                  : (VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v)
+                  : 0.0;
+        const char *fc;
+        char fmtbuf[16];
+        if (type == 'e') {
+            snprintf(fmtbuf, sizeof fmtbuf, "%%.%de", prec >= 0 ? prec : 6);
+            fc = fmtbuf;
+        } else if (type == 'g') {
+            snprintf(fmtbuf, sizeof fmtbuf, "%%.%dg", prec >= 0 ? prec : 6);
+            fc = fmtbuf;
+        } else {
+            snprintf(fmtbuf, sizeof fmtbuf, "%%.%df", prec >= 0 ? prec : 6);
+            fc = fmtbuf;
+        }
+        bodylen = snprintf(buf, sizeof buf, fc, f);
+        body = buf;
+    } else {
+        /* string-ish: precision truncates, default left-align */
+        char *vs = value_str(v);
+        bodylen = (int)strlen(vs);
+        if (prec >= 0 && bodylen > prec) bodylen = prec;
+        body = vs;
+        free_body = 1;
+    }
+    /* default alignment: numbers right, strings left. */
+    if (align == '\0') {
+        align = (VAL_TAG(v) == XS_INT || VAL_TAG(v) == XS_FLOAT
+                 || VAL_TAG(v) == XS_BOOL) ? '>' : '<';
+    }
+    int pad = width > bodylen ? width - bodylen : 0;
+    char padc = zero_pad && (align == '>') ? '0' : fill;
+    char *out = xs_malloc((size_t)(bodylen + pad + 1));
+    int op = 0;
+    if (align == '>') {
+        for (int j = 0; j < pad; j++) out[op++] = padc;
+        memcpy(out + op, body, bodylen); op += bodylen;
+    } else if (align == '<') {
+        memcpy(out + op, body, bodylen); op += bodylen;
+        for (int j = 0; j < pad; j++) out[op++] = padc;
+    } else { /* '^' */
+        int lp = pad / 2, rp = pad - lp;
+        for (int j = 0; j < lp; j++) out[op++] = padc;
+        memcpy(out + op, body, bodylen); op += bodylen;
+        for (int j = 0; j < rp; j++) out[op++] = padc;
+    }
+    out[op] = '\0';
+    if (free_body) free(body);
+    return out;
+}
+
+Value *builtin_format(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1||VAL_TAG(args[0])!=XS_STR) return xs_str("");
-    /* Simple format: {} placeholders replaced by args in order */
     const char *fmt = args[0]->s;
     int argidx = 1;
     char *result = xs_strdup(""); int rlen = 0;
     for (const char *p = fmt; *p; ) {
-        if (*p=='{' && *(p+1)=='}') {
-            char *s = (argidx<argc)?value_str(args[argidx++]):xs_strdup("{}");
-            int slen=(int)strlen(s);
-            result=xs_realloc(result,rlen+slen+1);
-            memcpy(result+rlen,s,slen+1); rlen+=slen; free(s);
-            p+=2;
+        if (*p == '{' && *(p+1) == '{') {
+            result = xs_realloc(result, rlen + 2);
+            result[rlen++] = '{'; result[rlen] = '\0';
+            p += 2;
+            continue;
+        }
+        if (*p == '}' && *(p+1) == '}') {
+            result = xs_realloc(result, rlen + 2);
+            result[rlen++] = '}'; result[rlen] = '\0';
+            p += 2;
+            continue;
+        }
+        if (*p == '{') {
+            const char *q = p + 1;
+            int idx = -1;
+            while (*q >= '0' && *q <= '9') {
+                if (idx < 0) idx = 0;
+                idx = idx * 10 + (*q - '0'); q++;
+            }
+            const char *spec_start = NULL;
+            if (*q == ':') { spec_start = q + 1; q = spec_start; while (*q && *q != '}') q++; }
+            if (*q != '}') {
+                /* malformed; emit literally */
+                result = xs_realloc(result, rlen + 2);
+                result[rlen++] = *p++; result[rlen] = '\0';
+                continue;
+            }
+            char specbuf[64];
+            int speclen = spec_start ? (int)(q - spec_start) : 0;
+            if (speclen >= (int)sizeof(specbuf)) speclen = sizeof(specbuf) - 1;
+            if (spec_start) memcpy(specbuf, spec_start, speclen);
+            specbuf[speclen] = '\0';
+            int use_idx = idx >= 0 ? (idx + 1) : argidx++;
+            char *piece = (use_idx < argc)
+                ? format_value_with_spec(args[use_idx], specbuf)
+                : xs_strdup("");
+            int slen = (int)strlen(piece);
+            result = xs_realloc(result, rlen + slen + 1);
+            memcpy(result + rlen, piece, slen + 1); rlen += slen;
+            free(piece);
+            p = q + 1;
         } else {
-            result=xs_realloc(result,rlen+2);
-            result[rlen++]=*p++; result[rlen]='\0';
+            result = xs_realloc(result, rlen + 2);
+            result[rlen++] = *p++; result[rlen] = '\0';
         }
     }
-    Value *v=xs_str(result); free(result); return v;
+    Value *v = xs_str(result); free(result); return v;
 }
 
 /* global stdin override for WASM playground */
