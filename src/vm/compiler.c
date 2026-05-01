@@ -447,7 +447,9 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         break;
 
     case NODE_LIT_BIGINT: {
-        XSBigInt *b = bigint_from_str(n->lit_bigint.bigint_str, 10);
+        /* base=0 auto-detects 0x/0b/0o prefixes (lexer keeps them on
+           the literal string for hex/bin/oct overflows). */
+        XSBigInt *b = bigint_from_str(n->lit_bigint.bigint_str, 0);
         emit_const(c, xs_bigint_val(b));
         break;
     }
@@ -718,6 +720,32 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     emit(c, MAKE_A(OP_INDEX_SET, 0, 0));
                 }
             }
+        } else if (VAL_TAG(tgt) == NODE_LIT_TUPLE) {
+            /* Parallel tuple assignment `(a, b) = (b, a)`. Build the RHS
+               into a temp and then assign element-by-element so the LHS
+               reads of each variable see the original values. */
+            compile_node(c, n->assign.value, 1);
+            int tup_slot = local_add_hidden(c);
+            emit_a(c, OP_STORE_LOCAL, tup_slot);
+            NodeList *elems = &tgt->lit_array.elems;
+            for (int ei = 0; ei < elems->len; ei++) {
+                Node *sub = elems->items[ei];
+                emit_a(c, OP_LOAD_LOCAL, tup_slot);
+                emit_const(c, xs_int(ei));
+                emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
+                if (VAL_TAG(sub) == NODE_IDENT) {
+                    compile_name_store(c, sub->ident.name);
+                } else if (VAL_TAG(sub) == NODE_FIELD) {
+                    compile_node(c, sub->field.obj, 1);
+                    emit(c, MAKE_A(OP_SWAP, 0, 0));
+                    int ni = emit_global_name(c, sub->field.name);
+                    emit_a(c, OP_STORE_FIELD, ni);
+                } else {
+                    /* unsupported sub-target: drop the value */
+                    emit(c, MAKE_A(OP_POP, 0, 0));
+                }
+            }
+            if (want_value) emit_a(c, OP_LOAD_LOCAL, tup_slot);
         } else {
             compile_node(c, n->assign.value, 0);
             if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));

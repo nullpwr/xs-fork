@@ -245,6 +245,7 @@ static void lex_escape_to(Lexer *l, StrBuf *sb) {
     }
     case 'u': {
         int cp = 0;
+        int valid = 0;
         if (lpeek(l, 0) == '{') {
             ladvance(l);
             int n = 0;
@@ -253,18 +254,39 @@ static void lex_escape_to(Lexer *l, StrBuf *sb) {
                 if (d < 0) break;
                 cp = cp * 16 + d; ladvance(l); n++;
             }
+            valid = (n > 0) && (lpeek(l, 0) == '}') && (cp < 0x110000);
             if (lpeek(l, 0) == '}') ladvance(l);
         } else {
-            for (int hi = 0; hi < 4 && l->pos < l->source_len; hi++) {
+            int n = 0;
+            for (; n < 4 && l->pos < l->source_len; n++) {
                 int d = hex_digit(lpeek(l, 0));
                 if (d < 0) break;
                 cp = cp * 16 + d; ladvance(l);
             }
+            valid = (n == 4);
+        }
+        if (!valid) {
+            Span bad = {0};
+            bad.file = l->filename;
+            bad.line = l->line; bad.col = l->col;
+            bad.end_line = l->line; bad.end_col = l->col;
+            Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_LEXER,
+                "L0003", "invalid \\u escape");
+            diag_annotate(d, bad, 1, "expected \\uXXXX or \\u{HEX}");
+            diag_render_one(d, l->source, l->filename);
+            diag_free(d);
+            l->n_errors++;
+            return;
         }
         sb_push_utf8(sb, cp);
         return;
     }
-    default: sb_push(sb, esc); return;
+    default:
+        /* Unknown escape like \q: emit the literal backslash + char so
+           the bad escape is visible. Keeping the silent drop hid typos. */
+        sb_push(sb, '\\');
+        sb_push(sb, esc);
+        return;
     }
 }
 
@@ -621,40 +643,46 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
     if (lpeek(l,0) == '0') {
         sb_push(&sb, ladvance(l));
         char pfx = tolower(lpeek(l,0));
-        if (pfx == 'x') {
+        if (pfx == 'x' || pfx == 'b' || pfx == 'o') {
             sb_push(&sb, ladvance(l));
-            while (isxdigit(lpeek(l,0)) || lpeek(l,0)=='_') {
-                char c = ladvance(l); if (c!='_') sb_push(&sb,c);
+            int digits = 0;
+            int (*ok)(char) = pfx == 'x'
+                ? (int(*)(char))isxdigit
+                : (pfx == 'b' ? (int(*)(char))NULL : (int(*)(char))NULL);
+            for (;;) {
+                char c = lpeek(l, 0);
+                int is_digit;
+                if (pfx == 'x') is_digit = isxdigit((unsigned char)c);
+                else if (pfx == 'b') is_digit = (c == '0' || c == '1');
+                else                 is_digit = (c >= '0' && c <= '7');
+                if (!is_digit && c != '_') break;
+                ladvance(l);
+                if (c != '_') { sb_push(&sb, c); digits++; }
             }
+            (void)ok;
             char *s = sb_finish(&sb);
+            if (digits == 0) {
+                Span bad = {0};
+                bad.file = l->filename;
+                bad.line = sl; bad.col = sc;
+                bad.end_line = l->line; bad.end_col = l->col;
+                Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_LEXER,
+                    "L0004", "numeric literal '%s' has no digits", s);
+                diag_annotate(d, bad, 1, "expected digits after the base prefix");
+                diag_render_one(d, l->source, l->filename);
+                diag_free(d);
+                l->n_errors++;
+                free(s);
+                t.kind = TK_INT; t.ival = 0;
+                t.span = make_span(l,sl,sc,sp);
+                return t;
+            }
             errno = 0;
-            t.ival = strtoll(s, NULL, 16);
+            int base = pfx == 'x' ? 16 : (pfx == 'b' ? 2 : 8);
+            t.ival = strtoll(pfx == 'x' ? s : s + 2, NULL, base);
             if (errno == ERANGE) { t.kind = TK_BIGINT; t.sval = xs_strdup(s); }
             else { t.kind = TK_INT; }
             free(s); t.span = make_span(l,sl,sc,sp); return t;
-        } else if (pfx == 'b') {
-            sb_push(&sb, ladvance(l));
-            while (lpeek(l,0)=='0'||lpeek(l,0)=='1'||lpeek(l,0)=='_') {
-                char c=ladvance(l); if(c!='_') sb_push(&sb,c);
-            }
-            char *s=sb_finish(&sb);
-            /* skip "0b" prefix since strtoll base-2 doesn't handle it in C11 */
-            errno = 0;
-            t.ival = strtoll(s+2, NULL, 2);
-            if (errno == ERANGE) { t.kind = TK_BIGINT; t.sval = xs_strdup(s); }
-            else { t.kind = TK_INT; }
-            free(s); t.span=make_span(l,sl,sc,sp); return t;
-        } else if (pfx == 'o') {
-            sb_push(&sb, ladvance(l));
-            while ((lpeek(l,0)>='0'&&lpeek(l,0)<='7')||lpeek(l,0)=='_') {
-                char c=ladvance(l); if(c!='_') sb_push(&sb,c);
-            }
-            char *s=sb_finish(&sb);
-            errno = 0;
-            t.ival = strtoll(s+2, NULL, 8);
-            if (errno == ERANGE) { t.kind = TK_BIGINT; t.sval = xs_strdup(s); }
-            else { t.kind = TK_INT; }
-            free(s); t.span=make_span(l,sl,sc,sp); return t;
         }
     }
 
@@ -671,7 +699,9 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
             }
         }
     }
-    if (tolower(lpeek(l,0))=='e') {
+    if (tolower(lpeek(l,0))=='e'
+        && (isdigit(lpeek(l,1))
+            || ((lpeek(l,1)=='+'||lpeek(l,1)=='-') && isdigit(lpeek(l,2))))) {
         is_float=1; sb_push(&sb,ladvance(l));
         if (lpeek(l,0)=='+'||lpeek(l,0)=='-') sb_push(&sb,ladvance(l));
         while (isdigit(lpeek(l,0))) sb_push(&sb,ladvance(l));
@@ -1228,6 +1258,13 @@ void lexer_init(Lexer *l, const char *source, const char *filename) {
     l->source    = source;
     l->filename  = filename ? filename : "<stdin>";
     l->pos       = 0;
+    /* Skip a leading UTF-8 BOM. Editors on Windows sometimes prepend
+       one and the rest of the lexer treats it as garbage. */
+    if (source && (unsigned char)source[0] == 0xEF
+                && (unsigned char)source[1] == 0xBB
+                && (unsigned char)source[2] == 0xBF) {
+        l->pos = 3;
+    }
     l->source_len = (int)strlen(source);
     l->line      = 1;
     l->col       = 1;

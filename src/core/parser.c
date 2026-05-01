@@ -1522,7 +1522,26 @@ static Node *parse_postfix(Parser *p, Node *left) {
         if (tok->kind == TK_LBRACKET) {
             if (tok->span.line > left->span.end_line) break;
             pp_advance(p);
-            Node *idx = parse_expr(p, 0);
+            Node *idx;
+            /* Open-start slice `arr[..end]` or `arr[..]`: synthesize a
+               range with a NULL start so the runtime/compiler treats
+               it as "from 0". Without this the bare `..` token fails
+               to parse as an expression. */
+            if (pp_check(p, TK_DOTDOT) || pp_check(p, TK_DOTDOTEQ)) {
+                Token *rt = pp_peek(p, 0);
+                int incl = (rt->kind == TK_DOTDOTEQ);
+                Span rs = rt->span;
+                pp_advance(p);
+                Node *end = NULL;
+                if (!pp_check(p, TK_RBRACKET))
+                    end = parse_expr(p, 3);
+                idx = node_new(NODE_RANGE, rs);
+                idx->range.start = NULL;
+                idx->range.end = end;
+                idx->range.inclusive = incl;
+            } else {
+                idx = parse_expr(p, 0);
+            }
             pp_expect(p, TK_RBRACKET, "expected ']'");
             Node *n = node_new(NODE_INDEX, tok->span);
             n->index.obj   = left;

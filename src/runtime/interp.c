@@ -4441,6 +4441,15 @@ static void interp_for_each(Interp *i, Value *iter,
             if (i->cf.signal) { /* free remaining */ for(int k=j+1;k<nkeys;k++) free(keys[k]); break; }
         }
         free(keys);
+    } else {
+        /* Anything else (null, int, float, bool, ...) used to silently
+           do nothing. Raise a catchable error so typos like
+           `for x in user.entries` (where entries is missing) surface. */
+        char *s = value_str(iter);
+        xs_runtime_error(span_zero(), "TypeError", NULL,
+                         "for-in expected an iterable, got %s",
+                         s ? s : "<unprintable>");
+        free(s);
     }
 }
 
@@ -4531,7 +4540,10 @@ Value *interp_eval(Interp *i, Node *n) {
     switch (VAL_TAG(n)) {
     case NODE_LIT_INT:   return xs_int(n->lit_int.ival);
     case NODE_LIT_BIGINT: {
-        XSBigInt *b = bigint_from_str(n->lit_bigint.bigint_str, 10);
+        /* base=0 lets bigint_from_str detect 0x/0b/0o prefixes; otherwise
+           "0xFFF..." with base=10 hits the 'x' on the first iteration
+           and silently parses as zero. */
+        XSBigInt *b = bigint_from_str(n->lit_bigint.bigint_str, 0);
         return xs_bigint_val(b);
     }
     case NODE_LIT_FLOAT: return xs_float(n->lit_float.fval);
@@ -4914,6 +4926,38 @@ Value *interp_eval(Interp *i, Node *n) {
                 }
                 if (cur && VAL_TAG(cur) == NODE_IDENT)
                     env_notify_reactive(i->env, cur->ident.name);
+            }
+        } else if (VAL_TAG(target) == NODE_LIT_TUPLE) {
+            /* Parallel tuple assignment `(a, b) = (b, a)`. The RHS has
+               already been fully evaluated into `result`, so the swap
+               case is safe even though `a` and `b` are read again on
+               the LHS. Walk LHS elements; for each, recurse via a
+               synthesised assign node so nested patterns and field /
+               index targets keep working. */
+            if (VAL_TAG(result) == XS_TUPLE || VAL_TAG(result) == XS_ARRAY) {
+                NodeList *elems = &target->lit_array.elems;
+                XSArray *src = result->arr;
+                for (int ei = 0; ei < elems->len; ei++) {
+                    Node *sub = elems->items[ei];
+                    Value *piece = (ei < src->len)
+                        ? value_incref(src->items[ei])
+                        : value_incref(XS_NULL_VAL);
+                    /* Reuse the IDENT/INDEX/FIELD branches by handling
+                       each kind inline; avoids allocating a temp node. */
+                    if (VAL_TAG(sub) == NODE_IDENT) {
+                        int r2 = env_set(i->env, sub->ident.name, piece);
+                        if (r2 == -1) env_define(i->env, sub->ident.name, piece, 1);
+                    } else if (VAL_TAG(sub) == NODE_FIELD) {
+                        Value *obj = EVAL(i, sub->field.obj);
+                        if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE)
+                            map_set(obj->map, sub->field.name, piece);
+                        else if (VAL_TAG(obj) == XS_INST && obj->inst)
+                            map_set(obj->inst->fields, sub->field.name, piece);
+                        value_decref(obj);
+                    } else {
+                        value_decref(piece);
+                    }
+                }
             }
         } else if (VAL_TAG(target) == NODE_FIELD) {
             Value *obj = EVAL(i, target->field.obj);
@@ -5338,12 +5382,12 @@ do_call: ;
 
     case NODE_MATCH: {
         Value *subject = EVAL(i, n->match.subject);
-        Value *result = value_incref(XS_NULL_VAL);
+        Value *result = NULL;
+        int matched = 0;
         for (int j = 0; j < n->match.arms.len; j++) {
             MatchArm *arm = &n->match.arms.items[j];
             Env *arm_env = env_new(i->env);
             if (match_pattern(i, arm->pattern, subject, arm_env)) {
-                /* check guard */
                 if (arm->guard) {
                     Env *saved = i->env; i->env = env_incref(arm_env);
                     Value *g = EVAL(i, arm->guard);
@@ -5352,14 +5396,23 @@ do_call: ;
                     if (!gok) { env_decref(arm_env); continue; }
                 }
                 Env *saved = i->env; i->env = env_incref(arm_env);
-                value_decref(result);
                 result = EVAL(i, arm->body);
                 env_decref(i->env); i->env = saved;
                 env_decref(arm_env);
-                /* if CF_RETURN was set inside, propagate */
+                matched = 1;
                 break;
             }
             env_decref(arm_env);
+        }
+        if (!matched) {
+            /* Non-exhaustive match used to silently return null, hiding
+               missing-case bugs. Raise a catchable error so the gap is
+               visible. */
+            char *s = value_str(subject);
+            xs_runtime_error(n->span, "MatchError", NULL,
+                             "no match arm fits %s", s ? s : "<?>");
+            free(s);
+            result = value_incref(XS_NULL_VAL);
         }
         value_decref(subject);
         return result;
