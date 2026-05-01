@@ -22,6 +22,11 @@ Value *xs_spawn_thread(struct Interp *parent, Value *closure);
    the GIL while waiting. */
 Value *xs_await_task(int task_id);
 
+/* Wait for every interp-spawned task that hasn't been awaited yet.
+   atexit calls this so fire-and-forget spawns finish before the
+   process exits. Mirrors vm_drain_tasks for the interp backend. */
+void xs_drain_interp_tasks(void);
+
 /* Channel primitives backed by mutex + condvar. Each channel value is
    a regular XS_MAP with `_buf` (FIFO array) and `_chan_id` (int index
    into a global mutex/condvar table; allocate with xs_chan_alloc). */

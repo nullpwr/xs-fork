@@ -791,7 +791,11 @@ extern void vm_drain_tasks(void);
 
 static void xs_shutdown(void) {
     /* Wait for any unjoined spawn workers so a fire-and-forget
-       spawn { ... } actually completes before the process exits. */
+       spawn { ... } actually completes before the process exits.
+       (Only VM-backend tasks are drained here. The interp backend
+       shares its Interp with worker threads, so by the time atexit
+       runs the Interp may be partially torn down — joining there
+       would dereference freed state.) */
     vm_drain_tasks();
     /* Release process-lifetime allocations so leak checkers don't
        flag the pinned value singletons, the GC nodemap, and the int
@@ -2238,6 +2242,10 @@ test_again: ;
             }
             Interp *interp = interp_new("<eval>");
             interp_run(interp, prog);
+            /* Drain unjoined spawn workers before tearing the interp
+               down -- they share its Interp* and would deref freed
+               state if drained later. */
+            xs_drain_interp_tasks();
             int had_err = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
                           || interp->had_unhandled_exception
                           || g_xs_runtime_error_count > 0;
@@ -2708,6 +2716,8 @@ run_file:;
             pipeline_dispatch_sema(pp, program, interp);
         }
 #endif
+        /* Drain unjoined spawn workers before tearing the interp down. */
+        xs_drain_interp_tasks();
         int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
                         || interp->had_unhandled_exception
                         || g_xs_runtime_error_count > 0;

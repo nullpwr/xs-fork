@@ -171,6 +171,32 @@ Value *xs_await_task(int task_id) {
     return r;
 }
 
+/* Drain any unjoined interp-spawned tasks, mirroring vm_drain_tasks.
+   Called from main's atexit so a fire-and-forget spawn { sleep_ms(N) }
+   actually completes before the process exits, even on the
+   interpreter backend (which previously detached its workers and
+   then walked away while they were still mid-sleep). */
+void xs_drain_interp_tasks(void) {
+    if (!g_tasks_mu_init) return;
+    for (;;) {
+        xs_mutex_lock(&g_tasks_mu);
+        ThreadTask *pending = NULL;
+        for (ThreadTask *t = g_tasks_head; t; t = t->next) {
+            xs_mutex_lock(&t->mu);
+            int done = t->done;
+            xs_mutex_unlock(&t->mu);
+            if (!done) { pending = t; break; }
+        }
+        xs_mutex_unlock(&g_tasks_mu);
+        if (!pending) break;
+        xs_gil_release();
+        xs_mutex_lock(&pending->mu);
+        while (!pending->done) xs_cond_wait(&pending->cv, &pending->mu);
+        xs_mutex_unlock(&pending->mu);
+        xs_gil_acquire();
+    }
+}
+
 /* --- channels backed by mutex+condvar -------------------------------- */
 /* The channel is a regular XS_MAP that stores an integer "_chan_id" key.
    The actual mutex+condvar+buffer live in a process-global table indexed
