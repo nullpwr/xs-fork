@@ -1411,6 +1411,7 @@ static int call_frame_push(VM *vm, Value *closure_val, int argc) {
     frame->is_generator = is_gen;
     frame->yield_arr    = is_gen ? xs_array_new() : NULL;
     frame->yield_index  = 0;
+    frame->owns_init_inst = 0;
     for (int i = 0; i < cl->proto->nlocals - arity; i++) PUSH(xs_null());
     return 0;
 }
@@ -2236,6 +2237,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             value_decref(init_fn);
                             frame = FRAME;
                             vm->init_inst = value_incref(inst);
+                            frame->owns_init_inst = 1;
                             break;
                         } else {
                             value_decref(init_fn);
@@ -2466,6 +2468,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 frame->ip = frame->defer_stack[frame->defer_depth].defer_ip;
                 break;
             }
+            int returning_frame_owned_init_inst = frame->owns_init_inst;
             upvalue_close_all(&vm->open_upvalues, frame->base);
             while (vm->sp > frame->base) value_decref(POP());
             value_decref(frame->closure_val);
@@ -2493,7 +2496,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
             frame = FRAME;
             PUSH(result);
-            if (vm->init_inst) {
+            /* Only the constructor's own init frame consumes init_inst.
+               Without this guard, a nested super.init(...) returning
+               while init_inst is still live strips operand-stack values
+               from the outer init's frame and the original instance
+               surfaces with its fields wiped. */
+            if (vm->init_inst && returning_frame_owned_init_inst) {
                 Value *init_retval = POP();
                 value_decref(init_retval);
                 Value *saved_inst = POP();
@@ -2988,7 +2996,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         } else {
                             is_module_call = (VAL_TAG(mc_obj) == XS_MODULE) ||
                                 (VAL_TAG(mc_obj) == XS_MAP && !map_get(mc_obj->map, "__type") &&
-                                 !map_get(mc_obj->map, "__methods") && !map_get(mc_obj->map, "__fields"));
+                                 !map_get(mc_obj->map, "__methods") && !map_get(mc_obj->map, "__fields") &&
+                                 !map_get(mc_obj->map, "__self"));
+                            /* `super` proxy: has __self pointing at the
+                               real instance. The dispatch path below
+                               will swap it in for self before calling. */
                             /* Check if first param is 'self' for struct/class methods */
                             needs_self = 0;
                             if (VAL_TAG(fn) == XS_CLOSURE) {
@@ -3051,7 +3063,27 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                         break;
                     }
-                    mc_result = value_incref(XS_NULL_VAL);
+                    /* No method found on this map / module / instance.
+                       Raise rather than silently returning null - matches
+                       interp behaviour and surfaces typos like fs.lst()
+                       instead of leaking nulls down the call chain.
+                       The dispatch loop's top-of-iteration check on
+                       g_xs_pending_throw will unwind on the next pass. */
+                    {
+                        char *repr = value_repr(mc_obj);
+                        char label[160];
+                        snprintf(label, sizeof label,
+                                 "no method '%s' on type '%s'",
+                                 mc_name, repr ? repr : "?");
+                        xs_runtime_error(span_zero(), label, NULL,
+                                         "value of type '%s' has no method '%s'",
+                                         repr ? repr : "?", mc_name);
+                        free(repr);
+                        for (int j = 0; j < mc_argc; j++) value_decref(POP());
+                        value_decref(POP());
+                        PUSH(value_incref(XS_NULL_VAL));
+                        break;
+                    }
                 }}
             }
 
@@ -3598,8 +3630,26 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"sort")==0) {
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
+                    /* If the caller passes a comparator, dispatch through
+                       it: cmp(a,b) > 0 means a is heavier than b. Without
+                       this branch the VM ignored the comparator and
+                       always used value_cmp. */
+                    Value *cmp_fn = (mc_argc >= 1 && mc_args[0] &&
+                                     (VAL_TAG(mc_args[0])==XS_NATIVE ||
+                                      VAL_TAG(mc_args[0])==XS_CLOSURE))
+                                    ? mc_args[0] : NULL;
                     for(int j=0;j<arr->arr->len-1;j++) for(int k=0;k<arr->arr->len-1-j;k++){
-                        if(value_cmp(arr->arr->items[k],arr->arr->items[k+1])>0){
+                        int worse;
+                        if (cmp_fn) {
+                            Value *pair[2] = { arr->arr->items[k], arr->arr->items[k+1] };
+                            Value *r = vm_invoke(vm, cmp_fn, pair, 2);
+                            frame = FRAME;
+                            worse = (r && VAL_IS_INT(r)) ? (VAL_INT(r) > 0) : 0;
+                            if (r) value_decref(r);
+                        } else {
+                            worse = (value_cmp(arr->arr->items[k],arr->arr->items[k+1]) > 0);
+                        }
+                        if (worse) {
                             Value *tmp=arr->arr->items[k]; arr->arr->items[k]=arr->arr->items[k+1]; arr->arr->items[k+1]=tmp;
                         }
                     }
@@ -5208,6 +5258,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         value_decref(mi_init);
                         frame = FRAME;
                         vm->init_inst = value_incref(inst);
+                        frame->owns_init_inst = 1;
                         break;
                     } else {
                         value_decref(mi_init);

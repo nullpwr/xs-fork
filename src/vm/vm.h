@@ -51,6 +51,11 @@ typedef struct {
     int          is_generator;
     Value       *yield_arr;
     int          yield_index;
+    /* Set when this frame is the constructor-init call invoked by
+       OP_MAKE_INST. Only this frame's OP_RETURN consumes vm->init_inst,
+       so a nested super.init(...) returning while init_inst is still
+       held doesn't strip values from the outer init's operand stack. */
+    int          owns_init_inst;
 } CallFrame;
 
 typedef struct {
