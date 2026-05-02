@@ -91,9 +91,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
                     }
                 }
             } else {
-                sb_add(s, "${");
+                sb_add(s, "${__xs_repr(");
                 emit_expr(s, part, depth);
-                sb_addc(s, '}');
+                sb_add(s, ")}");
             }
         }
         sb_addc(s, '`');
@@ -183,8 +183,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "?.");
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
+        } else if (strcmp(op, "+") == 0) {
+            sb_add(s, "__xs_add(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_addc(s, ')');
+        } else if (strcmp(op, "/") == 0) {
+            sb_add(s, "__xs_div(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_addc(s, ')');
         } else {
-            /* default: +, -, *, /, %, ==, !=, <, >, <=, >=, &, |, ^, <<, >> */
+            /* default: -, *, %, ==, !=, <, >, <=, >=, &, |, ^, <<, >> */
             sb_addc(s, '(');
             emit_expr(s, n->binop.left, depth);
             sb_addc(s, ' ');
@@ -319,10 +331,11 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_INDEX:
+        sb_add(s, "__xs_idx(");
         emit_expr(s, n->index.obj, depth);
-        sb_addc(s, '[');
+        sb_add(s, ", ");
         emit_expr(s, n->index.index, depth);
-        sb_addc(s, ']');
+        sb_addc(s, ')');
         break;
     case NODE_FIELD:
         emit_expr(s, n->field.obj, depth);
@@ -337,11 +350,22 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         break;
     case NODE_ASSIGN: {
-        emit_expr(s, n->assign.target, depth);
-        sb_addc(s, ' ');
-        sb_add(s, n->assign.op);
-        sb_addc(s, ' ');
-        emit_expr(s, n->assign.value, depth);
+        Node *tgt = n->assign.target;
+        if (tgt && VAL_TAG(tgt) == NODE_INDEX && strcmp(n->assign.op, "=") == 0) {
+            sb_add(s, "__xs_setidx(");
+            emit_expr(s, tgt->index.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, tgt->index.index, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->assign.value, depth);
+            sb_addc(s, ')');
+        } else {
+            emit_expr(s, n->assign.target, depth);
+            sb_addc(s, ' ');
+            sb_add(s, n->assign.op);
+            sb_addc(s, ' ');
+            emit_expr(s, n->assign.value, depth);
+        }
         break;
     }
     case NODE_RANGE: {
@@ -1343,6 +1367,24 @@ static void emit_deferred(SB *s, Node *block, int depth) {
     }
 }
 
+/* control-flow nodes that have a stmt-form emitter; emitting them
+   through emit_expr wraps them in an IIFE, which silently breaks
+   `yield` inside generators. At tail position we can just emit them
+   as statements and skip the implicit return. */
+static int is_stmt_only_expr(Node *n) {
+    if (!n) return 0;
+    switch (VAL_TAG(n)) {
+    case NODE_WHILE:
+    case NODE_FOR:
+    case NODE_LOOP:
+    case NODE_BREAK:
+    case NODE_CONTINUE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int block_has_defers(Node *block) {
     if (!block || VAL_TAG(block) != NODE_BLOCK) return 0;
     for (int i = 0; i < block->block.stmts.len; i++) {
@@ -1486,10 +1528,14 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                             emit_stmt(s, st, depth + 2);
                     }
                     if (n->fn_decl.body->block.expr) {
-                        sb_indent(s, depth + 2);
-                        sb_add(s, "return ");
-                        emit_expr(s, n->fn_decl.body->block.expr, depth + 2);
-                        sb_add(s, ";\n");
+                        if (is_stmt_only_expr(n->fn_decl.body->block.expr)) {
+                            emit_stmt(s, n->fn_decl.body->block.expr, depth + 2);
+                        } else {
+                            sb_indent(s, depth + 2);
+                            sb_add(s, "return ");
+                            emit_expr(s, n->fn_decl.body->block.expr, depth + 2);
+                            sb_add(s, ";\n");
+                        }
                     }
                 }
                 sb_indent(s, depth + 1);
@@ -1501,10 +1547,14 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 if (VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
                     emit_block_body(s, n->fn_decl.body, depth + 1);
                     if (n->fn_decl.body->block.expr) {
-                        sb_indent(s, depth + 1);
-                        sb_add(s, "return ");
-                        emit_expr(s, n->fn_decl.body->block.expr, depth + 1);
-                        sb_add(s, ";\n");
+                        if (is_stmt_only_expr(n->fn_decl.body->block.expr)) {
+                            emit_stmt(s, n->fn_decl.body->block.expr, depth + 1);
+                        } else {
+                            sb_indent(s, depth + 1);
+                            sb_add(s, "return ");
+                            emit_expr(s, n->fn_decl.body->block.expr, depth + 1);
+                            sb_add(s, ";\n");
+                        }
                     }
                 } else {
                     sb_indent(s, depth + 1);
@@ -2156,9 +2206,45 @@ char *transpile_js(Node *program, const char *filename) {
     /* preamble */
     sb_add(&s, "// Generated by xs transpile --target js\n");
     if (filename) sb_printf(&s, "// Source: %s\n", filename);
-    sb_add(&s, "const __xs_print = (...args) => console.log(...args);\n");
-    sb_add(&s, "const __xs_write = (...args) => { if (typeof process !== 'undefined') "
-               "process.stdout.write(args.map(String).join('')); else console.log(...args); };\n");
+    sb_add(&s, "const __xs_repr = (v) => {\n");
+    sb_add(&s, "    if (v === null || v === undefined) return \"null\";\n");
+    sb_add(&s, "    if (typeof v === \"string\") return v;\n");
+    sb_add(&s, "    if (typeof v === \"number\" || typeof v === \"bigint\" || typeof v === \"boolean\") return String(v);\n");
+    sb_add(&s, "    if (Array.isArray(v)) return \"[\" + v.map(__xs_repr).join(\", \") + \"]\";\n");
+    sb_add(&s, "    if (v instanceof Map) {\n");
+    sb_add(&s, "        const parts = [];\n");
+    sb_add(&s, "        for (const [k, val] of v) parts.push(__xs_repr(k) + \": \" + __xs_repr(val));\n");
+    sb_add(&s, "        return \"{\" + parts.join(\", \") + \"}\";\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return String(v);\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_print = (...args) => console.log(args.map(__xs_repr).join(\" \"));\n");
+    sb_add(&s, "const __xs_write = (...args) => {\n");
+    sb_add(&s, "    const s = args.map(__xs_repr).join(\" \");\n");
+    sb_add(&s, "    if (typeof process !== 'undefined') process.stdout.write(s);\n");
+    sb_add(&s, "    else console.log(s);\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_add = (a, b) => {\n");
+    sb_add(&s, "    if (typeof a === \"string\" || typeof b === \"string\") return __xs_repr(a) + __xs_repr(b);\n");
+    sb_add(&s, "    return a + b;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_div = (a, b) => {\n");
+    sb_add(&s, "    if (b === 0 || b === 0n) throw new Error(\"division by zero\");\n");
+    sb_add(&s, "    if (typeof a === \"bigint\" && typeof b === \"bigint\") return a / b;\n");
+    sb_add(&s, "    if (Number.isInteger(a) && Number.isInteger(b)) return Math.trunc(a / b);\n");
+    sb_add(&s, "    return a / b;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_idx = (o, i) => {\n");
+    sb_add(&s, "    if ((Array.isArray(o) || typeof o === \"string\") && typeof i === \"number\" && i < 0) i = o.length + i;\n");
+    sb_add(&s, "    if (o instanceof Map) return o.get(i);\n");
+    sb_add(&s, "    return o[i];\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_setidx = (o, i, v) => {\n");
+    sb_add(&s, "    if (Array.isArray(o) && typeof i === \"number\" && i < 0) i = o.length + i;\n");
+    sb_add(&s, "    if (o instanceof Map) { o.set(i, v); return v; }\n");
+    sb_add(&s, "    o[i] = v;\n");
+    sb_add(&s, "    return v;\n");
+    sb_add(&s, "};\n");
     sb_add(&s, "const __xs_resume = (v) => v;\n");
     /* channel runtime */
     sb_add(&s, "function __xs_channel() {\n");
