@@ -3142,11 +3142,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 else if (strcmp(mc_name,"char_len")==0)
                     mc_result = xs_int(utf8_strlen(s, slen));
                 else if (strcmp(mc_name,"upper")==0||strcmp(mc_name,"to_upper")==0) {
-                    char *r=xs_strdup(s); for(int j=0;r[j];j++) r[j]=(char)toupper((unsigned char)r[j]);
-                    mc_result=xs_str(r); free(r);
+                    int out_len = 0;
+                    char *r = utf8_str_upper(s, slen, &out_len);
+                    mc_result = xs_str(r); free(r);
                 } else if (strcmp(mc_name,"lower")==0||strcmp(mc_name,"to_lower")==0) {
-                    char *r=xs_strdup(s); for(int j=0;r[j];j++) r[j]=(char)tolower((unsigned char)r[j]);
-                    mc_result=xs_str(r); free(r);
+                    int out_len = 0;
+                    char *r = utf8_str_lower(s, slen, &out_len);
+                    mc_result = xs_str(r); free(r);
                 } else if (strcmp(mc_name,"trim")==0) {
                     if (slen == 0) { mc_result = xs_str(""); }
                     else {

@@ -176,6 +176,15 @@ Value *vm_await_task(int task_id, int *errored_out, Value **err_out) {
     Value *r = t->result ? value_incref(t->result) : value_incref(XS_NULL_VAL);
     if (errored_out) *errored_out = t->errored;
     if (err_out)     *err_out     = t->error ? value_incref(t->error) : NULL;
+    /* Clear the error so the at-exit drain doesn't double-report it.
+       The awaiter has either captured it (err_out != NULL) or chosen
+       not to look (err_out == NULL); either way, ownership transferred
+       and drain should treat the task as handled. */
+    if (t->error) {
+        value_decref(t->error);
+        t->error = NULL;
+        t->errored = 0;
+    }
     xs_mutex_unlock(&t->mu);
     xs_gil_acquire();
     return r;
@@ -183,9 +192,13 @@ Value *vm_await_task(int task_id, int *errored_out, Value **err_out) {
 
 /* Drain any not-yet-awaited tasks. Called at program exit so a fire-and
    -forget spawn { sleep_ms(N) } actually completes before we return.
-   Errors raised inside an unjoined task are reported once on stderr. */
+   Errors raised inside an unjoined task are reported once on stderr.
+   This walks both pending and already-completed tasks: vm_await_task
+   nulls out t->error after handing it off, so anything still carrying
+   an error here is by definition unjoined and should be surfaced. */
 void vm_drain_tasks(void) {
     if (!g_vm_tasks_mu_init) return;
+    /* First, wait for any tasks that haven't completed yet. */
     for (;;) {
         xs_mutex_lock(&g_vm_tasks_mu);
         VMThreadTask *pending = NULL;
@@ -201,11 +214,17 @@ void vm_drain_tasks(void) {
         xs_gil_release();
         xs_mutex_lock(&pending->mu);
         while (!pending->done) xs_cond_wait(&pending->cv, &pending->mu);
-        int errored = pending->errored;
-        Value *err  = pending->error;
         xs_mutex_unlock(&pending->mu);
         xs_gil_acquire();
-
+    }
+    /* Now scan everything for unconsumed errors. Clear t->error after
+       reporting so a second drain call (e.g. atexit after the VM-side
+       call) doesn't double-print. */
+    xs_mutex_lock(&g_vm_tasks_mu);
+    for (VMThreadTask *t = g_vm_tasks_head; t; t = t->next) {
+        xs_mutex_lock(&t->mu);
+        int errored = t->errored;
+        Value *err  = t->error;
         if (errored && err) {
             const char *msg = NULL;
             if (VAL_TAG(err) == XS_STR) msg = err->s;
@@ -214,6 +233,11 @@ void vm_drain_tasks(void) {
                 if (m && VAL_TAG(m) == XS_STR) msg = m->s;
             }
             fprintf(stderr, "uncaught in spawn: %s\n", msg ? msg : "<error>");
+            value_decref(t->error);
+            t->error = NULL;
+            t->errored = 0;
         }
+        xs_mutex_unlock(&t->mu);
     }
+    xs_mutex_unlock(&g_vm_tasks_mu);
 }

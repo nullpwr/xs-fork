@@ -28,6 +28,44 @@ static int   bind_is_mut(const char *n) {
         if (g_binds[i].name && strcmp(g_binds[i].name, n) == 0) return g_binds[i].mutable;
     return 1;
 }
+
+/* Walk a destructure pattern and register each bound name with the
+   given mutability. Without this, `let (a, b) = ...` sema-tracked no
+   bindings, so a later `a = 10` was silently allowed. */
+static void bind_pattern(Node *pat, int mutable) {
+    if (!pat) return;
+    switch (VAL_TAG(pat)) {
+    case NODE_PAT_IDENT:
+        if (pat->pat_ident.name) bind_push(pat->pat_ident.name, mutable);
+        break;
+    case NODE_PAT_WILD:
+        break;
+    case NODE_PAT_TUPLE:
+        for (int i = 0; i < pat->pat_tuple.elems.len; i++)
+            bind_pattern(pat->pat_tuple.elems.items[i], mutable);
+        break;
+    case NODE_PAT_SLICE:
+        for (int i = 0; i < pat->pat_slice.elems.len; i++)
+            bind_pattern(pat->pat_slice.elems.items[i], mutable);
+        if (pat->pat_slice.rest) bind_push(pat->pat_slice.rest, mutable);
+        break;
+    case NODE_PAT_STRUCT:
+        for (int i = 0; i < pat->pat_struct.fields.len; i++) {
+            const char *key = pat->pat_struct.fields.items[i].key;
+            Node *fpat = pat->pat_struct.fields.items[i].val;
+            if (!fpat) {
+                if (key) bind_push(key, mutable);
+            } else if (VAL_TAG(fpat) == NODE_PAT_IDENT && fpat->pat_ident.name) {
+                bind_push(fpat->pat_ident.name, mutable);
+            } else {
+                bind_pattern(fpat, mutable);
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
 static int   bind_save(void)      { return g_nbinds; }
 static void  bind_restore(int s)  { g_nbinds = s; }
 
@@ -218,6 +256,7 @@ static void walk(SemaCtx *ctx, Node *n) {
         }
         check_literal_type(ctx, n->let.type_ann, n->let.value);
         if (n->let.name) bind_push(n->let.name, 0);
+        else bind_pattern(n->let.pattern, 0);
         if (n->let.value) walk(ctx, n->let.value);
         break;
 
@@ -231,6 +270,7 @@ static void walk(SemaCtx *ctx, Node *n) {
         }
         check_literal_type(ctx, n->let.type_ann, n->let.value);
         if (n->let.name) bind_push(n->let.name, 1);
+        else bind_pattern(n->let.pattern, 1);
         if (n->let.value) walk(ctx, n->let.value);
         break;
 

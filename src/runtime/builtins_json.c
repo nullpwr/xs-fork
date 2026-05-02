@@ -184,6 +184,14 @@ static void json_indent_line(int indent, int depth, char **out, int *len, int *c
     for (int j=0;j<depth*indent;j++) json_append(out,len,cap," ",1);
 }
 static void json_stringify_val(Value *v, int indent, int depth, char **out, int *len, int *cap) {
+    /* Cap recursion depth so cyclic structures (a.push(a)) raise a
+       sane error instead of blowing the C stack. 1024 is well above
+       any honestly-deep JSON document and well below the typical
+       process stack budget. */
+    if (depth > 1024) {
+        json_append(out, len, cap, "null", 4);
+        return;
+    }
     if (!v||VAL_TAG(v)==XS_NULL){json_append(out,len,cap,"null",4);return;}
     if (VAL_TAG(v)==XS_BOOL){
         if (VAL_INT(v)) json_append(out,len,cap,"true",4);
