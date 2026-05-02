@@ -2318,6 +2318,26 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             }
             return res;
         }
+        if (strcmp(method, "chunks") == 0) {
+            int64_t sz = (argc>=1&&VAL_TAG(args[0])==XS_INT)?VAL_INT(args[0])
+                       : (argc>=1&&VAL_TAG(args[0])==XS_FLOAT)?(int64_t)args[0]->f : 0;
+            if (sz <= 0) {
+                Value *err = xs_error_new("ValueError",
+                    "chunks() requires a positive integer size", NULL);
+                if (i->cf.value) value_decref(i->cf.value);
+                i->cf.signal = CF_THROW;
+                i->cf.value  = err;
+                return value_incref(XS_NULL_VAL);
+            }
+            Value *res=xs_array_new();
+            for (int j=0;j<arr->len;j+=(int)sz) {
+                Value *chunk=xs_array_new();
+                int end=j+(int)sz; if (end>arr->len) end=arr->len;
+                for (int k=j;k<end;k++) array_push(chunk->arr, value_incref(arr->items[k]));
+                array_push(res->arr, chunk);
+            }
+            return res;
+        }
         if (strcmp(method, "zip") == 0) {
             if (argc<1||VAL_TAG(args[0])!=XS_ARRAY) return value_incref(obj);
             XSArray *other=args[0]->arr;
@@ -4076,7 +4096,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
 
     char *repr = value_repr(obj);
     static const char *str_methods[] = {"len","trim","upper","lower","split","contains","replace","starts_with","ends_with","chars","to_str","bytes","repeat","join","slice","index_of","parse_int","parse_float","is_empty","reverse","capitalize","pad_left","pad_right","count",NULL};
-    static const char *arr_methods[] = {"len","push","pop","map","filter","reduce","sort","reverse","contains","join","slice","flatten","enumerate","zip","any","all","find","index_of",NULL};
+    static const char *arr_methods[] = {"len","push","pop","map","filter","reduce","sort","reverse","contains","join","slice","flatten","chunks","enumerate","zip","any","all","find","index_of",NULL};
     static const char *map_methods[] = {"len","keys","values","contains","remove","clear","entries","merge","filter","map","clone",NULL};
     static const char *num_methods[] = {"abs","to_str","floor","ceil","round","clamp",NULL};
     const char **methods_list = NULL;

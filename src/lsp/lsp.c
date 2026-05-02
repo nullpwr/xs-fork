@@ -70,6 +70,7 @@ static const char *xs_array_methods[] = {
     "filter", "reduce", "sort", "reverse", "join", "slice",
     "index_of", "find", "any", "all", "flatten", "enumerate",
     "sum", "min", "max", "unique", "concat", "insert", "remove",
+    "chunks",
     NULL
 };
 

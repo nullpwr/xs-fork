@@ -3737,32 +3737,28 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     mc_result=arr;
                 } else if (strcmp(mc_name,"sort")==0) {
-                    Value *arr=xs_array_new();
-                    for(int j=0;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
-                    /* If the caller passes a comparator, dispatch through
-                       it: cmp(a,b) > 0 means a is heavier than b. Without
-                       this branch the VM ignored the comparator and
-                       always used value_cmp. */
+                    /* Sort in place; matches interp behavior. */
                     Value *cmp_fn = (mc_argc >= 1 && mc_args[0] &&
                                      (VAL_TAG(mc_args[0])==XS_NATIVE ||
                                       VAL_TAG(mc_args[0])==XS_CLOSURE))
                                     ? mc_args[0] : NULL;
-                    for(int j=0;j<arr->arr->len-1;j++) for(int k=0;k<arr->arr->len-1-j;k++){
+                    XSArray *sa = mc_obj->arr;
+                    for(int j=0;j<sa->len-1;j++) for(int k=0;k<sa->len-1-j;k++){
                         int worse;
                         if (cmp_fn) {
-                            Value *pair[2] = { arr->arr->items[k], arr->arr->items[k+1] };
+                            Value *pair[2] = { sa->items[k], sa->items[k+1] };
                             Value *r = vm_invoke(vm, cmp_fn, pair, 2);
                             frame = FRAME;
                             worse = (r && VAL_IS_INT(r)) ? (VAL_INT(r) > 0) : 0;
                             if (r) value_decref(r);
                         } else {
-                            worse = (value_cmp(arr->arr->items[k],arr->arr->items[k+1]) > 0);
+                            worse = (value_cmp(sa->items[k],sa->items[k+1]) > 0);
                         }
                         if (worse) {
-                            Value *tmp=arr->arr->items[k]; arr->arr->items[k]=arr->arr->items[k+1]; arr->arr->items[k+1]=tmp;
+                            Value *tmp=sa->items[k]; sa->items[k]=sa->items[k+1]; sa->items[k+1]=tmp;
                         }
                     }
-                    mc_result=arr;
+                    mc_result=value_incref(mc_obj);
                 } else if (strcmp(mc_name,"filter")==0&&mc_argc>=1) {
                     Value *arr=xs_array_new();
                     Value *pred=mc_args[0];
@@ -3880,6 +3876,23 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         } else array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     }
                     mc_result=arr;
+                } else if (strcmp(mc_name,"chunks")==0) {
+                    int64_t sz = (mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0])
+                               : (mc_argc>=1&&VAL_TAG(mc_args[0])==XS_FLOAT)?(int64_t)mc_args[0]->f : 0;
+                    if (sz<=0) {
+                        g_xs_pending_throw = xs_error_new("ValueError",
+                            "chunks() requires a positive integer size", NULL);
+                        mc_result=value_incref(XS_NULL_VAL);
+                    } else {
+                        Value *arr=xs_array_new();
+                        for(int j=0;j<mc_obj->arr->len;j+=(int)sz){
+                            Value *chunk=xs_array_new();
+                            int end=j+(int)sz; if(end>mc_obj->arr->len) end=mc_obj->arr->len;
+                            for(int k=j;k<end;k++) array_push(chunk->arr,value_incref(mc_obj->arr->items[k]));
+                            array_push(arr->arr,chunk);
+                        }
+                        mc_result=arr;
+                    }
                 } else if (strcmp(mc_name,"unique")==0) {
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->arr->len;j++){

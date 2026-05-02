@@ -381,9 +381,9 @@ Color strings support interpolation in the text part: `c"bold;x = {x}"`.
 ",".join(["a", "b", "c"])        -- "a,b,c"
 ```
 
-**`.len()` counts bytes**, not Unicode codepoints. For ASCII strings, byte count equals character count.
+**`.len()` counts codepoints.** For raw byte length use `.bytes().len()`; for ASCII the two are equal.
 
-**String indexing (`s[i]`)** returns a one-byte string. Negative indices count from the end. Out-of-bounds returns `null`.
+**String indexing (`s[i]`)** returns a one-byte string. `.bytes()` and `s[i]` work in bytes; `.len()`, `.chars()` and `.char_at()` work in codepoints. Negative indices count from the end. Out-of-bounds returns `null`.
 
 **Method aliases:**
 - `.find()` / `.index_of()`

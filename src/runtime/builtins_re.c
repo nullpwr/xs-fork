@@ -64,6 +64,7 @@ static Value *native_re_match(Interp *ig, Value **a, int n) {
 static Value *native_re_find_all(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
+    if (a[0]->s[0]=='\0') return xs_array_new();
     char *pat=re_to_posix(a[0]->s);
     regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
     if (rc!=0) return xs_array_new();

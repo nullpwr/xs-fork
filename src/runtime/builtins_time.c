@@ -119,15 +119,10 @@ static Value *native_time_parse(Interp *ig, Value **a, int n) {
         else if (strptime(input,"%Y-%m-%d",&tm2)) parsed=1;
     }
     if (!parsed) return value_incref(XS_NULL_VAL);
-    Value *m=xs_map_new();
-    Value *v;
-    v=xs_int(tm2.tm_year+1900); map_set(m->map,"year",v);   value_decref(v);
-    v=xs_int(tm2.tm_mon+1);     map_set(m->map,"month",v);  value_decref(v);
-    v=xs_int(tm2.tm_mday);      map_set(m->map,"day",v);    value_decref(v);
-    v=xs_int(tm2.tm_hour);      map_set(m->map,"hour",v);   value_decref(v);
-    v=xs_int(tm2.tm_min);       map_set(m->map,"minute",v); value_decref(v);
-    v=xs_int(tm2.tm_sec);       map_set(m->map,"second",v); value_decref(v);
-    return m;
+    tm2.tm_isdst = -1;
+    time_t t = mktime(&tm2);
+    if (t == (time_t)-1) return value_incref(XS_NULL_VAL);
+    return xs_int((int64_t)t);
 }
 static Value *native_time_now_ms(Interp *ig, Value **a, int n) {
     return native_time_millis(ig,a,n);
