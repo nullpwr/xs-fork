@@ -378,9 +378,17 @@ static void walk(SemaCtx *ctx, Node *n) {
                 }
             }
         }
-        /* try first arm's enum pattern as fallback */
+        /* try first arm's enum pattern as fallback (descend into or-patterns
+           and capture wrappers to find a leaf NODE_PAT_ENUM) */
         if (!variants && n->match.arms.len > 0) {
             Node *first_pat = n->match.arms.items[0].pattern;
+            while (first_pat) {
+                if (VAL_TAG(first_pat) == NODE_PAT_OR) {
+                    first_pat = first_pat->pat_or.left;
+                } else if (VAL_TAG(first_pat) == NODE_PAT_CAPTURE) {
+                    first_pat = first_pat->pat_capture.pattern;
+                } else break;
+            }
             if (first_pat && VAL_TAG(first_pat) == NODE_PAT_ENUM && first_pat->pat_enum.path) {
                 const char *path = first_pat->pat_enum.path;
                 const char *sep = strstr(path, "::");

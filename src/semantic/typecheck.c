@@ -44,10 +44,42 @@ static char *format_fn_signature(const char *name, Node *fn_decl) {
     return xs_strdup(buf);
 }
 
+/* names of type parameters currently in scope (e.g. inside fn id<T>(x: T)).
+   Generic names act like ty_unknown for purposes of subtype checks. */
+#define TC_MAX_GENERICS 64
+static const char *g_generics[TC_MAX_GENERICS];
+static int         g_generics_depth;
+
+static int tc_is_generic(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < g_generics_depth; i++)
+        if (g_generics[i] && strcmp(g_generics[i], name) == 0) return 1;
+    return 0;
+}
+
+static int tc_push_generics(char **names, int n) {
+    int pushed = 0;
+    for (int i = 0; i < n; i++) {
+        if (!names[i]) continue;
+        if (g_generics_depth >= TC_MAX_GENERICS) break;
+        g_generics[g_generics_depth++] = names[i];
+        pushed++;
+    }
+    return pushed;
+}
+
+static void tc_pop_generics(int n) {
+    g_generics_depth -= n;
+    if (g_generics_depth < 0) g_generics_depth = 0;
+}
+
 static XsType *texpr_to_xstype(TypeExpr *te) {
     if (!te) return ty_unknown();
     switch (te->kind) {
         case TEXPR_NAMED: {
+            /* generic type parameter - treat as unknown so checks are skipped */
+            if (te->name && tc_is_generic(te->name) && te->nargs == 0)
+                return ty_unknown();
             /* handle generic array<T> and map<K,V> */
             if (te->name && strcmp(te->name, "array") == 0) {
                 XsType *elem = (te->nargs > 0) ? texpr_to_xstype(te->args[0]) : ty_unknown();
@@ -351,6 +383,8 @@ XsType *tc_synth(Node *n, SymTab *st, SemaCtx *ctx) {
 /* check if a type name is a known builtin or user-defined type */
 static int is_known_type_name(const char *name, SymTab *st) {
     if (!name) return 0;
+    /* generic type parameter currently in scope */
+    if (tc_is_generic(name)) return 1;
     /* builtins recognized by ty_from_name */
     if (ty_from_name(name)) return 1;
     /* common aliases not in ty_from_name */
@@ -465,6 +499,8 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
     switch (VAL_TAG(n)) {
 
     case NODE_FN_DECL: {
+        int gpushed = tc_push_generics(n->fn_decl.type_params,
+                                       n->fn_decl.n_type_params);
         if (n->fn_decl.ret_type)
             check_type_ann_exists(n->fn_decl.ret_type, st, ctx);
         for (int i = 0; i < n->fn_decl.params.len; i++) {
@@ -500,6 +536,7 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
         }
         if (n->fn_decl.body) tc_walk(n->fn_decl.body, st, ctx);
         ret_pop();
+        tc_pop_generics(gpushed);
         break;
     }
 
@@ -687,6 +724,8 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                 NodePairList *decl_fields = &sd->struct_decl.fields;
                 TypeExpr **field_types = sd->struct_decl.field_types;
                 int n_ft = sd->struct_decl.n_field_types;
+                int gpushed = tc_push_generics(sd->struct_decl.type_params,
+                                               sd->struct_decl.n_type_params);
                 for (int i = 0; i < n->struct_init.fields.len; i++) {
                     const char *fname = n->struct_init.fields.items[i].key;
                     Node *fval = n->struct_init.fields.items[i].val;
@@ -720,6 +759,7 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
                         diag_emit(ctx->diag, diag);
                     }
                 }
+                tc_pop_generics(gpushed);
             }
         }
         break;
@@ -736,5 +776,6 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
 void tc_program(Node *prog, SymTab *st, SemaCtx *ctx) {
     g_ret_depth = 0;
     memset(g_ret_stack, 0, sizeof g_ret_stack);
+    g_generics_depth = 0;
     tc_walk(prog, st, ctx);
 }

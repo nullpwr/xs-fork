@@ -1347,6 +1347,28 @@ tail_call_entry: ;
         Value *init_fn = map_get(inst->methods, "__init__");
         if (!init_fn) init_fn = map_get(inst->methods, "init");
         if (init_fn && VAL_TAG(init_fn) == XS_FUNC) {
+            XSFunc *ifn = init_fn->fn;
+            int expected = ifn->nparams > 0 ? ifn->nparams - 1 : 0;
+            int min_arity = expected;
+            int has_var = 0;
+            for (int pi = 1; pi < ifn->nparams; pi++) {
+                if (ifn->variadic_flags && ifn->variadic_flags[pi]) {
+                    has_var = 1;
+                    if (min_arity > 0) min_arity--;
+                }
+                if (ifn->default_vals && ifn->default_vals[pi] && min_arity > 0)
+                    min_arity--;
+            }
+            if (argc < min_arity || (!has_var && argc > expected)) {
+                const char *cname = (inst->class_ && inst->class_->name)
+                                     ? inst->class_->name : "<class>";
+                xs_runtime_error(i->current_span, "type mismatch",
+                    "check the number of arguments to the constructor",
+                    "init for '%s' expected %d arg%s, got %d",
+                    cname, expected, expected == 1 ? "" : "s", argc);
+                interp_pop_frame(i);
+                return inst_val;
+            }
             Value **new_args = xs_malloc((argc+1)*sizeof(Value*));
             new_args[0] = value_incref(inst_val);
             for (int j = 0; j < argc; j++) new_args[j+1] = args[j];

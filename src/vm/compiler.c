@@ -1559,11 +1559,12 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     }
                 }
             } else if (VAL_TAG(pat) == NODE_PAT_OR) {
-                /* Flatten the OR tree into leaves. Each leaf is a PAT_LIT,
-                   PAT_IDENT, or PAT_WILD. For each LIT leaf we emit an EQ
-                   + JUMP_IF_TRUE to a common hit target; for WILD or IDENT
-                   we take an unconditional hit. If none of the LIT leaves
-                   matched we jump to the next arm. */
+                /* Flatten the OR tree into leaves. Leaves can be PAT_LIT,
+                   PAT_IDENT, PAT_WILD, or PAT_ENUM. Each leaf either tests
+                   the subject and jumps to a shared hit target on success,
+                   or unconditionally falls through (catchall). PAT_ENUM
+                   leaves with payload args bind the args using slots
+                   allocated once; alternatives must bind the same names. */
                 Node *stack[32]; int stop = 0;
                 stack[stop++] = pat;
                 Node *leaves[64]; int nleaves = 0;
@@ -1576,6 +1577,27 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         }
                     } else if (cur) {
                         leaves[nleaves++] = cur;
+                    }
+                }
+                /* Pre-allocate slots for any enum payload bindings using
+                   the first enum leaf as the template. All enum leaves in
+                   an or-pattern must bind the same set of names. */
+                int payload_slots[8]; int n_payload = 0;
+                int payload_total = 0;
+                for (int li = 0; li < nleaves; li++) {
+                    Node *lf = leaves[li];
+                    if (VAL_TAG(lf) == NODE_PAT_ENUM) {
+                        int n_args = lf->pat_enum.args.len;
+                        if (n_args > payload_total) payload_total = n_args;
+                        for (int eai = 0; eai < n_args && n_payload < 8; eai++) {
+                            Node *arg_pat = lf->pat_enum.args.items[eai];
+                            if (arg_pat && VAL_TAG(arg_pat) == NODE_PAT_IDENT &&
+                                arg_pat->pat_ident.name && eai >= n_payload) {
+                                payload_slots[n_payload++] =
+                                    local_add(c->current, arg_pat->pat_ident.name);
+                            }
+                        }
+                        break;
                     }
                 }
                 int hit_jumps[64]; int n_hit = 0;
@@ -1594,6 +1616,39 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                         emit(c, MAKE_A(OP_EQ, 0, 0));
                         if (n_hit < 64)
                             hit_jumps[n_hit++] = emit_jump(c, OP_JUMP_IF_TRUE);
+                    } else if (VAL_TAG(lf) == NODE_PAT_ENUM) {
+                        /* Test enum tag; if mismatch, skip to next leaf.
+                           If match, bind args into pre-allocated slots and
+                           jump to the shared hit target. */
+                        emit_a(c, OP_LOAD_LOCAL, subj_slot);
+                        {
+                            int tag_idx = emit_global_name(c, "_tag");
+                            emit_a(c, OP_LOAD_FIELD, tag_idx);
+                        }
+                        {
+                            const char *epath = lf->pat_enum.path;
+                            const char *last_colon = epath ? strrchr(epath, ':') : NULL;
+                            const char *variant = (last_colon && last_colon > epath)
+                                                  ? last_colon + 1 : epath;
+                            emit_const(c, xs_str(variant ? variant : ""));
+                        }
+                        emit(c, MAKE_A(OP_EQ, 0, 0));
+                        int j_skip_leaf = emit_jump(c, OP_JUMP_IF_FALSE);
+                        for (int eai = 0; eai < lf->pat_enum.args.len && eai < n_payload; eai++) {
+                            Node *arg_pat = lf->pat_enum.args.items[eai];
+                            if (!arg_pat || VAL_TAG(arg_pat) != NODE_PAT_IDENT) continue;
+                            emit_a(c, OP_LOAD_LOCAL, subj_slot);
+                            int val_idx = emit_global_name(c, "_val");
+                            emit_a(c, OP_LOAD_FIELD, val_idx);
+                            if (payload_total > 1) {
+                                emit_const(c, xs_int(eai));
+                                emit(c, MAKE_A(OP_INDEX_GET, 0, 0));
+                            }
+                            emit_a(c, OP_STORE_LOCAL, payload_slots[eai]);
+                        }
+                        if (n_hit < 64)
+                            hit_jumps[n_hit++] = emit_jump(c, OP_JUMP);
+                        patch_jump(c, j_skip_leaf);
                     } else if (VAL_TAG(lf) == NODE_PAT_WILD || VAL_TAG(lf) == NODE_PAT_IDENT) {
                         has_catchall = 1;
                         if (VAL_TAG(lf) == NODE_PAT_IDENT) {
@@ -1604,7 +1659,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                     }
                 }
                 if (!has_catchall) {
-                    /* None of the literal leaves matched: jump past the arm. */
+                    /* No leaf matched: jump past the arm. */
                     j_next = emit_jump(c, OP_JUMP);
                 }
                 /* all hit jumps land here */

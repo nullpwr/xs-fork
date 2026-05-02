@@ -11,7 +11,38 @@ static int is_catchall(Node *pat) {
         case NODE_PAT_WILD:    return 1;
         case NODE_PAT_IDENT:   return 1;
         case NODE_PAT_CAPTURE: return is_catchall(pat->pat_capture.pattern);
+        case NODE_PAT_OR:
+            return is_catchall(pat->pat_or.left) ||
+                   is_catchall(pat->pat_or.right);
         default:               return 0;
+    }
+}
+
+/* Does pattern (possibly an or-pattern tree) match the enum variant
+   identified by `variant`? The variant string is the bare variant name,
+   e.g. "A". Patterns store paths like "E::A" or just "A". */
+static int pat_matches_variant(Node *pat, const char *variant) {
+    if (!pat || !variant) return 0;
+    switch (VAL_TAG(pat)) {
+        case NODE_PAT_OR:
+            return pat_matches_variant(pat->pat_or.left, variant) ||
+                   pat_matches_variant(pat->pat_or.right, variant);
+        case NODE_PAT_CAPTURE:
+            return pat_matches_variant(pat->pat_capture.pattern, variant);
+        case NODE_PAT_ENUM: {
+            const char *path = pat->pat_enum.path;
+            if (!path) return 0;
+            if (strcmp(path, variant) == 0) return 1;
+            size_t plen = strlen(path);
+            size_t vlen = strlen(variant);
+            if (plen > vlen + 2 &&
+                path[plen - vlen - 2] == ':' &&
+                path[plen - vlen - 1] == ':' &&
+                strcmp(path + plen - vlen, variant) == 0)
+                return 1;
+            return 0;
+        }
+        default: return 0;
     }
 }
 
@@ -48,22 +79,9 @@ char *exhaust_check(MatchArm *arms, int n_arms,
         for (int v = 0; v < n_variants; v++) {
             int found = 0;
             for (int i = 0; i < n_arms && !found; i++) {
-                Node *p = arms[i].pattern;
-                if (p && VAL_TAG(p) == NODE_PAT_ENUM && p->pat_enum.path) {
-                    const char *path = p->pat_enum.path;
-                    if (strcmp(path, variants[v]) == 0) {
-                        found = 1;
-                    } else {
-                        size_t plen = strlen(path);
-                        size_t vlen = strlen(variants[v]);
-                        if (plen > vlen + 2 &&
-                            path[plen - vlen - 2] == ':' &&
-                            path[plen - vlen - 1] == ':' &&
-                            strcmp(path + plen - vlen, variants[v]) == 0) {
-                            found = 1;
-                        }
-                    }
-                }
+                if (arms[i].guard) continue;  /* guards may fail at runtime */
+                if (pat_matches_variant(arms[i].pattern, variants[v]))
+                    found = 1;
             }
             if (!found) {
                 size_t len = strlen(variants[v]) + 4;

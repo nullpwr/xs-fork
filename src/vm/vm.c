@@ -1484,6 +1484,23 @@ static Value *vm_try_struct_op(VM *vm, Value *a, const char *op, Value *b) {
     return vm_invoke(vm, fn, args, 2);
 }
 
+/* True only if `a` and `b` have a sensible ordering: numeric/numeric,
+   string/string, char/char, or array/array, tuple/tuple of identical tags.
+   Without this guard, value_cmp's tag-comparison fallback would silently
+   accept things like `bool < int`, which the interpreter rejects. */
+static int vm_orderable_pair(Value *a, Value *b) {
+    if (!a || !b) return 0;
+    int ta = VAL_TAG(a), tb = VAL_TAG(b);
+    int a_num = (ta == XS_INT || ta == XS_FLOAT || ta == XS_BIGINT);
+    int b_num = (tb == XS_INT || tb == XS_FLOAT || tb == XS_BIGINT);
+    if (a_num && b_num) return 1;
+    if (ta == XS_STR   && tb == XS_STR)   return 1;
+    if (ta == XS_CHAR  && tb == XS_CHAR)  return 1;
+    if (ta == XS_ARRAY && tb == XS_ARRAY) return 1;
+    if (ta == XS_TUPLE && tb == XS_TUPLE) return 1;
+    return 0;
+}
+
 static Value *vm_try_dunder(VM *vm, Value *obj, const char *dunder, Value *other) {
     if (VAL_TAG(obj) != XS_MAP) return NULL;
     Value *fn = map_get(obj->map, dunder);
@@ -1898,22 +1915,25 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                        if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ne__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"!=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
                        else { PUSH(xs_bool(!value_equal(a,b))); value_decref(a);value_decref(b); } break; }
-        case OP_LT:  { Value *b=POP(),*a=POP(); Value *r;
-                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__lt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"<",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else { PUSH(xs_bool(value_cmp(a,b)<0));  value_decref(a);value_decref(b); } break; }
-        case OP_GT:  { Value *b=POP(),*a=POP(); Value *r;
-                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__gt__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,">",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else { PUSH(xs_bool(value_cmp(a,b)>0));  value_decref(a);value_decref(b); } break; }
-        case OP_LTE: { Value *b=POP(),*a=POP(); Value *r;
-                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__le__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,"<=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else { PUSH(xs_bool(value_cmp(a,b)<=0)); value_decref(a);value_decref(b); } break; }
-        case OP_GTE: { Value *b=POP(),*a=POP(); Value *r;
-                       if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,"__ge__",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,">=",b))!=NULL) { value_decref(a);value_decref(b);PUSH(r); }
-                       else { PUSH(xs_bool(value_cmp(a,b)>=0)); value_decref(a);value_decref(b); } break; }
+#define VM_CMP_OP(opname, sym, predicate)                                       \
+        { Value *b=POP(),*a=POP(); Value *r;                                    \
+          if (VAL_TAG(a)==XS_MAP && (r=vm_try_dunder(vm,a,opname,b))!=NULL) {   \
+              value_decref(a);value_decref(b);PUSH(r);                          \
+          } else if (VAL_TAG(a)==XS_MAP && (r=vm_try_map_op(vm,a,sym,b))!=NULL){ \
+              value_decref(a);value_decref(b);PUSH(r);                          \
+          } else if (!vm_orderable_pair(a, b)) {                                \
+              Span s = {0};                                                     \
+              xs_runtime_error(s, "type mismatch", NULL,                        \
+                  "operator '%s' is not defined for these operands", sym);      \
+              value_decref(a); value_decref(b);                                 \
+              PUSH(value_incref(XS_NULL_VAL));                                  \
+          } else { PUSH(xs_bool(predicate)); value_decref(a);value_decref(b); } \
+          break; }
+        case OP_LT:  VM_CMP_OP("__lt__", "<",  value_cmp(a,b)<0)
+        case OP_GT:  VM_CMP_OP("__gt__", ">",  value_cmp(a,b)>0)
+        case OP_LTE: VM_CMP_OP("__le__", "<=", value_cmp(a,b)<=0)
+        case OP_GTE: VM_CMP_OP("__ge__", ">=", value_cmp(a,b)>=0)
+#undef VM_CMP_OP
 
         /* collections */
         case OP_MAKE_ARRAY: {
@@ -2288,7 +2308,30 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         ctor_args[j] = value_incref(vm->sp[-argc + j]);
                     for (int j = 0; j < argc; j++) value_decref(POP());
                     value_decref(POP()); /* callee */
-                    if (init_fn && VAL_TAG(init_fn) == XS_NATIVE && argc > 0) {
+                    /* Verify the call's arg count against init's declared
+                       arity. `expected` is the count without self. Skip
+                       this check when init is missing (default-only ctor)
+                       or has 0 params (legacy zero-arg init). */
+                    int init_arity = -1;
+                    if (init_fn && VAL_TAG(init_fn) == XS_CLOSURE && init_fn->cl->proto)
+                        init_arity = init_fn->cl->proto->arity;
+                    if (init_arity > 0 && argc != init_arity - 1) {
+                        Span s = {0};
+                        const char *cname = "<class>";
+                        Value *cname_v = map_get(inst->map, "__type");
+                        if (cname_v && VAL_TAG(cname_v) == XS_STR && cname_v->s)
+                            cname = cname_v->s;
+                        xs_runtime_error(s, "type mismatch", NULL,
+                            "init for '%s' expected %d arg%s, got %d",
+                            cname, init_arity - 1,
+                            init_arity - 1 == 1 ? "" : "s", argc);
+                        for (int j = 0; j < argc; j++) value_decref(ctor_args[j]);
+                        if (ctor_args != ca_s) free(ctor_args);
+                        value_decref(inst);
+                        PUSH(value_incref(XS_NULL_VAL));
+                        break;
+                    }
+                    if (init_fn && VAL_TAG(init_fn) == XS_NATIVE) {
                         Value *init_call_args[257];
                         init_call_args[0] = inst;
                         for (int j = 0; j < argc; j++)
@@ -2298,7 +2341,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         for (int j = 0; j < argc; j++) value_decref(ctor_args[j]);
                         if (ctor_args != ca_s) free(ctor_args);
                         PUSH(inst);
-                    } else if (init_fn && VAL_TAG(init_fn) == XS_CLOSURE && argc > 0) {
+                    } else if (init_fn && VAL_TAG(init_fn) == XS_CLOSURE) {
                         PUSH(inst);
                         PUSH(value_incref(inst));
                         for (int j = 0; j < argc; j++) PUSH(ctor_args[j]);

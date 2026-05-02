@@ -374,6 +374,37 @@ static char *lex_string_body(Lexer *l, char quote, int *out_interp) {
             }
         } else {
             if (c == '{') {
+                /* `{- ... -}` inside a string is the block-comment
+                   sequence, not an interpolation. Detect by peek: same
+                   trigger as the top-level lexer (`{-` followed by
+                   whitespace, EOL, or another `-`). Copy verbatim. */
+                if (lpeek(l, 0) == '-' &&
+                    (lpeek(l, 1) == ' ' || lpeek(l, 1) == '\t' ||
+                     lpeek(l, 1) == '\n' || lpeek(l, 1) == '\r' ||
+                     lpeek(l, 1) == '-')) {
+                    sb_push(&sb, '\x01');
+                    sb_push(&sb, '{');
+                    int depth = 1;
+                    while (l->pos < (int)strlen(l->source) && depth > 0) {
+                        char nc = ladvance(l);
+                        if (nc == '{' && lpeek(l, 0) == '-') {
+                            sb_push(&sb, '\x01'); sb_push(&sb, '{');
+                            sb_push(&sb, ladvance(l));
+                            depth++;
+                        } else if (nc == '-' && lpeek(l, 0) == '}') {
+                            sb_push(&sb, nc);
+                            ladvance(l);
+                            sb_push(&sb, '\x01'); sb_push(&sb, '}');
+                            depth--;
+                        } else if (nc == quote) {
+                            l->pos--; l->col--;
+                            break;
+                        } else {
+                            sb_push(&sb, nc);
+                        }
+                    }
+                    continue;
+                }
                 /* If the brace is immediately followed by a backslash,
                    the user is almost certainly writing a JSON-style
                    literal like "{\"a\":1}" rather than an interpolated
@@ -635,9 +666,28 @@ static char *lex_raw_string(Lexer *l) {
     return sb_finish(&sb);
 }
 
+/* Emit an L0006 diagnostic for malformed numeric underscores
+   (doubled `__` or trailing `_`). */
+static void emit_bad_underscore(Lexer *l, int sl, int sc, int sp,
+                                const char *what) {
+    Span bad = {0};
+    bad.file = l->filename;
+    bad.line = sl; bad.col = sc;
+    bad.end_line = l->line; bad.end_col = l->col;
+    (void)sp;
+    Diagnostic *d = diag_new(DIAG_ERROR, DIAG_PHASE_LEXER,
+        "L0006", "malformed numeric literal: %s underscore", what);
+    diag_annotate(d, bad, 1, "%s underscore in number", what);
+    diag_hint(d, "underscores are only allowed between digits, e.g. 1_000_000");
+    diag_render_one(d, l->source, l->filename);
+    diag_free(d);
+    l->n_errors++;
+}
+
 static Token lex_number(Lexer *l, int sl, int sc, int sp) {
     StrBuf sb; sb_init(&sb);
     int is_float = 0;
+    int last_was_underscore = 0;
     Token t; t.span = make_span(l,sl,sc,sp); t.sval = NULL; t.ival = 0;
 
     if (lpeek(l,0) == '0') {
@@ -657,8 +707,17 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
                 else                 is_digit = (c >= '0' && c <= '7');
                 if (!is_digit && c != '_') break;
                 ladvance(l);
-                if (c != '_') { sb_push(&sb, c); digits++; }
+                if (c == '_') {
+                    if (last_was_underscore)
+                        emit_bad_underscore(l, sl, sc, sp, "doubled");
+                    last_was_underscore = 1;
+                } else {
+                    last_was_underscore = 0;
+                    sb_push(&sb, c); digits++;
+                }
             }
+            if (last_was_underscore)
+                emit_bad_underscore(l, sl, sc, sp, "trailing");
             (void)ok;
             char *s = sb_finish(&sb);
             if (digits == 0) {
@@ -686,17 +745,39 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
         }
     }
 
+    last_was_underscore = 0;
     while (isdigit(lpeek(l,0)) || lpeek(l,0)=='_') {
-        char c=ladvance(l); if(c!='_') sb_push(&sb,c);
+        char c=ladvance(l);
+        if (c == '_') {
+            if (last_was_underscore)
+                emit_bad_underscore(l, sl, sc, sp, "doubled");
+            last_was_underscore = 1;
+        } else {
+            last_was_underscore = 0;
+            sb_push(&sb,c);
+        }
     }
+    if (last_was_underscore)
+        emit_bad_underscore(l, sl, sc, sp, "trailing");
     /* Allow fractional part only if previous token is NOT a dot (tuple field context) */
     {
         int prev_is_dot = (l->tokens.len > 0 && l->tokens.items[l->tokens.len-1].kind == TK_DOT);
         if (!prev_is_dot && lpeek(l,0)=='.' && isdigit(lpeek(l,1))) {
             is_float=1; sb_push(&sb,ladvance(l));
+            last_was_underscore = 0;
             while (isdigit(lpeek(l,0))||lpeek(l,0)=='_') {
-                char c=ladvance(l); if(c!='_') sb_push(&sb,c);
+                char c=ladvance(l);
+                if (c == '_') {
+                    if (last_was_underscore)
+                        emit_bad_underscore(l, sl, sc, sp, "doubled");
+                    last_was_underscore = 1;
+                } else {
+                    last_was_underscore = 0;
+                    sb_push(&sb,c);
+                }
             }
+            if (last_was_underscore)
+                emit_bad_underscore(l, sl, sc, sp, "trailing");
         }
     }
     if (tolower(lpeek(l,0))=='e'
