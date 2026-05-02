@@ -514,7 +514,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_printf(s, "XS_INT(%s)", n->lit_bigint.bigint_str);
         break;
     case NODE_LIT_FLOAT:
-        sb_printf(s, "XS_FLOAT(%g)", n->lit_float.fval);
+        /* %.17g preserves the exact double value; default %g uses 6 sig
+         * figs, which truncates literals like 123456789.0. */
+        sb_printf(s, "XS_FLOAT(%.17g)", n->lit_float.fval);
         break;
     case NODE_LIT_STRING:
         sb_add(s, "XS_STR(\"");
@@ -1147,11 +1149,27 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_INDEX:
-        sb_add(s, "xs_index(");
-        emit_expr(s, n->index.obj, depth);
-        sb_add(s, ", ");
-        emit_expr(s, n->index.index, depth);
-        sb_addc(s, ')');
+        /* a[start..end] becomes a slice op rather than a real index — we
+         * can't go through xs_range here because that would materialise
+         * the bounds as an array (and lose the open-end sentinel). */
+        if (n->index.index && VAL_TAG(n->index.index) == NODE_RANGE) {
+            Node *r = n->index.index;
+            sb_add(s, "xs_slice(");
+            emit_expr(s, n->index.obj, depth);
+            sb_add(s, ", ");
+            if (r->range.start) emit_expr(s, r->range.start, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, ", ");
+            if (r->range.end) emit_expr(s, r->range.end, depth);
+            else sb_add(s, "XS_NULL");
+            sb_printf(s, ", %d)", r->range.inclusive ? 1 : 0);
+        } else {
+            sb_add(s, "xs_index(");
+            emit_expr(s, n->index.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->index.index, depth);
+            sb_addc(s, ')');
+        }
         break;
     case NODE_FIELD:
         if (n_actor_fields > 0 && in_method_body && n->field.obj &&
@@ -1886,6 +1904,8 @@ static void emit_block_body(SB *s, Node *block, int depth) {
             VAL_TAG(block->block.expr) == NODE_FOR ||
             VAL_TAG(block->block.expr) == NODE_WHILE ||
             VAL_TAG(block->block.expr) == NODE_LOOP ||
+            VAL_TAG(block->block.expr) == NODE_TRY ||
+            VAL_TAG(block->block.expr) == NODE_THROW ||
             VAL_TAG(block->block.expr) == NODE_IF ||
             VAL_TAG(block->block.expr) == NODE_BLOCK) {
             emit_stmt(s, block->block.expr, depth);
@@ -2268,6 +2288,18 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_FOR: {
         /* for pattern in iter -> iteration via xs_iter / xs_next */
+        const char *loopvar = NULL;
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
+            loopvar = n->for_loop.pattern->pat_ident.name;
+        /* if any lambda captures the loop var, allocate a fresh box per
+         * iteration so each closure snapshots its own value of i. */
+        int loopvar_captured = 0;
+        if (loopvar) {
+            for (int li = 0; li < n_lambdas && !loopvar_captured; li++)
+                for (int ci = 0; ci < lambdas[li].n_captures; ci++)
+                    if (strcmp(lambdas[li].captures[ci], loopvar) == 0)
+                        { loopvar_captured = 1; break; }
+        }
         sb_indent(s, depth);
         sb_add(s, "{\n");
         sb_indent(s, depth + 1);
@@ -2275,19 +2307,16 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         emit_expr(s, n->for_loop.iter, depth + 1);
         sb_add(s, ");\n");
         sb_indent(s, depth + 1);
-        sb_add(s, "xs_val ");
-        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
-            sb_add(s, n->for_loop.pattern->pat_ident.name);
-        else
-            sb_add(s, "__item");
-        sb_add(s, ";\n");
+        sb_printf(s, "xs_val %s;\n", loopvar ? loopvar : "__item");
         sb_indent(s, depth + 1);
-        sb_add(s, "while (xs_iter_next(&__iter, &");
-        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT)
-            sb_add(s, n->for_loop.pattern->pat_ident.name);
-        else
-            sb_add(s, "__item");
-        sb_add(s, ")) {\n");
+        sb_printf(s, "while (xs_iter_next(&__iter, &%s)) {\n",
+                  loopvar ? loopvar : "__item");
+        if (loopvar_captured) {
+            sb_indent(s, depth + 2);
+            sb_printf(s, "xs_val *__box_%s = (xs_val*)malloc(sizeof(xs_val));\n", loopvar);
+            sb_indent(s, depth + 2);
+            sb_printf(s, "*__box_%s = %s;\n", loopvar, loopvar);
+        }
         if (n->for_loop.body)
             emit_block_body(s, n->for_loop.body, depth + 2);
         sb_indent(s, depth + 1);
@@ -2757,9 +2786,41 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_ASSIGN:
         sb_indent(s, depth);
-        /* field assignment on non-self objects → xs_map_put
-           (actor self uses ->, impl self uses xs_index so also needs map_put) */
-        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_INDEX) {
+        /* tuple destructuring assign: (a, b) = (b, a). xs_array(...)
+         * is not an lvalue, so evaluate the rhs into temps first and
+         * then write each target one at a time. */
+        if (n->assign.target && VAL_TAG(n->assign.target) == NODE_LIT_TUPLE) {
+            int nelems = n->assign.target->lit_array.elems.len;
+            sb_add(s, "{\n");
+            if (n->assign.value && VAL_TAG(n->assign.value) == NODE_LIT_TUPLE &&
+                n->assign.value->lit_array.elems.len == nelems) {
+                /* element-wise lowering — handles parallel swaps without
+                 * materialising an array */
+                for (int i = 0; i < nelems; i++) {
+                    sb_indent(s, depth + 1);
+                    sb_printf(s, "xs_val __t%d = ", i);
+                    emit_expr(s, n->assign.value->lit_array.elems.items[i], depth + 1);
+                    sb_add(s, ";\n");
+                }
+                for (int i = 0; i < nelems; i++) {
+                    sb_indent(s, depth + 1);
+                    emit_expr(s, n->assign.target->lit_array.elems.items[i], depth + 1);
+                    sb_printf(s, " = __t%d;\n", i);
+                }
+            } else {
+                sb_indent(s, depth + 1);
+                sb_add(s, "xs_val __rhs = ");
+                emit_expr(s, n->assign.value, depth + 1);
+                sb_add(s, ";\n");
+                for (int i = 0; i < nelems; i++) {
+                    sb_indent(s, depth + 1);
+                    emit_expr(s, n->assign.target->lit_array.elems.items[i], depth + 1);
+                    sb_printf(s, " = xs_index(__rhs, XS_INT(%d));\n", i);
+                }
+            }
+            sb_indent(s, depth);
+            sb_add(s, "}\n");
+        } else if (n->assign.target && VAL_TAG(n->assign.target) == NODE_INDEX) {
             /* index assignment: obj[key] = val → xs_map_put */
             sb_add(s, "xs_map_put(&");
             emit_expr(s, n->assign.target->index.obj, depth);
@@ -2789,12 +2850,17 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_EXPR_STMT: {
         Node *inner = n->expr_stmt.expr;
+        /* tuple-destructuring assignment can only be a statement; route
+         * through emit_stmt so its lowering kicks in. */
+        int tuple_assign_stmt = inner && VAL_TAG(inner) == NODE_ASSIGN &&
+            inner->assign.target &&
+            VAL_TAG(inner->assign.target) == NODE_LIT_TUPLE;
         if (inner && (VAL_TAG(inner) == NODE_IF || VAL_TAG(inner) == NODE_MATCH ||
                       VAL_TAG(inner) == NODE_FOR || VAL_TAG(inner) == NODE_WHILE ||
                       VAL_TAG(inner) == NODE_LOOP || VAL_TAG(inner) == NODE_TRY ||
                       VAL_TAG(inner) == NODE_BLOCK || VAL_TAG(inner) == NODE_NURSERY ||
                       VAL_TAG(inner) == NODE_SPAWN || VAL_TAG(inner) == NODE_ACTOR_DECL ||
-                      VAL_TAG(inner) == NODE_RETURN)) {
+                      VAL_TAG(inner) == NODE_RETURN || tuple_assign_stmt)) {
             emit_stmt(s, inner, depth);
         } else {
             sb_indent(s, depth);
@@ -2977,11 +3043,9 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static xs_val xs_add(xs_val a, xs_val b) {\n"
         "    if (a.tag == 0 && b.tag == 0) return XS_INT(a.i + b.i);\n"
-        "    if (a.tag == 1 || b.tag == 1) {\n"
-        "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
-        "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
-        "        return XS_FLOAT(af + bf);\n"
-        "    }\n"
+        "    /* string concat must run before the float branch — otherwise\n"
+        "       \"pi: \" + 3.14 hits the float path and reinterprets the\n"
+        "       string pointer as a double. */\n"
         "    if (a.tag == 2 || b.tag == 2) {\n"
         "        const char *as = a.tag == 2 ? (a.s ? a.s : \"\") : xs_to_str(a);\n"
         "        const char *bs = b.tag == 2 ? (b.s ? b.s : \"\") : xs_to_str(b);\n"
@@ -2989,6 +3053,21 @@ char *transpile_c(Node *program, const char *filename) {
         "        char *out = (char*)malloc(la + lb + 1);\n"
         "        memcpy(out, as, la); memcpy(out + la, bs, lb); out[la + lb] = 0;\n"
         "        return XS_STR(out);\n"
+        "    }\n"
+        "    if (a.tag == 1 || b.tag == 1) {\n"
+        "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
+        "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
+        "        return XS_FLOAT(af + bf);\n"
+        "    }\n"
+        "    if (a.tag == 5 && b.tag == 5 && a.p && b.p) {\n"
+        "        xs_arr *aa = (xs_arr*)a.p, *bb = (xs_arr*)b.p;\n"
+        "        xs_arr *r = (xs_arr*)malloc(sizeof(xs_arr));\n"
+        "        r->len = aa->len + bb->len;\n"
+        "        r->cap = r->len > 4 ? r->len : 4;\n"
+        "        r->items = (xs_val*)malloc(sizeof(xs_val) * r->cap);\n"
+        "        for (int i = 0; i < aa->len; i++) r->items[i] = aa->items[i];\n"
+        "        for (int i = 0; i < bb->len; i++) r->items[aa->len + i] = bb->items[i];\n"
+        "        return (xs_val){.tag=5, .p=r};\n"
         "    }\n"
         "    return XS_INT(a.i + b.i);\n"
         "}\n\n"
@@ -3008,22 +3087,25 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    return XS_INT(a.i * b.i);\n"
         "}\n\n"
+        "static void xs_throw_arith(const char *kind, const char *msg);\n"
         "static xs_val xs_div(xs_val a, xs_val b) {\n"
         "    if (a.tag == 1 || b.tag == 1) {\n"
+        "        /* IEEE float division — 1.0/0.0 == inf, 0.0/0.0 == NaN.\n"
+        "           the interp matches this; only int divide-by-zero throws. */\n"
         "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
         "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
         "        return XS_FLOAT(af / bf);\n"
         "    }\n"
-        "    if (b.i == 0) return XS_NULL;\n"
+        "    if (b.i == 0) xs_throw_arith(\"division by zero\", \"cannot divide by zero\");\n"
         "    return XS_INT(a.i / b.i);\n"
         "}\n\n"
         "static xs_val xs_mod(xs_val a, xs_val b) {\n"
-        "    if (b.i == 0) return XS_NULL;\n"
+        "    if (b.i == 0) xs_throw_arith(\"modulo by zero\", \"cannot take remainder with divisor zero\");\n"
         "    /* Truncated remainder: sign follows the dividend (C's %). */\n"
         "    return XS_INT(a.i % b.i);\n"
         "}\n\n"
         "static xs_val xs_idiv(xs_val a, xs_val b) {\n"
-        "    if (b.i == 0) return XS_NULL;\n"
+        "    if (b.i == 0) xs_throw_arith(\"division by zero\", \"cannot floor-divide by zero\");\n"
         "    /* Floor division: matches VM (-7 // 2 = -4, not -3). */\n"
         "    int64_t q = a.i / b.i;\n"
         "    if ((a.i ^ b.i) < 0 && a.i % b.i != 0) q--;\n"
@@ -3065,6 +3147,35 @@ char *transpile_c(Node *program, const char *filename) {
         "    memcpy(r, sa, la); memcpy(r + la, sb, lb); r[la + lb] = 0;\n"
         "    return XS_STR(r);\n"
         "}\n\n"
+        "/* shortest round-tripping float repr — matches the interp.\n"
+        "   prefer fixed-point so 1e10 becomes \"10000000000\" rather\n"
+        "   than %g's \"1e+10\"; only fall back to scientific when the\n"
+        "   magnitude is outside a friendly range. */\n"
+        "static const char *xs_format_float(double f) {\n"
+        "    static char bufs[8][64];\n"
+        "    static int idx = 0;\n"
+        "    char *buf = bufs[idx++ & 7];\n"
+        "    if (f != f) { strcpy(buf, \"NaN\"); return buf; }\n"
+        "    if (f > 0 && f / f != f / f) { strcpy(buf, \"Infinity\"); return buf; }\n"
+        "    if (f < 0 && f / f != f / f) { strcpy(buf, \"-Infinity\"); return buf; }\n"
+        "    double absf = f < 0 ? -f : f;\n"
+        "    int use_fixed = (absf == 0.0) || (absf >= 1e-4 && absf < 1e21);\n"
+        "    int found = 0;\n"
+        "    if (use_fixed) {\n"
+        "        for (int prec = 0; prec <= 17; prec++) {\n"
+        "            snprintf(buf, 64, \"%.*f\", prec, f);\n"
+        "            if (strtod(buf, NULL) == f) { found = 1; break; }\n"
+        "        }\n"
+        "    }\n"
+        "    if (!found) {\n"
+        "        for (int prec = 1; prec <= 17; prec++) {\n"
+        "            snprintf(buf, 64, \"%.*g\", prec, f);\n"
+        "            if (strtod(buf, NULL) == f) { found = 1; break; }\n"
+        "        }\n"
+        "    }\n"
+        "    if (!found) snprintf(buf, 64, \"%.17g\", f);\n"
+        "    return buf;\n"
+        "}\n\n"
         "static const char *xs_to_str(xs_val v);\n"
         "/* uses rotating buffers to avoid clobbering on recursive/nested calls */\n"
         "static const char *xs_to_str(xs_val v) {\n"
@@ -3073,7 +3184,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    char *buf = bufs[buf_idx++ & 7];\n"
         "    switch (v.tag) {\n"
         "        case 0: snprintf(buf, 4096, \"%lld\", (long long)v.i); return buf;\n"
-        "        case 1: snprintf(buf, 4096, \"%g\", v.f); return buf;\n"
+        "        case 1: snprintf(buf, 4096, \"%s\", xs_format_float(v.f)); return buf;\n"
         "        case 2: return v.s ? v.s : \"null\";\n"
         "        case 3: return v.b ? \"true\" : \"false\";\n"
         "        case 5: if (v.p) {\n"
@@ -3082,8 +3193,7 @@ char *transpile_c(Node *program, const char *filename) {
         "            pos += snprintf(buf + pos, 4096 - pos, \"[\");\n"
         "            for (int i = 0; i < a->len && pos < 4096 - 32; i++) {\n"
         "                if (i) pos += snprintf(buf + pos, 4096 - pos, \", \");\n"
-        "                if (a->items[i].tag == 2) pos += snprintf(buf + pos, 4096 - pos, \"%s\", a->items[i].s ? a->items[i].s : \"null\");\n"
-        "                else pos += snprintf(buf + pos, 4096 - pos, \"%s\", xs_to_str(a->items[i]));\n"
+        "                pos += snprintf(buf + pos, 4096 - pos, \"%s\", xs_to_str(a->items[i]));\n"
         "            }\n"
         "            snprintf(buf + pos, 4096 - pos, \"]\");\n"
         "            return buf;\n"
@@ -3110,23 +3220,13 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_STR(strdup(buf));\n"
         "}\n\n"
         "static xs_val xs_println(xs_val v) {\n"
-        "    switch(v.tag) {\n"
-        "        case 0: printf(\"%lld\\n\", (long long)v.i); break;\n"
-        "        case 1: printf(\"%g\\n\", v.f); break;\n"
-        "        case 2: printf(\"%s\\n\", v.s ? v.s : \"null\"); break;\n"
-        "        case 3: printf(\"%s\\n\", v.b ? \"true\" : \"false\"); break;\n"
-        "        default: printf(\"null\\n\");\n"
-        "    }\n"
+        "    if (v.tag == 4) printf(\"null\\n\");\n"
+        "    else printf(\"%s\\n\", xs_to_str(v));\n"
         "    return (xs_val){.tag=4};\n"
         "}\n\n"
         "static xs_val xs_print(xs_val v) {\n"
-        "    switch(v.tag) {\n"
-        "        case 0: printf(\"%lld\", (long long)v.i); break;\n"
-        "        case 1: printf(\"%g\", v.f); break;\n"
-        "        case 2: printf(\"%s\", v.s ? v.s : \"null\"); break;\n"
-        "        case 3: printf(\"%s\", v.b ? \"true\" : \"false\"); break;\n"
-        "        default: printf(\"null\");\n"
-        "    }\n"
+        "    if (v.tag == 4) printf(\"null\");\n"
+        "    else printf(\"%s\", xs_to_str(v));\n"
         "    return (xs_val){.tag=4};\n"
         "}\n\n"
         "/* exception handling runtime */\n"
@@ -3258,6 +3358,37 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    return XS_NULL;\n"
         "}\n\n"
+        "/* arr[start..end] / arr[start..=end] — null bounds mean open. */\n"
+        "static xs_val xs_slice(xs_val v, xs_val start, xs_val end, int inclusive) {\n"
+        "    int len = 0;\n"
+        "    if (v.tag == 5 && v.p) len = ((xs_arr*)v.p)->len;\n"
+        "    else if (v.tag == 2 && v.s) len = (int)strlen(v.s);\n"
+        "    else return XS_NULL;\n"
+        "    int64_t s = (start.tag == 0) ? start.i : 0;\n"
+        "    int64_t e = (end.tag == 0) ? end.i : (int64_t)len;\n"
+        "    if (start.tag == 4) s = 0;\n"
+        "    if (end.tag == 4) e = (int64_t)len;\n"
+        "    if (s < 0) s += len;\n"
+        "    if (e < 0) e += len;\n"
+        "    if (inclusive) e += 1;\n"
+        "    if (s < 0) s = 0;\n"
+        "    if (e > len) e = len;\n"
+        "    if (e < s) e = s;\n"
+        "    if (v.tag == 5) {\n"
+        "        xs_arr *a = (xs_arr*)v.p;\n"
+        "        xs_arr *r = (xs_arr*)malloc(sizeof(xs_arr));\n"
+        "        r->len = (int)(e - s);\n"
+        "        r->cap = r->len > 4 ? r->len : 4;\n"
+        "        r->items = (xs_val*)malloc(sizeof(xs_val) * r->cap);\n"
+        "        for (int64_t i = s; i < e; i++) r->items[i - s] = a->items[i];\n"
+        "        return (xs_val){.tag=5, .p=r};\n"
+        "    }\n"
+        "    /* string slice */\n"
+        "    char *out = (char*)malloc((size_t)(e - s) + 1);\n"
+        "    memcpy(out, v.s + s, (size_t)(e - s));\n"
+        "    out[e - s] = 0;\n"
+        "    return XS_STR(out);\n"
+        "}\n\n"
         "static xs_val xs_range(xs_val start, xs_val end, int inclusive) {\n"
         "    int64_t s = start.tag == 0 ? start.i : 0;\n"
         "    int64_t e = end.tag == 0 ? end.i : 0;\n"
@@ -3321,6 +3452,12 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    va_end(ap);\n"
         "    return (xs_val){.tag=6, .p=m};\n"
+        "}\n\n"
+        "static void xs_throw_arith(const char *kind, const char *msg) {\n"
+        "    xs_val e = xs_map(2,\n"
+        "        XS_STR(\"kind\"), XS_STR((char*)kind),\n"
+        "        XS_STR(\"message\"), XS_STR((char*)msg));\n"
+        "    xs_throw(e);\n"
         "}\n\n"
         "static void xs_map_put(xs_val *map, xs_val key, xs_val val) {\n"
         "    if (!map || !map->p) return;\n"
