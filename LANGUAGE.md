@@ -2116,6 +2116,33 @@ println(logs)                    -- ["first", "second", "third"]
 
 The `handle` form can take a block as the computation (not just a function call).
 
+### Multi-Shot Resume
+
+`resume` is multi-shot on every backend: an arm body can call it more than once and each invocation re-enters the captured continuation, returning the body's value back into the arm:
+
+```xs
+effect Choose { fn pick() }
+
+fn run() {
+    let x = perform Choose.pick()
+    return x
+}
+
+var leaves = []
+handle {
+    let r = run()
+    leaves.push(r)
+} {
+    Choose.pick() => {
+        resume(1)
+        resume(2)
+    }
+}
+println(leaves)                  -- [1, 2]
+```
+
+The VM and JIT capture a stack snapshot at perform time and replay it for each resume. The interpreter, lacking real continuations, gets the same observable result by re-evaluating the handle body with a per-call perform-override and unwinding the outer body via a delimited `CF_HANDLE_DONE` signal -- only triggered for arms that statically contain more than one resume call, so single-shot bodies keep their original cheap path.
+
 ---
 
 ## Concurrency
@@ -2155,7 +2182,7 @@ println(user["name"])            -- User 42
 
 ### Channels
 
-Channels are FIFO message queues. Unbounded by default, or bounded with a capacity.
+Channels are FIFO message queues. Unbounded by default, or bounded with a capacity. A bounded channel's `send` blocks while the buffer is full.
 
 ```xs
 -- unbounded channel
@@ -2167,13 +2194,35 @@ println(ch.recv())               -- pong
 println(ch.len())                -- 0
 println(ch.is_empty())           -- true
 
--- bounded channel
+-- bounded channel: send blocks once cap is reached
 let bch = channel(2)
 bch.send("a")
 bch.send("b")
 println(bch.is_full())           -- true
 println(bch.recv())              -- a
 println(bch.is_full())           -- false
+```
+
+`close()` marks a channel done. Subsequent `send` raises `ChannelClosed`; `recv` on a drained closed channel returns `null` instead of blocking forever. Iterating with `for v in ch` drains the currently-buffered values:
+
+```xs
+let q = channel()
+q.send(1); q.send(2); q.send(3)
+q.close()
+var got = []
+for v in q { got.push(v) }
+println(got)                     -- [1, 2, 3]
+println(q.is_closed())           -- true
+```
+
+`select([ch1, ch2, ...])` returns `{index, value}` for the first channel with a buffered value (also accepts task futures, returning their `_result`). Returns `null` when nothing is ready -- for blocking semantics, loop until you get a hit:
+
+```xs
+let a = channel()
+let b = channel()
+a.send("hi")
+let r = select([a, b])
+println(r.index, r.value)        -- 0 hi
 ```
 
 ### Actors
@@ -2243,6 +2292,8 @@ nursery {
 }
 println(output)                  -- [10, 20, 30]
 ```
+
+When one task in a nursery throws, the surviving siblings get a cooperative cancellation flag. Blocking primitives (`time.sleep`, channel `recv`) check it on resume and raise `Cancelled`, so a sleeping sibling unwinds cleanly instead of finishing its body. The nursery surfaces the original throw, suppressing the cleanup-noise `Cancelled` errors.
 
 ---
 

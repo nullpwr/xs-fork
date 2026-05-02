@@ -260,6 +260,11 @@ static inline int xs_fits_smi(int64_t i) {
 #define CF_YIELD    7
 #define CF_RESUME   8
 #define CF_TAIL_CALL 9
+/* Multi-shot resume bail-out: arm body finished after one or more
+   resumes; the handle expression's value is in cf.value. Propagates
+   through call boundaries (call_value does NOT clear it) so the
+   delimited continuation unwinds all the way to the handle. */
+#define CF_HANDLE_DONE 10
 
 static inline void *xs_malloc(size_t n) {
     void *p = malloc(n);

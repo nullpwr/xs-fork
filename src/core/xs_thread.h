@@ -20,6 +20,11 @@ static inline int xs_cond_destroy(xs_cond_t *c) { (void)c; return 0; }
 static inline int xs_cond_wait(xs_cond_t *c, xs_mutex_t *m) {
     return SleepConditionVariableCS(c, m, INFINITE) ? 0 : -1;
 }
+/* Returns 0 on signal / broadcast, 1 on timeout, -1 on error. */
+static inline int xs_cond_timedwait_ms(xs_cond_t *c, xs_mutex_t *m, int ms) {
+    if (SleepConditionVariableCS(c, m, (DWORD)ms)) return 0;
+    return GetLastError() == ERROR_TIMEOUT ? 1 : -1;
+}
 static inline int xs_cond_signal(xs_cond_t *c)    { WakeConditionVariable(c); return 0; }
 static inline int xs_cond_broadcast(xs_cond_t *c) { WakeAllConditionVariable(c); return 0; }
 
@@ -103,6 +108,7 @@ static inline void xs_thread_sleep_ns(double secs) {
 
 #include <pthread.h>
 #include <time.h>
+#include <errno.h>
 #include <stdint.h>
 
 typedef pthread_t       xs_thread_t;
@@ -112,6 +118,17 @@ typedef pthread_cond_t  xs_cond_t;
 static inline int xs_cond_init(xs_cond_t *c)    { return pthread_cond_init(c, NULL); }
 static inline int xs_cond_destroy(xs_cond_t *c) { return pthread_cond_destroy(c); }
 static inline int xs_cond_wait(xs_cond_t *c, xs_mutex_t *m) { return pthread_cond_wait(c, m); }
+static inline int xs_cond_timedwait_ms(xs_cond_t *c, xs_mutex_t *m, int ms) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec  += ms / 1000;
+    ts.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+    int rc = pthread_cond_timedwait(c, m, &ts);
+    if (rc == 0) return 0;
+    if (rc == ETIMEDOUT) return 1;
+    return -1;
+}
 static inline int xs_cond_signal(xs_cond_t *c)    { return pthread_cond_signal(c); }
 static inline int xs_cond_broadcast(xs_cond_t *c) { return pthread_cond_broadcast(c); }
 

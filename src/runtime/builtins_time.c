@@ -4,6 +4,7 @@
 #include "runtime/interp.h"
 #include "runtime/builtins.h"
 #include "runtime/concurrent.h"
+#include "runtime/error.h"
 #include "core/value.h"
 #include <stdlib.h>
 #include <string.h>
@@ -18,10 +19,22 @@ static Value *native_time_now(Interp *i, Value **args, int argc) {
 }
 
 static Value *native_time_sleep(Interp *i, Value **args, int argc) {
-    (void)i;
     if (argc<1) return value_incref(XS_NULL_VAL);
     double secs = VAL_TAG(args[0])==XS_FLOAT?args[0]->f:(double)VAL_INT(args[0]);
     xs_sleep_seconds(secs);
+    if (xs_task_is_cancelled()) {
+        Value *err = xs_error_new("Cancelled",
+            "task cancelled by sibling failure", NULL);
+        if (i) {
+            if (i->cf.value) value_decref(i->cf.value);
+            i->cf.signal = CF_THROW;
+            i->cf.value  = err;
+        } else if (!g_xs_pending_throw) {
+            g_xs_pending_throw = err;
+        } else {
+            value_decref(err);
+        }
+    }
     return value_incref(XS_NULL_VAL);
 }
 
@@ -55,13 +68,25 @@ TIME_COMPONENT(minute, tm_min)
 TIME_COMPONENT(second, tm_sec)
 
 static Value *native_time_sleep_ms(Interp *ig, Value **a, int n) {
-    (void)ig;
     if (n<1) return value_incref(XS_NULL_VAL);
     int64_t ms=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     if (ms <= 0) return value_incref(XS_NULL_VAL);
     /* Goes through xs_sleep_seconds so the GIL drops while we wait,
        letting parallel spawn workers actually progress in parallel. */
     xs_sleep_seconds((double)ms / 1000.0);
+    if (xs_task_is_cancelled()) {
+        Value *err = xs_error_new("Cancelled",
+            "task cancelled by sibling failure", NULL);
+        if (ig) {
+            if (ig->cf.value) value_decref(ig->cf.value);
+            ig->cf.signal = CF_THROW;
+            ig->cf.value  = err;
+        } else if (!g_xs_pending_throw) {
+            g_xs_pending_throw = err;
+        } else {
+            value_decref(err);
+        }
+    }
     return value_incref(XS_NULL_VAL);
 }
 static Value *native_time_format(Interp *ig, Value **a, int n) {

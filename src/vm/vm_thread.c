@@ -36,6 +36,8 @@ typedef struct VMThreadTask {
     int                  id;
     int                  done;
     int                  errored;
+    int                  cancelled;
+    int                  nursery_id;
     Value               *closure;
     Value               *result;          /* on success */
     Value               *error;           /* on error (incref'd snapshot) */
@@ -70,6 +72,20 @@ typedef struct {
     XSMap        *globals;
 } VMThreadArg;
 
+static void mark_vm_siblings_cancelled_locked(int nursery_id, int self_id) {
+    if (nursery_id == 0) return;
+    for (VMThreadTask *t = g_vm_tasks_head; t; t = t->next) {
+        if (t->id == self_id) continue;
+        if (t->nursery_id != nursery_id) continue;
+        xs_mutex_lock(&t->mu);
+        if (!t->done) {
+            t->cancelled = 1;
+            xs_cond_broadcast(&t->cv);
+        }
+        xs_mutex_unlock(&t->mu);
+    }
+}
+
 static void *vm_thread_entry(void *arg_) {
     VMThreadArg *arg = (VMThreadArg *)arg_;
     VMThreadTask *t  = arg->task;
@@ -77,6 +93,8 @@ static void *vm_thread_entry(void *arg_) {
     free(arg);
 
     xs_gil_acquire();
+    xs_task_set_self_cancel_ptr(&t->cancelled);
+    xs_nursery_set_current_id(t->nursery_id);
 
     /* Each spawn gets a private VM so its stack/frames/eff_stack don't
        race against whoever else is running under the GIL between yields.
@@ -108,6 +126,13 @@ static void *vm_thread_entry(void *arg_) {
     xs_cond_broadcast(&t->cv);
     xs_mutex_unlock(&t->mu);
 
+    if (errored && t->nursery_id != 0) {
+        xs_mutex_lock(&g_vm_tasks_mu);
+        mark_vm_siblings_cancelled_locked(t->nursery_id, t->id);
+        xs_mutex_unlock(&g_vm_tasks_mu);
+    }
+
+    xs_task_set_self_cancel_ptr(NULL);
     xs_gil_release();
     return NULL;
 }
@@ -125,7 +150,8 @@ Value *vm_spawn_real(VM *parent, Value *closure) {
     g_vm_tasks_head = t;
     xs_mutex_unlock(&g_vm_tasks_mu);
 
-    t->closure = value_incref(closure);
+    t->closure    = value_incref(closure);
+    t->nursery_id = xs_nursery_current_id();
     xs_mutex_init(&t->mu);
     xs_cond_init(&t->cv);
 
