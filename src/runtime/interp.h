@@ -28,6 +28,19 @@ typedef struct EffectFrame {
     ParamList         params;
     Node             *handler_body;
     Env              *handler_env;
+    /* Captured at handle-setup time so a multi-shot resume(...) call
+       inside the arm body can re-enter the body's continuation: each
+       resume re-evaluates the body with a per-call perform-override,
+       returns the body's final value back to the arm, and the outer
+       body's tail (post-perform) is unwound via CF_HANDLE_DONE.
+       arm_is_multishot is precomputed at frame push: 1 when the arm
+       body statically contains 2+ resume calls (so re-eval is the
+       only way to honour the second one), 0 for the single-shot
+       case where the legacy CF_RESUME path still applies and
+       composes correctly with multi-perform bodies. */
+    Node             *handle_body;
+    Env              *handle_body_env;
+    int               arm_is_multishot;
     struct EffectFrame *prev;
 } EffectFrame;
 
@@ -60,6 +73,18 @@ struct Interp {
     EffectFrame *effect_stack;
     Value       *resume_value;
     int          in_handler;
+    /* When non-zero, the next perform short-circuits to perform_override
+       and clears the flag. Used by NODE_RESUME during multi-shot to
+       feed a resume value into a re-evaluated handle body. */
+    Value       *perform_override;
+    int          perform_override_active;
+    /* Set by NODE_RESUME's multi-shot path so the enclosing
+       NODE_PERFORM knows to bail out via CF_HANDLE_DONE (taking the
+       arm body's final value as the handle expression's value)
+       instead of the legacy CF_RETURN short-circuit. Saved/restored
+       by NODE_PERFORM so nested perform/handle pairs don't trip on
+       each other. */
+    int          multi_shot_used;
 
     Value       *nursery_queue;
 

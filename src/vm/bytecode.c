@@ -72,6 +72,7 @@ static const char *op_name(Opcode op) {
         "TRACE_CALL","TRACE_RETURN","TRACE_STORE","TRACE_IO",
         "AND","OR","SPREAD","LOOP",
         "EFFECT_CALL","EFFECT_RESUME","EFFECT_HANDLE",
+        "HANDLE_BODY_END","EFFECT_DONE",
         "AWAIT","YIELD","SPAWN",
     };
     return (unsigned)op < OP__MAX ? names[op] : "?";

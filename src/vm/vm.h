@@ -74,6 +74,19 @@ typedef struct {
     Value     **stack_snapshot;
     int         snapshot_len;
     int         snapshot_cap;
+    /* Arm-body snapshot for multi-shot resume. When the handler arm
+     * calls resume, we snapshot the arm's frames + stack here, then
+     * restore the body. Once the body completes, OP_HANDLE_BODY_END
+     * swaps in the saved arm state and the second resume can replay
+     * the body snapshot above as many times as it likes. */
+    int         in_resume;
+    CallFrame  *arm_frames;
+    int         arm_frames_cap;
+    int         arm_frame_count;
+    int         arm_sp_off;
+    Value     **arm_stack_snapshot;
+    int         arm_snapshot_len;
+    int         arm_snapshot_cap;
 } EffectCont;
 
 typedef struct VM {
@@ -141,6 +154,8 @@ typedef struct VM {
     int       **nursery_stack;
     int        *nursery_lens;
     int        *nursery_caps;
+    int        *nursery_ids;       /* per-depth: this nursery's instance id */
+    int        *nursery_prev_ids;  /* per-depth: tls_nursery_id at BEGIN */
     int         nursery_depth;
     int         nursery_stack_cap;
 } VM;

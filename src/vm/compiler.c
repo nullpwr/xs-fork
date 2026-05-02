@@ -2512,10 +2512,15 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
          * "unhandled effect" error. Matches interp's strict semantics
          * (no implicit catch-all on the last arm) so a typo in the
          * arm name surfaces instead of silently routing every effect
-         * through it. */
+         * through it. Body and each arm are compiled with want_value=1
+         * so HANDLE_BODY_END always has a single value to swap into
+         * the arm's resume call site (and arm bodies are
+         * structurally consistent for OP_EFFECT_DONE). The trailing
+         * pop below restores the caller's want_value contract. */
         int try_start = emit_jump(c, OP_TRY_BEGIN);
-        compile_node(c, n->handle.expr, want_value);
+        compile_node(c, n->handle.expr, 1);
         emit(c, MAKE_A(OP_TRY_END, 0, 0));
+        emit(c, MAKE_A(OP_HANDLE_BODY_END, 0, 0));
         int over_handler = emit_jump(c, OP_JUMP);
         patch_jump(c, try_start);
         emit(c, MAKE_A(OP_CATCH, 0, 0));
@@ -2524,7 +2529,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         if (n_arms == 0) {
             emit(c, MAKE_A(OP_POP, 0, 0)); /* drop eff_name */
             emit(c, MAKE_A(OP_POP, 0, 0)); /* drop eff_val */
-            if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+            emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+            emit(c, MAKE_A(OP_EFFECT_DONE, 0, 0));
         } else {
             int *out_jumps = xs_calloc((size_t)n_arms, sizeof(int));
             int n_out = 0;
@@ -2551,7 +2557,8 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 } else {
                     emit(c, MAKE_A(OP_POP, 0, 0));
                 }
-                compile_node(c, earm->body, want_value);
+                compile_node(c, earm->body, 1);
+                emit(c, MAKE_A(OP_EFFECT_DONE, 0, 0));
                 out_jumps[n_out++] = emit_jump(c, OP_JUMP);
 
                 patch_jump(c, skip_jumps[ai]);
@@ -2573,6 +2580,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         }
 
         patch_jump(c, over_handler);
+        if (!want_value) emit(c, MAKE_A(OP_POP, 0, 0));
         return;
     }
 

@@ -832,17 +832,20 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
 
 static Value *vm_channel(Interp *interp, Value **args, int argc) {
     (void)interp;
-    extern int xs_chan_alloc(void);
+    extern int xs_chan_alloc(int cap);
     Value *ch = xs_map_new();
     Value *type = xs_str("channel");
     map_set(ch->map, "__type", type); value_decref(type);
     Value *buf = xs_array_new();
     map_set(ch->map, "_buf", buf); value_decref(buf);
-    /* Mutex+cv id so cross-thread send/recv blocks correctly. */
-    int id = xs_chan_alloc();
+    int cap = 0;
+    if (argc >= 1 && args[0]) {
+        if (VAL_TAG(args[0]) == XS_INT) cap = (int)VAL_INT(args[0]);
+        else if (VAL_TAG(args[0]) == XS_FLOAT) cap = (int)args[0]->f;
+    }
+    int id = xs_chan_alloc(cap);
     Value *id_v = xs_int(id);
     map_set(ch->map, "_chan_id", id_v); value_decref(id_v);
-    int64_t cap = (argc >= 1 && VAL_TAG(args[0]) == XS_INT) ? VAL_INT(args[0]) : 0;
     Value *cap_v = xs_int(cap);
     map_set(ch->map, "_cap", cap_v); value_decref(cap_v);
     return ch;
@@ -1034,6 +1037,10 @@ static void vm_register_stdlib(VM *vm) {
     REG("eprint",  vm_eprint);
     REG("eprintln", vm_eprintln);
     REG("channel", vm_channel);
+    {
+        extern Value *native_async_select(Interp *, Value **, int);
+        REG("select",  native_async_select);
+    }
     REG("__load_plugin", vm_load_plugin);
     REG("is_int",      vm_is_int);
     REG("is_float",    vm_is_float);
@@ -1159,14 +1166,32 @@ VM *vm_new(void) {
 }
 
 static void eff_cont_release_snapshot(EffectCont *ec) {
-    if (!ec || !ec->stack_snapshot) return;
-    for (int i = 0; i < ec->snapshot_len; i++) {
-        if (ec->stack_snapshot[i]) value_decref(ec->stack_snapshot[i]);
+    if (!ec) return;
+    if (ec->stack_snapshot) {
+        for (int i = 0; i < ec->snapshot_len; i++) {
+            if (ec->stack_snapshot[i]) value_decref(ec->stack_snapshot[i]);
+        }
+        free(ec->stack_snapshot);
+        ec->stack_snapshot = NULL;
+        ec->snapshot_len = 0;
+        ec->snapshot_cap = 0;
     }
-    free(ec->stack_snapshot);
-    ec->stack_snapshot = NULL;
-    ec->snapshot_len = 0;
-    ec->snapshot_cap = 0;
+    if (ec->arm_stack_snapshot) {
+        for (int i = 0; i < ec->arm_snapshot_len; i++) {
+            if (ec->arm_stack_snapshot[i]) value_decref(ec->arm_stack_snapshot[i]);
+        }
+        free(ec->arm_stack_snapshot);
+        ec->arm_stack_snapshot = NULL;
+        ec->arm_snapshot_len = 0;
+        ec->arm_snapshot_cap = 0;
+    }
+    if (ec->arm_frames) {
+        free(ec->arm_frames);
+        ec->arm_frames = NULL;
+        ec->arm_frames_cap = 0;
+        ec->arm_frame_count = 0;
+    }
+    ec->in_resume = 0;
 }
 
 void vm_free(VM *vm) {
@@ -1183,6 +1208,8 @@ void vm_free(VM *vm) {
     free(vm->nursery_stack);
     free(vm->nursery_lens);
     free(vm->nursery_caps);
+    free(vm->nursery_ids);
+    free(vm->nursery_prev_ids);
     if (vm->globals) { map_free(vm->globals); vm->globals = NULL; }
     free(vm->stack);
     free(vm->frames);
@@ -1232,6 +1259,8 @@ void vm_free_child(VM *vm) {
     free(vm->nursery_stack);
     free(vm->nursery_lens);
     free(vm->nursery_caps);
+    free(vm->nursery_ids);
+    free(vm->nursery_prev_ids);
     while (vm->sp > vm->stack) value_decref(*--vm->sp);
     free(vm->stack);
     free(vm->frames);
@@ -1930,8 +1959,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     array_push(arr->arr, value_incref(col->arr->items[j]));
                 r = arr;
             } else if (VAL_TAG(col)==XS_MAP && VAL_TAG(idx)==XS_STR) {
-                Value *v = map_get(col->map, idx->s);
-                r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
+                Value *cid = map_get(col->map, "_chan_id");
+                int is_chan = (cid && VAL_TAG(cid) == XS_INT);
+                if (is_chan && (strcmp(idx->s, "_buf") == 0 ||
+                                strcmp(idx->s, "_cap") == 0 ||
+                                strcmp(idx->s, "_chan_id") == 0 ||
+                                strcmp(idx->s, "_type") == 0 ||
+                                strcmp(idx->s, "__type") == 0)) {
+                    r = value_incref(XS_NULL_VAL);
+                } else {
+                    Value *v = map_get(col->map, idx->s);
+                    r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
+                }
             } else if (VAL_TAG(col)==XS_RANGE && VAL_TAG(idx)==XS_INT && col->range) {
                 r = xs_int(col->range->start + VAL_INT(idx));
             } else if (VAL_TAG(col)==XS_STR && VAL_TAG(idx)==XS_INT) {
@@ -2038,6 +2077,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *obj = POP(); Value *r = NULL;
             if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
+                Value *cid = map_get(obj->map, "_chan_id");
+                int is_chan = (cid && VAL_TAG(cid) == XS_INT);
+                if (is_chan && (strcmp(name, "_buf") == 0 ||
+                                strcmp(name, "_cap") == 0 ||
+                                strcmp(name, "_chan_id") == 0 ||
+                                strcmp(name, "_type") == 0 ||
+                                strcmp(name, "__type") == 0)) {
+                    r = value_incref(XS_NULL_VAL);
+                    value_decref(obj); PUSH(r); break;
+                }
                 Value *v = map_get(obj->map, name);
                 if (v) {
                     r = value_incref(v);
@@ -2563,6 +2612,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 Value *yields = map_get(iter->map, "_yields");
                 r = xs_int(yields && VAL_TAG(yields) == XS_ARRAY ? yields->arr->len : 0);
             }
+            else if (VAL_TAG(iter)==XS_MAP && map_get(iter->map, "_chan_id") &&
+                     VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
+                /* Channel: snapshot the current buffered length; ITER_GET
+                   drains that many via try_recv. */
+                extern int xs_chan_len(Value *);
+                r = xs_int(xs_chan_len(iter));
+            }
             else if (VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) r = xs_int(iter->map->len);
             else if (VAL_TAG(iter)==XS_RANGE && iter->range) {
                 int64_t span = iter->range->end - iter->range->start;
@@ -2595,6 +2651,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     r = value_incref(yields->arr->items[i]);
                 else
                     r = value_incref(XS_NULL_VAL);
+            } else if (VAL_TAG(iter)==XS_MAP && iter->map &&
+                       map_get(iter->map, "_chan_id") &&
+                       VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
+                /* Channel iteration: ignore idx, pop the next buffered
+                   value via try_recv. ITER_LEN snapshotted the count so
+                   the loop bound matches the drain. */
+                extern Value *xs_chan_try_recv(Value *);
+                r = xs_chan_try_recv(iter);
             } else if ((VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) && iter->map) {
                 int64_t ki = 0;
                 r = value_incref(XS_NULL_VAL);
@@ -2792,10 +2856,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"send")==0 && mc_argc>=1) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        extern Value *xs_chan_send(Value *, Value *);
-                        Value *r = xs_chan_send(mc_obj, mc_args[0]);
-                        if (r) value_decref(r);
-                        mc_result = value_incref(XS_NULL_VAL);
+                        extern int xs_chan_send(Value *, Value *);
+                        if (!xs_chan_send(mc_obj, mc_args[0])) {
+                            Value *err = xs_error_new("ChannelClosed",
+                                "send on closed channel", NULL);
+                            g_xs_pending_throw = err;
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else {
+                            mc_result = value_incref(XS_NULL_VAL);
+                        }
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"recv")==0 || strcmp(mc_name,"try_recv")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
@@ -2809,22 +2878,38 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             mc_result = xs_chan_recv(mc_obj, NULL);
                         }
                     } else goto map_generic_method;
+                } else if (strcmp(mc_name,"close")==0) {
+                    Value *ch_type = map_get(mc_obj->map, "__type");
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                        extern void xs_chan_close(Value *);
+                        xs_chan_close(mc_obj);
+                        mc_result = value_incref(XS_NULL_VAL);
+                    } else goto map_generic_method;
+                } else if (strcmp(mc_name,"is_closed")==0) {
+                    Value *ch_type = map_get(mc_obj->map, "__type");
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                        extern int xs_chan_is_closed(Value *);
+                        mc_result = xs_bool(xs_chan_is_closed(mc_obj));
+                    } else goto map_generic_method;
+                } else if (strcmp(mc_name,"cap")==0) {
+                    Value *ch_type = map_get(mc_obj->map, "__type");
+                    if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
+                        extern int xs_chan_cap(Value *);
+                        mc_result = xs_int(xs_chan_cap(mc_obj));
+                    } else goto map_generic_method;
                 } else if (strcmp(mc_name,"is_empty")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        Value *buf = map_get(mc_obj->map, "_buf");
-                        mc_result = xs_bool(buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len == 0);
+                        extern int xs_chan_len(Value *);
+                        mc_result = xs_bool(xs_chan_len(mc_obj) == 0);
                     } else {
                         mc_result = xs_bool(mc_obj->map->len == 0);
                     }
                 } else if (strcmp(mc_name,"is_full")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        Value *buf = map_get(mc_obj->map, "_buf");
-                        Value *cap = map_get(mc_obj->map, "_cap");
-                        int64_t c2 = (cap && VAL_TAG(cap) == XS_INT) ? VAL_INT(cap) : 0;
-                        int full = (c2 > 0 && buf && VAL_TAG(buf) == XS_ARRAY && buf->arr->len >= (int)c2);
-                        mc_result = xs_bool(full);
+                        extern int xs_chan_is_full(Value *);
+                        mc_result = xs_bool(xs_chan_is_full(mc_obj));
                     } else goto map_generic_method;
                 } else if (strcmp(mc_name,"merge")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_MAP) {
                     for(int j=0;j<mc_args[0]->map->cap;j++){
@@ -4734,7 +4819,38 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 if (!cur->valid) cur = NULL;
             }
             if (cur) {
-                /* Restore frames. */
+                /* First resume in this arm body: snapshot the arm's
+                 * current frames + stack so a later HANDLE_BODY_END
+                 * can return body's value here. The body snapshot
+                 * (cur->frames / stack_snapshot) is left intact so a
+                 * second resume after the body returns can replay it
+                 * fresh -- multi-shot resume is just multiple replays
+                 * of the same captured continuation. */
+                if (!cur->in_resume) {
+                    cur->arm_frame_count = vm->frame_count;
+                    if (cur->arm_frames_cap < vm->frame_count) {
+                        cur->arm_frames_cap = vm->frame_count;
+                        cur->arm_frames = realloc(cur->arm_frames,
+                            (size_t)cur->arm_frames_cap * sizeof(CallFrame));
+                    }
+                    memcpy(cur->arm_frames, vm->frames,
+                           sizeof(CallFrame) * (size_t)vm->frame_count);
+                    cur->arm_sp_off = (int)(vm->sp - vm->stack);
+                    int n = cur->arm_sp_off;
+                    if (cur->arm_snapshot_cap < n) {
+                        cur->arm_snapshot_cap = n;
+                        cur->arm_stack_snapshot = realloc(cur->arm_stack_snapshot,
+                            (size_t)n * sizeof(Value *));
+                    }
+                    for (int si = 0; si < n; si++) {
+                        Value *v = vm->stack[si];
+                        cur->arm_stack_snapshot[si] = v ? value_incref(v) : NULL;
+                    }
+                    cur->arm_snapshot_len = n;
+                    cur->in_resume = 1;
+                }
+
+                /* Restore body frames + stack slice. */
                 if (vm->frames_cap < cur->frame_count) {
                     vm->frames_cap = cur->frame_count;
                     vm->frames = realloc(vm->frames,
@@ -4744,11 +4860,6 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                        sizeof(CallFrame) * (size_t)cur->frame_count);
                 vm->frame_count = cur->frame_count;
 
-                /* Replay captured suspended-body slice
-                 * [stack_top_off .. sp_off). Slots below
-                 * stack_top_off belong to the handler frame and any
-                 * outer scopes whose mutations during the arm body
-                 * must persist past resume. */
                 int lo = cur->stack_top_off;
                 int hi = cur->sp_off;
                 if (lo < 0) lo = 0;
@@ -4765,18 +4876,70 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 vm->sp = vm->stack + hi;
                 frame = FRAME;
 
-                /* Pop the continuation off the stack: resume is
-                 * single-shot relative to handler frame lifetime.
-                 * Nested handlers each had their own slot so this
-                 * pop only consumes the innermost. */
-                eff_cont_release_snapshot(cur);
-                cur->valid = 0;
-                vm->eff_stack_count--;
-                vm->eff_cont.valid = 0;
-
                 PUSH(resume_val);
             } else {
                 PUSH(resume_val);
+            }
+            break;
+        }
+
+        case OP_HANDLE_BODY_END: {
+            /* Body just finished. If a resume from the arm body got us
+             * here, swap the body's return value into the arm body's
+             * resume call site and continue the arm. Otherwise no-op
+             * (body completed naturally without ever performing). */
+            EffectCont *cur = NULL;
+            if (vm->eff_stack_count > 0) {
+                cur = &vm->eff_stack[vm->eff_stack_count - 1];
+                if (!cur->valid || !cur->in_resume) cur = NULL;
+            }
+            if (cur) {
+                /* Steal the body's return value off the stack. Clear
+                 * the popped slot so the arm-state restore below
+                 * doesn't decref body_val while we still hold the
+                 * single live reference. */
+                Value *body_val;
+                if (vm->sp > vm->stack) {
+                    body_val = POP();
+                    *vm->sp = NULL;
+                } else {
+                    body_val = value_incref(XS_NULL_VAL);
+                }
+                if (vm->frames_cap < cur->arm_frame_count) {
+                    vm->frames_cap = cur->arm_frame_count;
+                    vm->frames = realloc(vm->frames,
+                        (size_t)vm->frames_cap * sizeof(CallFrame));
+                }
+                memcpy(vm->frames, cur->arm_frames,
+                       sizeof(CallFrame) * (size_t)cur->arm_frame_count);
+                vm->frame_count = cur->arm_frame_count;
+                int n = cur->arm_snapshot_len;
+                if (cur->arm_stack_snapshot) {
+                    for (int si = 0; si < n; si++) {
+                        Value *prev = vm->stack[si];
+                        Value *snap = cur->arm_stack_snapshot[si];
+                        Value *next = snap ? value_incref(snap) : NULL;
+                        if (prev && prev != next) value_decref(prev);
+                        vm->stack[si] = next;
+                    }
+                }
+                vm->sp = vm->stack + cur->arm_sp_off;
+                frame = FRAME;
+                cur->in_resume = 0;
+                PUSH(body_val);
+            }
+            break;
+        }
+
+        case OP_EFFECT_DONE: {
+            /* Arm body has finished -- release the saved continuation
+             * (and its arm snapshot) so a future perform doesn't see
+             * stale state. */
+            if (vm->eff_stack_count > 0) {
+                EffectCont *cur = &vm->eff_stack[vm->eff_stack_count - 1];
+                eff_cont_release_snapshot(cur);
+                cur->valid = 0;
+                vm->eff_stack_count--;
             }
             break;
         }
@@ -5014,14 +5177,28 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 vm->nursery_stack = realloc(vm->nursery_stack, newcap * sizeof(int *));
                 vm->nursery_lens  = realloc(vm->nursery_lens, newcap * sizeof(int));
                 vm->nursery_caps  = realloc(vm->nursery_caps, newcap * sizeof(int));
+                vm->nursery_ids   = realloc(vm->nursery_ids,  newcap * sizeof(int));
+                vm->nursery_prev_ids = realloc(vm->nursery_prev_ids,
+                                               newcap * sizeof(int));
                 for (int i = vm->nursery_stack_cap; i < newcap; i++) {
                     vm->nursery_stack[i] = NULL;
                     vm->nursery_lens[i] = 0;
                     vm->nursery_caps[i] = 0;
+                    vm->nursery_ids[i]  = 0;
+                    vm->nursery_prev_ids[i] = 0;
                 }
                 vm->nursery_stack_cap = newcap;
             }
             vm->nursery_lens[vm->nursery_depth] = 0;
+            {
+                extern int xs_nursery_alloc_id(void);
+                extern int xs_nursery_current_id(void);
+                extern void xs_nursery_set_current_id(int);
+                int new_id = xs_nursery_alloc_id();
+                vm->nursery_prev_ids[vm->nursery_depth] = xs_nursery_current_id();
+                vm->nursery_ids[vm->nursery_depth] = new_id;
+                xs_nursery_set_current_id(new_id);
+            }
             vm->nursery_depth++;
             break;
         }
@@ -5038,14 +5215,45 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 Value *r = vm_await_task(ids[i], &err, &e);
                 if (r) value_decref(r);
                 if (err && e) {
-                    /* Surface the first error encountered as a throw on
-                       the parent. The remaining tasks still got drained
-                       so we don't leave orphans behind. */
-                    if (!g_xs_pending_throw) g_xs_pending_throw = e;
-                    else value_decref(e);
+                    /* Cancelled errors are sibling cleanup noise from
+                       the cancellation propagation -- the *original*
+                       throw is the one we want to surface. Suppress
+                       Cancelled if a real error already won, and don't
+                       let Cancelled mask a later real error either. */
+                    int is_cancel = 0;
+                    if (VAL_TAG(e) == XS_MAP) {
+                        Value *kind = map_get(e->map, "kind");
+                        if (kind && VAL_TAG(kind) == XS_STR &&
+                            strcmp(kind->s, "Cancelled") == 0) is_cancel = 1;
+                    }
+                    if (is_cancel) {
+                        value_decref(e);
+                    } else if (!g_xs_pending_throw) {
+                        g_xs_pending_throw = e;
+                    } else {
+                        /* If pending is a Cancelled, replace with the
+                           real error; else keep first-real-error. */
+                        Value *cur = g_xs_pending_throw;
+                        int cur_is_cancel = 0;
+                        if (VAL_TAG(cur) == XS_MAP) {
+                            Value *kind = map_get(cur->map, "kind");
+                            if (kind && VAL_TAG(kind) == XS_STR &&
+                                strcmp(kind->s, "Cancelled") == 0) cur_is_cancel = 1;
+                        }
+                        if (cur_is_cancel) {
+                            value_decref(cur);
+                            g_xs_pending_throw = e;
+                        } else {
+                            value_decref(e);
+                        }
+                    }
                 } else if (e) value_decref(e);
             }
             vm->nursery_lens[d] = 0;
+            {
+                extern void xs_nursery_set_current_id(int);
+                xs_nursery_set_current_id(vm->nursery_prev_ids[d]);
+            }
             vm->nursery_depth--;
             break;
         }

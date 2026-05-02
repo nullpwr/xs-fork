@@ -83,6 +83,12 @@ typedef enum {
     OP_EFFECT_CALL,   /* A=argc, Bx=effect_op_name */
     OP_EFFECT_RESUME,
     OP_EFFECT_HANDLE, /* Bx=handler_info */
+    /* Multi-shot resume support: emitted at the body's TRY_END / arm
+       body completion. BODY_END swaps body return value into the arm
+       body's resume call site if a resume was in flight; DONE pops
+       the eff_stack entry once the arm body has truly finished. */
+    OP_HANDLE_BODY_END,
+    OP_EFFECT_DONE,
 
     OP_AWAIT,
     OP_YIELD,

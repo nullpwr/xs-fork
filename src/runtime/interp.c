@@ -426,6 +426,7 @@ void interp_free(Interp *i) {
         free(frame->effect_name);
         free(frame->op_name);
         env_decref(frame->handler_env);
+        if (frame->handle_body_env) env_decref(frame->handle_body_env);
         free(frame);
     }
     if (i->resume_value) value_decref(i->resume_value);
@@ -450,6 +451,117 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
                           const char *call_site);
 static int match_pattern(Interp *i, Node *pat, Value *val, Env *env);
 static void hoist_functions(Interp *i, NodeList *stmts);
+
+/* Walk the arm body and count NODE_RESUME calls, capping at 2 since
+   that's all the caller cares about ("more than one resume? then use
+   multi-shot"). Don't recurse into nested handles or function
+   definitions -- those scopes own their own resumes. The count is a
+   structural upper bound (a resume in one branch of an `if` still
+   counts even if only one branch fires); single-resume arms always
+   get the legacy single-shot path which is cheaper and matches what
+   existing tests rely on. */
+static int count_arm_resumes(Node *n, int cap) {
+    if (!n) return 0;
+    NodeTag t = (NodeTag)VAL_TAG(n);
+    if (t == NODE_RESUME) return 1;
+    if (t == NODE_HANDLE)  return 0;
+    if (t == NODE_FN_DECL) return 0;
+    if (t == NODE_LAMBDA)  return 0;
+    int total = 0;
+#define ADD(child) do { \
+    total += count_arm_resumes((child), cap); \
+    if (total >= cap) return total; \
+} while (0)
+    switch (t) {
+    case NODE_BLOCK:
+        for (int j = 0; j < n->block.stmts.len; j++) ADD(n->block.stmts.items[j]);
+        if (n->block.expr) ADD(n->block.expr);
+        break;
+    case NODE_IF:
+        ADD(n->if_expr.cond);
+        ADD(n->if_expr.then);
+        for (int j = 0; j < n->if_expr.elif_conds.len; j++) {
+            ADD(n->if_expr.elif_conds.items[j]);
+            ADD(n->if_expr.elif_thens.items[j]);
+        }
+        if (n->if_expr.else_branch) ADD(n->if_expr.else_branch);
+        break;
+    case NODE_WHILE:
+        ADD(n->while_loop.cond);
+        ADD(n->while_loop.body);
+        break;
+    case NODE_FOR:
+        ADD(n->for_loop.iter);
+        ADD(n->for_loop.body);
+        break;
+    case NODE_LOOP:
+        ADD(n->loop.body);
+        break;
+    case NODE_LET:
+    case NODE_VAR:
+    case NODE_CONST:
+        if (n->let.value) ADD(n->let.value);
+        break;
+    case NODE_CALL:
+        ADD(n->call.callee);
+        for (int j = 0; j < n->call.args.len; j++) ADD(n->call.args.items[j]);
+        break;
+    case NODE_METHOD_CALL:
+        ADD(n->method_call.obj);
+        for (int j = 0; j < n->method_call.args.len; j++) ADD(n->method_call.args.items[j]);
+        break;
+    case NODE_BINOP:
+        ADD(n->binop.left);
+        ADD(n->binop.right);
+        break;
+    case NODE_UNARY:
+        ADD(n->unary.expr);
+        break;
+    case NODE_ASSIGN:
+        ADD(n->assign.target);
+        ADD(n->assign.value);
+        break;
+    case NODE_RETURN:
+        if (n->ret.value) ADD(n->ret.value);
+        break;
+    case NODE_BREAK:
+        if (n->brk.value) ADD(n->brk.value);
+        break;
+    case NODE_THROW:
+        if (n->throw_.value) ADD(n->throw_.value);
+        break;
+    case NODE_EXPR_STMT:
+        ADD(n->expr_stmt.expr);
+        break;
+    case NODE_MATCH:
+        ADD(n->match.subject);
+        for (int j = 0; j < n->match.arms.len; j++) {
+            if (n->match.arms.items[j].guard) ADD(n->match.arms.items[j].guard);
+            ADD(n->match.arms.items[j].body);
+        }
+        break;
+    case NODE_TRY:
+        ADD(n->try_.body);
+        for (int j = 0; j < n->try_.catch_arms.len; j++)
+            ADD(n->try_.catch_arms.items[j].body);
+        if (n->try_.finally_block) ADD(n->try_.finally_block);
+        break;
+    case NODE_INDEX:
+        ADD(n->index.obj);
+        ADD(n->index.index);
+        break;
+    case NODE_FIELD:
+        ADD(n->field.obj);
+        break;
+    case NODE_PERFORM:
+        for (int j = 0; j < n->perform.args.len; j++) ADD(n->perform.args.items[j]);
+        break;
+    default:
+        break;
+    }
+#undef ADD
+    return total;
+}
 
 static int bind_pattern(Interp *i, Node *pat, Value *val, Env *env, int mutable) {
     if (!pat) return 1;
@@ -1069,8 +1181,8 @@ tail_call_entry: ;
                    _yield_chan and _resume_chan for .next() / for. */
                 Value *yield_chan  = xs_map_new();
                 Value *resume_chan = xs_map_new();
-                int yc_id = xs_chan_alloc();
-                int rc_id = xs_chan_alloc();
+                int yc_id = xs_chan_alloc(0);
+                int rc_id = xs_chan_alloc(0);
                 {
                     Value *t = xs_str("Channel");
                     map_set(yield_chan->map, "_type", t); value_decref(t);
@@ -2689,7 +2801,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                        and can't find its own locals. */
                     Env *saved_env = i->env ? env_incref(i->env) : NULL;
                     Value *go = value_incref(XS_NULL_VAL);
-                    xs_chan_send(rch, go); value_decref(go);
+                    (void)xs_chan_send(rch, go); value_decref(go);
                     Value *v = xs_chan_recv(ych, i);
                     if (i->env) env_decref(i->env);
                     i->env = saved_env;
@@ -2725,20 +2837,40 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             if (cid && VAL_TAG(cid) == XS_INT) {
                 if (strcmp(method,"send")==0) {
                     if (argc < 1) return value_incref(XS_NULL_VAL);
-                    return xs_chan_send(obj, args[0]);
+                    if (!xs_chan_send(obj, args[0])) {
+                        Value *err = xs_error_new("ChannelClosed",
+                            "send on closed channel", NULL);
+                        if (i->cf.value) value_decref(i->cf.value);
+                        i->cf.signal = CF_THROW;
+                        i->cf.value  = err;
+                        return value_incref(XS_NULL_VAL);
+                    }
+                    return value_incref(XS_NULL_VAL);
                 }
                 if (strcmp(method,"recv")==0)
                     return xs_chan_recv(obj, i);
                 if (strcmp(method,"try_recv")==0)
                     return xs_chan_try_recv(obj);
+                if (strcmp(method,"close")==0) {
+                    xs_chan_close(obj);
+                    return value_incref(XS_NULL_VAL);
+                }
+                if (strcmp(method,"is_closed")==0)
+                    return xs_chan_is_closed(obj)
+                        ? value_incref(XS_TRUE_VAL)
+                        : value_incref(XS_FALSE_VAL);
                 if (strcmp(method,"len")==0)
                     return xs_int(xs_chan_len(obj));
+                if (strcmp(method,"cap")==0)
+                    return xs_int(xs_chan_cap(obj));
                 if (strcmp(method,"is_empty")==0)
                     return xs_chan_len(obj) == 0
                         ? value_incref(XS_TRUE_VAL)
                         : value_incref(XS_FALSE_VAL);
                 if (strcmp(method,"is_full")==0)
-                    return value_incref(XS_FALSE_VAL);
+                    return xs_chan_is_full(obj)
+                        ? value_incref(XS_TRUE_VAL)
+                        : value_incref(XS_FALSE_VAL);
             }
         }
         /* Generator iterator protocol */
@@ -2855,20 +2987,40 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 if (strcmp(ct->s,"Channel")==0) {
                     if (strcmp(method,"send")==0) {
                         if (argc < 1) return value_incref(XS_NULL_VAL);
-                        return xs_chan_send(obj, args[0]);
+                        if (!xs_chan_send(obj, args[0])) {
+                            Value *err = xs_error_new("ChannelClosed",
+                                "send on closed channel", NULL);
+                            if (i->cf.value) value_decref(i->cf.value);
+                            i->cf.signal = CF_THROW;
+                            i->cf.value  = err;
+                            return value_incref(XS_NULL_VAL);
+                        }
+                        return value_incref(XS_NULL_VAL);
                     }
                     if (strcmp(method,"recv")==0)
                         return xs_chan_recv(obj, i);
                     if (strcmp(method,"try_recv")==0)
                         return xs_chan_try_recv(obj);
+                    if (strcmp(method,"close")==0) {
+                        xs_chan_close(obj);
+                        return value_incref(XS_NULL_VAL);
+                    }
+                    if (strcmp(method,"is_closed")==0)
+                        return xs_chan_is_closed(obj)
+                            ? value_incref(XS_TRUE_VAL)
+                            : value_incref(XS_FALSE_VAL);
                     if (strcmp(method,"len")==0)
                         return xs_int(xs_chan_len(obj));
+                    if (strcmp(method,"cap")==0)
+                        return xs_int(xs_chan_cap(obj));
                     if (strcmp(method,"is_empty")==0)
                         return xs_chan_len(obj) == 0
                             ? value_incref(XS_TRUE_VAL)
                             : value_incref(XS_FALSE_VAL);
                     if (strcmp(method,"is_full")==0)
-                        return value_incref(XS_FALSE_VAL); /* unbounded */
+                        return xs_chan_is_full(obj)
+                            ? value_incref(XS_TRUE_VAL)
+                            : value_incref(XS_FALSE_VAL);
                 }
                 /* Counter is now routed via the early goto above */
             }
@@ -5206,14 +5358,26 @@ do_call: ;
                 result = slice;
             } else result = value_incref(XS_NULL_VAL);
         } else if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
-            if (VAL_TAG(idx) == XS_STR) {
-                Value *v = map_get(obj->map, idx->s);
-                result = v ? value_incref(v) : value_incref(XS_NULL_VAL);
+            int is_chan = 0;
+            {
+                Value *cid = map_get(obj->map, "_chan_id");
+                if (cid && VAL_TAG(cid) == XS_INT) is_chan = 1;
+            }
+            const char *key_str = NULL;
+            char *key_owned = NULL;
+            if (VAL_TAG(idx) == XS_STR) key_str = idx->s;
+            else { key_owned = value_str(idx); key_str = key_owned; }
+            if (is_chan && key_str && (strcmp(key_str, "_buf") == 0 ||
+                                       strcmp(key_str, "_cap") == 0 ||
+                                       strcmp(key_str, "_chan_id") == 0 ||
+                                       strcmp(key_str, "_type") == 0 ||
+                                       strcmp(key_str, "__type") == 0)) {
+                result = value_incref(XS_NULL_VAL);
             } else {
-                char *ks = value_str(idx);
-                Value *v = map_get(obj->map, ks); free(ks);
+                Value *v = map_get(obj->map, key_str ? key_str : "");
                 result = v ? value_incref(v) : value_incref(XS_NULL_VAL);
             }
+            if (key_owned) free(key_owned);
         } else if (VAL_TAG(obj) == XS_STR) {
             if (VAL_TAG(idx) == XS_INT) {
                 int ai=(int)VAL_INT(idx); int slen=(int)strlen(obj->s);
@@ -5308,8 +5472,24 @@ do_call: ;
             if (v) result = value_incref(v);
         }
         if (!result && (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE)) {
-            Value *v = map_get(obj->map, name);
-            if (v) result = value_incref(v);
+            /* Channel internals (_buf, _cap, _chan_id, _type, __type)
+               aren't user-facing API. Block field reads on channel
+               maps so a typo doesn't expose the buffer or condvar id. */
+            int is_chan = 0;
+            {
+                Value *cid = map_get(obj->map, "_chan_id");
+                if (cid && VAL_TAG(cid) == XS_INT) is_chan = 1;
+            }
+            if (is_chan && (strcmp(name, "_buf") == 0 ||
+                            strcmp(name, "_cap") == 0 ||
+                            strcmp(name, "_chan_id") == 0 ||
+                            strcmp(name, "_type") == 0 ||
+                            strcmp(name, "__type") == 0)) {
+                result = value_incref(XS_NULL_VAL);
+            } else {
+                Value *v = map_get(obj->map, name);
+                if (v) result = value_incref(v);
+            }
         }
         if (!result && VAL_TAG(obj) == XS_STRUCT_VAL) {
             Value *v = map_get(obj->st->fields, name);
@@ -5513,6 +5693,23 @@ do_call: ;
                 pop_env(i);
                 FOR_BREAK_CHECK
             }
+        } else if (VAL_TAG(iter) == XS_MAP && map_get(iter->map, "_chan_id") &&
+                   VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
+            /* Channel iteration: snapshot the current buffer length and
+               drain that many values via try_recv. Doesn't block on an
+               open channel; for stream semantics, the caller can write
+               an explicit `while !ch.is_closed() || ch.len() > 0` loop
+               with .recv(). */
+            int snap = xs_chan_len(iter);
+            for (int ci = 0; ci < snap; ci++) {
+                Value *val = xs_chan_try_recv(iter);
+                push_env(i);
+                bind_pattern(i, n->for_loop.pattern, val ? val : XS_NULL_VAL, i->env, 1);
+                if (val) value_decref(val);
+                interp_exec(i, n->for_loop.body);
+                pop_env(i);
+                FOR_BREAK_CHECK
+            }
         } else if (VAL_TAG(iter) == XS_MAP && map_get(iter->map, "__type") &&
                    map_get(iter->map, "__type")->tag == XS_STR &&
                    strcmp(map_get(iter->map, "__type")->s, "generator") == 0) {
@@ -5705,7 +5902,7 @@ do_call: ;
                TLS so a sibling generator can't swap them out from under
                us between yields. */
             Env *gen_env = i->env ? env_incref(i->env) : NULL;
-            xs_chan_send(ych, val);
+            (void)xs_chan_send(ych, val);
             value_decref(val);
             Value *go = xs_chan_recv(rch, i);
             if (go) value_decref(go);
@@ -6086,23 +6283,37 @@ do_call: ;
         for (int j = 0; j < n->handle.arms.len; j++) {
             EffectArm *arm = &n->handle.arms.items[j];
             EffectFrame *frame = xs_calloc(1, sizeof(EffectFrame));
-            frame->effect_name  = xs_strdup(arm->effect_name);
-            frame->op_name      = xs_strdup(arm->op_name);
-            frame->params       = arm->params; /* borrow: do not free here */
-            frame->handler_body = arm->body;
-            frame->handler_env  = env_incref(i->env);
-            frame->prev         = i->effect_stack;
-            i->effect_stack     = frame;
+            frame->effect_name     = xs_strdup(arm->effect_name);
+            frame->op_name         = xs_strdup(arm->op_name);
+            frame->params          = arm->params; /* borrow: do not free here */
+            frame->handler_body    = arm->body;
+            frame->handler_env     = env_incref(i->env);
+            frame->handle_body     = n->handle.expr;
+            frame->handle_body_env = env_incref(i->env);
+            frame->arm_is_multishot = count_arm_resumes(arm->body, 2) > 1;
+            frame->prev            = i->effect_stack;
+            i->effect_stack        = frame;
             arms_pushed++;
         }
 
         Value *result = EVAL(i, n->handle.expr);
+        /* Multi-shot resume bail-out: arm body finished after one or
+           more re-entrant resume calls and parked the handle's value
+           on cf.value. Take it as the handle expression's result and
+           clear the signal so it doesn't keep unwinding past us. */
+        if (i->cf.signal == CF_HANDLE_DONE) {
+            if (result) value_decref(result);
+            result = i->cf.value ? i->cf.value : value_incref(XS_NULL_VAL);
+            i->cf.signal = 0;
+            i->cf.value  = NULL;
+        }
         for (int j = 0; j < arms_pushed; j++) {
             EffectFrame *frame = i->effect_stack;
             i->effect_stack = frame->prev;
             free(frame->effect_name);
             free(frame->op_name);
             env_decref(frame->handler_env);
+            if (frame->handle_body_env) env_decref(frame->handle_body_env);
             free(frame);
         }
 
@@ -6110,6 +6321,22 @@ do_call: ;
     }
 
     case NODE_PERFORM: {
+        /* Multi-shot resume override: a NODE_RESUME up the stack is
+           re-evaluating the body with this value as the perform's
+           result. Single-use -- a second perform inside the same
+           re-eval falls through to normal handler dispatch. */
+        if (i->perform_override_active) {
+            i->perform_override_active = 0;
+            Value *r = i->perform_override
+                ? value_incref(i->perform_override)
+                : value_incref(XS_NULL_VAL);
+            for (int j = 0; j < n->perform.args.len; j++) {
+                Value *av = EVAL(i, n->perform.args.items[j]);
+                if (av) value_decref(av);
+            }
+            return r;
+        }
+
         const char *eff = n->perform.effect_name;
         const char *op  = n->perform.op_name;
         EffectFrame *frame = i->effect_stack;
@@ -6152,29 +6379,44 @@ do_call: ;
 
         int saved_in_handler = i->in_handler;
         i->in_handler = 1;
+        int saved_multi_shot = i->multi_shot_used;
+        i->multi_shot_used = 0;
 
         Value *body_val = EVAL(i, frame->handler_body);
 
         int resumed = (i->cf.signal == CF_RESUME);
         if (resumed) CF_CLEAR(i);
+        int multi_done = i->multi_shot_used;
 
         Value *resume_val = i->resume_value;
         i->resume_value   = saved_resume;
         i->in_handler     = saved_in_handler;
+        i->multi_shot_used = saved_multi_shot;
 
         env_decref(i->env);
         i->env = saved_env;
         env_decref(handler_call_env);
 
         if (resumed) {
-            /* Handler called resume: drop the body's value and feed
-               resume's value back into the perform expression. */
+            /* Handler called single-shot resume: drop the body's value
+               and feed resume's value back into the perform expression. */
             value_decref(body_val);
             return resume_val;
         }
+        if (resume_val) value_decref(resume_val);
+        if (multi_done) {
+            /* Arm body finished after a multi-shot resume. Its final
+               value becomes the handle expression's value; signal
+               CF_HANDLE_DONE so call boundaries above us pass it
+               through unmolested instead of treating it as a regular
+               function return. */
+            if (i->cf.value) value_decref(i->cf.value);
+            i->cf.signal = CF_HANDLE_DONE;
+            i->cf.value  = body_val;
+            return value_incref(XS_NULL_VAL);
+        }
         /* Handler short-circuited: abort the enclosing function with the
            handler's body value so `handle ... with ...` evaluates to it. */
-        if (resume_val) value_decref(resume_val);
         if (i->cf.value) value_decref(i->cf.value);
         i->cf.signal = CF_RETURN;
         i->cf.value  = body_val;
@@ -6183,6 +6425,42 @@ do_call: ;
 
     case NODE_RESUME: {
         Value *val = n->resume_.value ? EVAL(i, n->resume_.value) : value_incref(XS_NULL_VAL);
+
+        /* Multi-shot path: if there's a handle body to replay, run it
+           with val as the perform-override. The body's final value
+           becomes this resume(...) call's result, so the arm body can
+           use it (and call resume again). After the arm body
+           eventually finishes, NODE_PERFORM raises CF_HANDLE_DONE
+           with the arm's value, which the outer handle catches. */
+        EffectFrame *frame = i->effect_stack;
+        if (frame && frame->arm_is_multishot &&
+            frame->handle_body && frame->handle_body_env) {
+            Value *prev_override = i->perform_override;
+            int prev_active = i->perform_override_active;
+            i->perform_override = val;
+            i->perform_override_active = 1;
+            /* Mark this arm body as having taken the multi-shot path
+               so NODE_PERFORM bails to the enclosing handle via
+               CF_HANDLE_DONE rather than the legacy CF_RETURN that
+               would let the body's post-perform tail re-execute. */
+            i->multi_shot_used = 1;
+
+            Env *saved_env = i->env;
+            env_incref(saved_env);
+            i->env = env_incref(frame->handle_body_env);
+
+            Value *body_val = EVAL(i, frame->handle_body);
+
+            env_decref(i->env);
+            i->env = saved_env;
+
+            i->perform_override = prev_override;
+            i->perform_override_active = prev_active;
+
+            value_decref(val);
+            return body_val;
+        }
+
         if (i->resume_value) value_decref(i->resume_value);
         i->resume_value = val;
         if (i->cf.value) value_decref(i->cf.value);
@@ -6224,50 +6502,119 @@ do_call: ;
     }
 
     case NODE_NURSERY: {
-        /* Execute body; any NODE_SPAWN inside will queue tasks.
-         * Set up task queue, run body, then execute all queued tasks. */
+        /* Spawn each NODE_SPAWN inside the body on a real OS thread
+           so siblings actually run in parallel and can observe each
+           other's cancellation. The nursery_queue collects the
+           returned future maps; when the body completes we await
+           each task and (per the policy in concurrent.c) propagate
+           cancel on the first throw, surfacing the original error
+           while suppressing the cleanup-noise Cancelled errors that
+           the siblings raise on wake-up. */
+#ifdef XS_WASM
+        /* WASI has no usable threads -- fall back to the legacy
+           sequential drain so the language semantics still hold,
+           sans real concurrency. */
         Value *saved_queue = i->nursery_queue;
         Value *queue = xs_array_new();
         i->nursery_queue = queue;
-
-        /* Run the nursery body */
         Value *body_val = EVAL(i, n->nursery_.body);
         value_decref(body_val);
-
-        /* Restore nursery queue pointer */
         i->nursery_queue = saved_queue;
-
-        /* Execute all spawned tasks in FIFO order */
         XSArray *tasks = queue->arr;
         for (int j = 0; j < tasks->len; j++) {
             if (i->cf.signal) break;
             Value *task = tasks->items[j];
             if (VAL_TAG(task) == XS_FUNC || VAL_TAG(task) == XS_NATIVE) {
                 Value *r = call_value(i, task, NULL, 0, "nursery_task");
-                /* If the task returned a callable (e.g. spawn fn() { ... }),
-                   call it too so the user's function body actually runs. */
                 if (!i->cf.signal && r &&
                     (VAL_TAG(r) == XS_FUNC || VAL_TAG(r) == XS_NATIVE)) {
                     Value *r2 = call_value(i, r, NULL, 0, "nursery_task");
                     value_decref(r2);
                 }
                 value_decref(r);
-            } else {
-                /* Already evaluated value: discard */
             }
         }
         value_decref(queue);
         return value_incref(XS_NULL_VAL);
+#else
+        int saved_nursery_id = xs_nursery_current_id();
+        int new_nursery_id   = xs_nursery_alloc_id();
+        xs_nursery_set_current_id(new_nursery_id);
+
+        Value *saved_queue = i->nursery_queue;
+        Value *queue = xs_array_new();   /* collects task futures */
+        i->nursery_queue = queue;
+
+        Value *body_val = EVAL(i, n->nursery_.body);
+        value_decref(body_val);
+
+        i->nursery_queue = saved_queue;
+        xs_nursery_set_current_id(saved_nursery_id);
+
+        /* Await every spawned task. Stash the first non-Cancelled
+           error and re-raise it after the join so a sibling's
+           cleanup throw doesn't mask the originator. */
+        XSArray *tasks = queue->arr;
+        Value *real_err = NULL;
+        for (int j = 0; j < tasks->len; j++) {
+            Value *fut = tasks->items[j];
+            if (!fut || VAL_TAG(fut) != XS_MAP) continue;
+            Value *tid_v = map_get(fut->map, "_task_id");
+            if (!tid_v || VAL_TAG(tid_v) != XS_INT) continue;
+            int errored = 0;
+            Value *err  = NULL;
+            Value *r = xs_await_task_ex((int)VAL_INT(tid_v), &errored, &err);
+            if (r) value_decref(r);
+            if (errored && err) {
+                int is_cancel = 0;
+                if (VAL_TAG(err) == XS_MAP) {
+                    Value *kind = map_get(err->map, "kind");
+                    if (kind && VAL_TAG(kind) == XS_STR &&
+                        strcmp(kind->s, "Cancelled") == 0) is_cancel = 1;
+                }
+                if (is_cancel) {
+                    value_decref(err);
+                } else if (!real_err) {
+                    real_err = err;
+                } else {
+                    value_decref(err);
+                }
+            } else if (err) {
+                value_decref(err);
+            }
+        }
+        value_decref(queue);
+        if (real_err) {
+            if (i->cf.value) value_decref(i->cf.value);
+            i->cf.signal = CF_THROW;
+            i->cf.value  = real_err;
+        }
+        return value_incref(XS_NULL_VAL);
+#endif
     }
 
     case NODE_SPAWN: {
-        /* Nursery-scoped spawn: queue for the parent's nursery to drain. */
+        /* Nursery-scoped spawn: spawn on a real thread (so siblings
+           run in parallel and a sibling failure can cancel the rest)
+           and stash the future in the parent nursery's queue for it
+           to await. WASI keeps the legacy queue-then-call path
+           because it has no usable threads. */
         if (i->nursery_queue) {
+#ifdef XS_WASM
             XSFunc *fn = func_new_ex("__spawn__", NULL, 0,
                                      n->spawn_.expr, i->env, NULL, NULL);
             Value *task = xs_func_new(fn);
             array_push(i->nursery_queue->arr, task);
             return value_incref(XS_NULL_VAL);
+#else
+            XSFunc *fn = func_new_ex("__spawn__", NULL, 0,
+                                     n->spawn_.expr, i->env, NULL, NULL);
+            Value *task_fn = xs_func_new(fn);
+            Value *fut = xs_spawn_thread(i, task_fn);
+            value_decref(task_fn);
+            array_push(i->nursery_queue->arr, value_incref(fut));
+            return fut;
+#endif
         }
 
         /* Actor spawn: `spawn ActorClass` constructs a new actor instance. */

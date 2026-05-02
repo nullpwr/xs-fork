@@ -151,6 +151,8 @@ static int op_supported(Opcode op) {
         case OP_EFFECT_CALL:
         case OP_EFFECT_RESUME:
         case OP_EFFECT_HANDLE:
+        case OP_HANDLE_BODY_END:
+        case OP_EFFECT_DONE:
         case OP_DEFER_PUSH:
         case OP_DEFER_RUN:
         case OP_NURSERY_BEGIN:
@@ -672,9 +674,11 @@ IRFunc *ralow_lower(XSProto *proto) {
                 ir_emit(f, IR_VM_STEP_CF, -1, a, -1, 0, pc);
                 break;
             }
-            case OP_EFFECT_HANDLE: {
-                /* Handler install: no operands consumed directly by
-                 * this opcode itself; internals set up via handler_info. */
+            case OP_EFFECT_HANDLE:
+            case OP_HANDLE_BODY_END:
+            case OP_EFFECT_DONE: {
+                /* All effect-flow ops route back to vm_step_cf so the
+                 * VM's eff_stack bookkeeping stays in one place. */
                 ir_emit(f, IR_VM_STEP_CF, -1, -1, -1, 0, pc);
                 break;
             }
