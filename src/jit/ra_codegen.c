@@ -1057,12 +1057,76 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     has_float_done_jump = 1;
                 }
 
+                /* --- string fast path (IR_ADD only) ---
+                 * When both ADD operands are XS_STR, call vm_concat_fast
+                 * directly and skip vm_step_jit. Hash + string benches
+                 * dispatched ~1000 string-ADDs each through the slow
+                 * path; this drops them to zero. Sits between the float
+                 * fast path and the slow path so float misses (e.g. one
+                 * operand is a string, the other is a number) flow into
+                 * the string check before falling all the way through. */
+                int is_string_arith = (in->op == IR_ADD);
+                size_t str_done_jump = 0;
+                int has_str_done = 0;
+                size_t str_slow_jumps[8]; int n_sslow = 0;
+                if (is_string_arith) {
+                    size_t str_entry = em.pos;
+                    /* Float misses now route here instead of straight
+                     * to slow. Bitwise / MOD / SUB / MUL etc. don't
+                     * have a string analogue so this only fires for
+                     * IR_ADD; the other ops keep float-misses to slow. */
+                    for (int i = 0; i < n_fslow; i++)
+                        patch_rel32(&em, float_slow_jumps[i], str_entry);
+                    /* The float-miss patches consumed those entries;
+                     * zero out so the slow-path patcher below doesn't
+                     * re-target them. */
+                    n_fslow = 0;
+                    /* If neither SMI nor float fast path was attempted,
+                     * the SMI miss jumps direct to here. (For IR_ADD
+                     * has_float_path is always true so this branch
+                     * stays dead, but the symmetry is worth the line.) */
+                    if (!has_float_path) {
+                        patch_rel32(&em, jz_slow, str_entry);
+                    }
+
+                    emit_load_vreg(&em, in->src1, a, RCX);
+                    emit_load_vreg(&em, in->src2, a, RAX);
+
+                    /* Reject SMI / NULL / non-STR for both operands.
+                     * XS_STR == 5 (per the ValueTag enum in xs.h). */
+                    emit_byte(&em, 0xF6); emit_byte(&em, 0xC1); emit_byte(&em, 0x01);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_byte(&em, 0xA8); emit_byte(&em, 0x01);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_test_rr(&em, RCX, RCX);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    emit_test_rr(&em, RAX, RAX);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    /* cmp dword [rcx], 5  (tag != XS_STR) */
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x39); emit_byte(&em, 0x05);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, 0x05);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+
+                    /* vm_concat_fast(a, b) -- arg0=rdi, arg1=rsi.
+                     * Helper consumes both refs and returns +1 result
+                     * in rax. */
+                    emit_mov_rr(&em, RDI, RCX);
+                    emit_mov_rr(&em, RSI, RAX);
+                    emit_call_abs(&em, (void *)(uintptr_t)vm_concat_fast);
+                    emit_store_vreg(&em, in->dst, a, RAX);
+                    str_done_jump = emit_jmp_rel32_ph(&em);
+                    has_str_done = 1;
+                }
+
                 /* --- slow path --- */
                 size_t slow_pos = em.pos;
-                if (!has_float_path) patch_rel32(&em, jz_slow, slow_pos);
+                if (!has_float_path && !is_string_arith) patch_rel32(&em, jz_slow, slow_pos);
                 for (int i = 0; i < n_jo; i++) patch_rel32(&em, (size_t)jo_slow_list[i], slow_pos);
                 for (int i = 0; i < n_fslow; i++)
                     patch_rel32(&em, float_slow_jumps[i], slow_pos);
+                for (int i = 0; i < n_sslow; i++)
+                    patch_rel32(&em, str_slow_jumps[i], slow_pos);
                 /* Push a then b onto vm->sp (transferring ownership). */
                 emit_load_vreg(&em, in->src1, a, RAX);
                 emit_vmsp_push_rax(&em);
@@ -1085,6 +1149,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 /* done label */
                 patch_rel32(&em, jmp_done, em.pos);
                 if (has_float_done_jump) patch_rel32(&em, float_done_jump, em.pos);
+                if (has_str_done)        patch_rel32(&em, str_done_jump, em.pos);
                 break;
             }
 
