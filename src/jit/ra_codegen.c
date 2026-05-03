@@ -1419,6 +1419,32 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 break;
             }
 
+            case IR_CONCAT: {
+                /* dst = vm_concat_fast(src1, src2). Both operands
+                 * pass via rdi/rsi as +1 references (the helper takes
+                 * ownership and returns a fresh +1). No frame->ip
+                 * update -- the helper doesn't touch frame state. */
+                emit_load_vreg(&em, in->src1, a, RDI);
+                emit_load_vreg(&em, in->src2, a, RSI);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_concat_fast);
+                emit_store_vreg(&em, in->dst, a, RAX);
+                break;
+            }
+
+            case IR_ITER_GET: {
+                /* dst = vm_iter_get_fast(src1, src2, imm). Same +1
+                 * transfer-in / +1 transfer-out shape; imm carries
+                 * the bytecode's INSTR_A "want_pairs" flag. */
+                emit_load_vreg(&em, in->src1, a, RDI);
+                emit_load_vreg(&em, in->src2, a, RSI);
+                /* mov edx, imm32 (want_pairs) */
+                emit_byte(&em, 0xBA);
+                emit_u32(&em, (uint32_t)in->imm);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_iter_get_fast);
+                emit_store_vreg(&em, in->dst, a, RAX);
+                break;
+            }
+
             case IR_INDEX_GET:
             case IR_INDEX_SET:
             case IR_LOAD_FIELD:

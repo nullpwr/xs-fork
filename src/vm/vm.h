@@ -172,6 +172,13 @@ void vm_grow_stack(VM *vm); /* exposed for JIT's loop-top capacity check */
 int  vm_call_closure_fast(VM *vm, int argc);  /* JIT OP_CALL fast path */
 int  vm_return_fast(VM *vm);                  /* JIT OP_RETURN fast path */
 Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx);  /* JIT IC */
+/* Direct helpers for hot dispatched ops. The JIT calls them in place
+   of going through vm_step_jit so the per-instruction dispatch tax
+   (limits tick + instr fetch + switch) is avoided on the hot path.
+   Both consume their operands (the +1 references transfer in) and
+   return a fresh +1 result. */
+Value *vm_concat_fast(Value *a, Value *b);
+Value *vm_iter_get_fast(Value *iter, Value *idx, int want_pairs);
 /* Set up the top frame for `proto` then hand control to `entry` (which
    must be a function pointer to JIT-emitted machine code that takes
    the VM and returns an exit code). vm_run_with sweeps the same global

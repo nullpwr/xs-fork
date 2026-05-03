@@ -62,6 +62,17 @@ typedef enum {
     IR_LOAD_FIELD, IR_STORE_FIELD,
     IR_MAKE_RANGE, IR_MAKE_ARRAY, IR_MAKE_TUPLE, IR_MAKE_MAP,
     IR_METHOD_CALL,
+    /* Specialised binops that previously dispatched through
+     * IR_VM_STEP. Each calls a tight C helper directly so the
+     * per-op vm_step_jit setup (limits tick + instr fetch + switch)
+     * is gone:
+     *   IR_CONCAT    src1=a, src2=b  -> dst = vm_concat_fast(a,b)
+     *   IR_ITER_GET  src1=iter, src2=idx, imm=want_pairs
+     *                                 -> dst = vm_iter_get_fast(...)
+     * On hot json/string/hash workloads these were 30-50% of all
+     * vm_step dispatches; bypassing the dispatch shim is the win. */
+    IR_CONCAT,
+    IR_ITER_GET,
 
     /* Generic interpreter-step dispatch. src1/src2/call_args supply
      * the operands to flush onto vm->sp in order, and dst (if >= 0)

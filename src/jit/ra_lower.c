@@ -729,7 +729,6 @@ IRFunc *ralow_lower(XSProto *proto) {
                 break;
             }
             case OP_POW:
-            case OP_CONCAT:
             case OP_AND:
             case OP_OR:
             case OP_FLOOR_DIV:
@@ -738,12 +737,31 @@ IRFunc *ralow_lower(XSProto *proto) {
             case OP_PIPE:
             case OP_IN:
             case OP_IS:
-            case OP_MAP_MERGE:
-            case OP_ITER_GET: {
+            case OP_MAP_MERGE: {
                 IRVReg b = vstack_pop(&vs);
                 IRVReg a = vstack_pop(&vs);
                 IRVReg d = new_vreg(f);
                 ir_emit(f, IR_VM_STEP, d, a, b, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            /* JIT-native fast paths -- skip vm_step_jit dispatch and
+             * call the C helper directly. */
+            case OP_CONCAT: {
+                IRVReg b = vstack_pop(&vs);
+                IRVReg a = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_CONCAT, d, a, b, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_ITER_GET: {
+                IRVReg b = vstack_pop(&vs);  /* idx */
+                IRVReg a = vstack_pop(&vs);  /* iter */
+                IRVReg d = new_vreg(f);
+                /* INSTR_A holds want_pairs (1 for `for k, v in map`). */
+                int want_pairs = (int)INSTR_A(ins);
+                ir_emit(f, IR_ITER_GET, d, a, b, want_pairs, pc);
                 vstack_push(&vs, d);
                 break;
             }

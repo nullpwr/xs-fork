@@ -5964,6 +5964,106 @@ int vm_step_jit(VM *vm) {
     return 1;
 }
 
+/* JIT helper for OP_CONCAT: stringifies both operands, concatenates,
+   returns a fresh +1 string. Both inputs are decref'd. Mirror of
+   the OP_CONCAT case body in vm_dispatch with the operand pop and
+   stack push factored out -- the JIT calls this directly so the
+   per-instr vm_step_jit setup (limits tick, instr fetch, switch
+   dispatch) is skipped on every concat. Hot on json/string-heavy
+   workloads where it eats 30-40% of vm_step dispatches. */
+Value *vm_concat_fast(Value *a, Value *b) {
+    char *as = value_str(a), *bs = value_str(b);
+    size_t n = strlen(as) + strlen(bs) + 1;
+    char *buf = xs_malloc(n); strcpy(buf, as); strcat(buf, bs);
+    free(as); free(bs);
+    value_decref(a); value_decref(b);
+    Value *r = xs_str(buf);
+    free(buf);
+    return r;
+}
+
+/* JIT helper for OP_ITER_GET: returns the i-th element of an
+   iterable. Mirror of the case body in vm_dispatch but with the
+   operand pop and stack push factored out. Same shape as
+   vm_concat_fast: both operands are owned (caller transfers +1),
+   return is a fresh +1.
+
+   Covers all the iter shapes the interpreter handles (array,
+   tuple, str, range, map, generator, channel) so the JIT never
+   has to fall back to vm_step_jit for ITER_GET. The map-pairs
+   case reads INSTR_A so we take it as an explicit arg. */
+Value *vm_iter_get_fast(Value *iter, Value *idx, int want_pairs) {
+    int64_t i = VAL_TAG(idx) == XS_INT ? VAL_INT(idx)
+              : (VAL_TAG(idx) == XS_FLOAT ? (int64_t)idx->f : 0);
+    Value *r = NULL;
+    if (VAL_TAG(iter) == XS_ARRAY || VAL_TAG(iter) == XS_TUPLE) {
+        r = (i >= 0 && i < iter->arr->len)
+            ? value_incref(iter->arr->items[i])
+            : value_incref(XS_NULL_VAL);
+    } else if (VAL_TAG(iter) == XS_STR) {
+        const char *s = iter->s;
+        int64_t slen = (int64_t)strlen(s);
+        if (i >= 0 && i < slen) {
+            char buf[2] = { s[i], 0 };
+            r = xs_str(buf);
+        } else {
+            r = value_incref(XS_NULL_VAL);
+        }
+    } else if (VAL_TAG(iter) == XS_RANGE && iter->range) {
+        int64_t start = iter->range->start;
+        int64_t step  = iter->range->step ? iter->range->step : 1;
+        r = xs_int(start + i * step);
+    } else if (VAL_TAG(iter) == XS_MAP && iter->map &&
+               map_get(iter->map, "__type") &&
+               VAL_TAG(map_get(iter->map, "__type")) == XS_STR &&
+               strcmp(map_get(iter->map, "__type")->s, "generator") == 0) {
+        /* Generator: index into the materialised yields array. */
+        Value *yields = map_get(iter->map, "_yields");
+        if (yields && VAL_TAG(yields) == XS_ARRAY &&
+            i >= 0 && i < yields->arr->len)
+            r = value_incref(yields->arr->items[i]);
+        else
+            r = value_incref(XS_NULL_VAL);
+    } else if (VAL_TAG(iter) == XS_MAP && iter->map &&
+               map_get(iter->map, "_chan_id") &&
+               VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
+        /* Channel: drain the next buffered value -- ignore idx. */
+        extern Value *xs_chan_try_recv(Value *);
+        r = xs_chan_try_recv(iter);
+    } else if ((VAL_TAG(iter) == XS_MAP || VAL_TAG(iter) == XS_MODULE)
+               && iter->map) {
+        /* Generic map iteration: i-th inserted key, optionally as
+           (key, value) tuple. */
+        int64_t ki = 0;
+        r = value_incref(XS_NULL_VAL);
+        for (int j = 0; j < iter->map->cap; j++) {
+            if (!iter->map->keys[j]) continue;
+            if (ki == i) {
+                if (want_pairs) {
+                    value_decref(r);
+                    r = xs_tuple_new();
+                    Value *ks = xs_str(iter->map->keys[j]);
+                    Value *vv = iter->map->vals[j];
+                    array_push(r->arr, ks);
+                    array_push(r->arr, vv ? value_incref(vv)
+                                          : value_incref(XS_NULL_VAL));
+                    value_decref(ks);
+                } else {
+                    value_decref(r);
+                    r = xs_str(iter->map->keys[j]);
+                }
+                break;
+            }
+            ki++;
+        }
+    } else {
+        r = value_incref(XS_NULL_VAL);
+    }
+    value_decref(idx);
+    value_decref(iter);
+    return r;
+}
+
 /* JIT helper for OP_LOAD_GLOBAL: resolves a global name via the
    current proto's inline cache. Populates the cache on miss. Returns
    an incref'd value ready to push on the stack. */
