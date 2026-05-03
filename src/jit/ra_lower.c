@@ -114,6 +114,8 @@ static int op_supported(Opcode op) {
         case OP_BOR:
         case OP_BXOR:
         case OP_BNOT:
+        case OP_SHL:
+        case OP_SHR:
         case OP_LT:
         case OP_GT:
         case OP_LTE:
