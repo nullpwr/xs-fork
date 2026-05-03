@@ -1203,17 +1203,20 @@ static Node *parse_primary(Parser *p) {
     }
 
     /* Block or map */
+    case TK_HASH_LBRACE:
     case TK_LBRACE: {
-        /* Heuristic: if first token after { is IDENT : or } or ...expr → map */
+        /* `#{...}` is an unambiguous map literal -- skip the heuristic.
+           Plain `{...}` uses lookahead: IDENT/STRING followed by `:`,
+           `...spread`, or `}` (empty map). */
+        int is_map = (tok->kind == TK_HASH_LBRACE);
         Token *t1 = pp_peek(p, 1);
         Token *t2 = pp_peek(p, 2);
-        int is_map = 0;
-        if (t1->kind == TK_RBRACE) { is_map = 1; /* empty {} → empty map */
-        } else if (t1->kind == TK_IDENT && t2->kind == TK_COLON) {
+        if (!is_map && t1->kind == TK_RBRACE) { is_map = 1; /* empty {} → empty map */
+        } else if (!is_map && t1->kind == TK_IDENT && t2->kind == TK_COLON) {
             is_map = 1;
-        } else if (t1->kind == TK_STRING && t2->kind == TK_COLON) {
+        } else if (!is_map && t1->kind == TK_STRING && t2->kind == TK_COLON) {
             is_map = 1;
-        } else if (t1->kind == TK_DOTDOT || t1->kind == TK_DOTDOTDOT) {
+        } else if (!is_map && (t1->kind == TK_DOTDOT || t1->kind == TK_DOTDOTDOT)) {
             is_map = 1; /* spread in map: {...base, ...} */
         }
         if (is_map) {
@@ -2222,15 +2225,16 @@ static Node *parse_pattern(Parser *p) {
     Token *tok = pp_peek(p, 0);
     Span span = tok->span;
 
-    /* Map pattern: `{ "key": sub, ident: sub, short_ident, .. }`
-       The `#` in `#{...}` is already stripped by the lexer, so we see
-       a bare LBRACE here. Distinguish from something else by looking
-       at the head: a map pattern always starts with a string literal
-       key, or `ident :`, or `..`, or is empty. */
-    if (tok->kind == TK_LBRACE) {
+    /* Map pattern: `{ "key": sub, ident: sub, short_ident, .. }` or
+       the explicit `#{...}` form. Both lex paths land here -- the
+       parser treats TK_HASH_LBRACE as unconditionally a map pattern
+       (the user said so), while bare TK_LBRACE still uses lookahead
+       to distinguish from blocks. */
+    if (tok->kind == TK_LBRACE || tok->kind == TK_HASH_LBRACE) {
         Token *a = pp_peek(p, 1);
         Token *b = pp_peek(p, 2);
         int looks_like_map =
+            tok->kind == TK_HASH_LBRACE ||
             a->kind == TK_RBRACE ||
             a->kind == TK_DOTDOT ||
             a->kind == TK_STRING ||

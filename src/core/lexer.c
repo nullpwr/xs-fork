@@ -1060,8 +1060,13 @@ static void lex_next(Lexer *l) {
             ta_push(&l->tokens, t); return;
         }
         if (lpeek(l,1)=='{') {
-            ladvance(l); /* skip '#', let next iteration handle '{' */
-            return;
+            /* Distinct opener so the parser knows this is unambiguously
+               a map literal -- previously we just dropped the '#' which
+               left `=> #{...}` indistinguishable from `=> {...}`. */
+            ladvance(l); ladvance(l);
+            Token t; t.kind=TK_HASH_LBRACE; t.sval=NULL;
+            t.span=make_span(l,sl,sc,sp);
+            ta_push(&l->tokens, t); return;
         }
         if (lpeek(l,1)=='!') {
             if (lpeek(l,2)=='[') {

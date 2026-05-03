@@ -59,6 +59,11 @@ typedef enum {
 
     TK_COMMA, TK_SEMICOLON, TK_COLON, TK_COLON_COLON,
     TK_MACRO_BANG, TK_HASH_BRACKET,
+    /* `#{` -- always-map literal opener. Distinct from TK_LBRACE so
+       the parser doesn't have to peek ahead to disambiguate map vs
+       block in expression-position positions like `=> #{...}` after
+       a match arm. */
+    TK_HASH_LBRACE,
     TK_REGEX,
     TK_NEWLINE,
 
