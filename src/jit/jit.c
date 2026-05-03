@@ -151,6 +151,69 @@ int tier2_run_until(VM *vm, int target_fc) {
     return rc;
 }
 
+/* Diagnostic counters, populated only when XS_JIT_STATS=1. The atexit
+ * dumper below prints a per-reason histogram so we can see, for any
+ * given workload, why protos fall back to the bytecode VM. */
+static int g_stats_enabled    = -1;   /* -1 = uninitialised */
+static int g_stats_compiled   = 0;
+static int g_stats_codegen_failed = 0;
+static int g_stats_lower_bail[8];     /* indexed by RALOW_BAIL_* */
+static int g_stats_unsupported_op[256];
+
+static const char *bail_kind_name(int kind) {
+    switch (kind) {
+        case RALOW_BAIL_NONE:                 return "none";
+        case RALOW_BAIL_ACTOR_METHOD:         return "actor_method";
+        case RALOW_BAIL_INNER_ACTOR:          return "inner_actor";
+        case RALOW_BAIL_UNSUPPORTED_OP:       return "unsupported_op";
+        case RALOW_BAIL_CALL_ARGC:            return "call_argc";
+        case RALOW_BAIL_MAKE_LARGE:           return "make_large";
+        case RALOW_BAIL_VSTACK_UNDERFLOW:     return "vstack_underflow";
+        case RALOW_BAIL_CLOSURE_WRITTEN_LOCAL: return "closure_written_local";
+        default:                              return "?";
+    }
+}
+
+static void jit_stats_dump(void) {
+    int total_bail = g_stats_codegen_failed;
+    for (int k = 1; k < 8; k++) total_bail += g_stats_lower_bail[k];
+    int total = g_stats_compiled + total_bail;
+    if (total == 0) {
+        fprintf(stderr, "xs jit stats: no protos reached the JIT\n");
+        return;
+    }
+    fprintf(stderr, "xs jit stats:\n");
+    fprintf(stderr, "  protos seen:       %d\n", total);
+    fprintf(stderr, "  compiled:          %d (%.1f%%)\n",
+            g_stats_compiled, 100.0 * g_stats_compiled / total);
+    fprintf(stderr, "  bailed:            %d (%.1f%%)\n",
+            total_bail, 100.0 * total_bail / total);
+    for (int k = 1; k < 8; k++) {
+        if (!g_stats_lower_bail[k]) continue;
+        fprintf(stderr, "    %-22s %d\n",
+                bail_kind_name(k), g_stats_lower_bail[k]);
+    }
+    if (g_stats_codegen_failed)
+        fprintf(stderr, "    %-22s %d\n",
+                "codegen_failed", g_stats_codegen_failed);
+    if (g_stats_lower_bail[RALOW_BAIL_UNSUPPORTED_OP]) {
+        fprintf(stderr, "  unsupported opcodes:\n");
+        for (int o = 0; o < 256; o++) {
+            if (!g_stats_unsupported_op[o]) continue;
+            const char *nm = bytecode_op_name((Opcode)o);
+            fprintf(stderr, "    %-22s %d\n",
+                    nm ? nm : "?", g_stats_unsupported_op[o]);
+        }
+    }
+}
+
+static void jit_stats_init(void) {
+    if (g_stats_enabled >= 0) return;
+    const char *env = getenv("XS_JIT_STATS");
+    g_stats_enabled = (env && *env && env[0] != '0') ? 1 : 0;
+    if (g_stats_enabled) atexit(jit_stats_dump);
+}
+
 /* Run the tier-2 pipeline on one proto. NULL result = lowerer / codegen
  * declined (unsupported op, cross-block stack leak, captured written
  * local, code-buffer overflow). Caller leaves proto->jit_entry as NULL
@@ -161,15 +224,32 @@ static void *tier2_compile_one(XSJIT *j, XSProto *proto) {
     if (!proto) return NULL;
     if (proto->jit_entry) return proto->jit_entry;
     if (proto->jit_tried)  return NULL;
+    jit_stats_init();
     IRFunc *f = ralow_lower(proto);
-    if (!f) { proto->jit_tried = 1; return NULL; }
+    if (!f) {
+        proto->jit_tried = 1;
+        if (g_stats_enabled) {
+            int kind = ralow_last_bail_kind();
+            if (kind >= 0 && kind < 8) g_stats_lower_bail[kind]++;
+            if (kind == RALOW_BAIL_UNSUPPORTED_OP) {
+                int op = ralow_last_bail_op();
+                if (op >= 0 && op < 256) g_stats_unsupported_op[op]++;
+            }
+        }
+        return NULL;
+    }
     ralow_liveness(f);
     IRAlloc *a = ralow_alloc(f);
     void *e = ralow_codegen(j, f, a);
     iralloc_free(a);
     irfunc_free(f);
-    if (e) proto->jit_entry = e;
-    else   proto->jit_tried = 1;
+    if (e) {
+        proto->jit_entry = e;
+        if (g_stats_enabled) g_stats_compiled++;
+    } else {
+        proto->jit_tried = 1;
+        if (g_stats_enabled) g_stats_codegen_failed++;
+    }
     return e;
 }
 

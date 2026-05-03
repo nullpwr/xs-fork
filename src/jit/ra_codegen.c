@@ -1452,9 +1452,91 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                  * the slow path to the converged "done" point. */
                 size_t j_done_fast = emit_jmp_rel32_ph(&em);
 
+                /* --- float fast path ---
+                 * Both operands boxed XS_FLOAT? Skip vm_step_jit and use
+                 * ucomisd. Mandelbrot's `while (zr*zr + zi*zi < 4.0)`
+                 * lives entirely on this path; without it, every
+                 * iteration's compare goes through the interpreter. */
+                size_t float_entry_cb = em.pos;
+                patch_rel32(&em, jz_slow_cb, float_entry_cb);
+
+                emit_load_vreg(&em, in->src1, a, RCX);
+                emit_load_vreg(&em, in->src2, a, RAX);
+
+                size_t f_slow[8]; int n_fslow = 0;
+                /* test cl, 1 ; jnz slow  (rcx is SMI) */
+                emit_byte(&em, 0xF6); emit_byte(&em, 0xC1); emit_byte(&em, 0x01);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                /* test al, 1 ; jnz slow  (rax is SMI) */
+                emit_byte(&em, 0xA8); emit_byte(&em, 0x01);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                /* test rcx,rcx ; jz slow  (NULL) */
+                emit_test_rr(&em, RCX, RCX);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                emit_test_rr(&em, RAX, RAX);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                /* cmp dword [rcx], 4  (tag != XS_FLOAT) */
+                emit_byte(&em, 0x83); emit_byte(&em, 0x39); emit_byte(&em, 0x04);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, 0x04);
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+
+                /* movsd xmm0, [rcx+8] ; movsd xmm1, [rax+8] */
+                emit_byte(&em, 0xF2); emit_byte(&em, 0x0F); emit_byte(&em, 0x10);
+                emit_byte(&em, 0x41); emit_byte(&em, 0x08);
+                emit_byte(&em, 0xF2); emit_byte(&em, 0x0F); emit_byte(&em, 0x10);
+                emit_byte(&em, 0x48); emit_byte(&em, 0x08);
+                /* ucomisd xmm0, xmm1 */
+                emit_byte(&em, 0x66); emit_byte(&em, 0x0F);
+                emit_byte(&em, 0x2E); emit_byte(&em, 0xC1);
+                /* jp slow  (NaN -> let interp decide) */
+                f_slow[n_fslow++] = emit_jcc_rel32_ph(&em, 0xA);
+
+                /* ucomisd uses unsigned semantics (CF/ZF), so the
+                 * jcc encodings differ from the signed SMI path. */
+                uint8_t cc_take_f;
+                switch (kind) {
+                case 0: cc_take_f = 0x2; break; /* LT -> JB  */
+                case 1: cc_take_f = 0x7; break; /* GT -> JA  */
+                case 2: cc_take_f = 0x6; break; /* LE -> JBE */
+                case 3: cc_take_f = 0x3; break; /* GE -> JAE */
+                case 4: cc_take_f = 0x4; break; /* EQ -> JE  */
+                case 5: cc_take_f = 0x5; break; /* NE -> JNE */
+                default: cc_take_f = 0x4; break;
+                }
+                uint8_t cc_branch_f = branch_if_false
+                    ? (uint8_t)(cc_take_f ^ 1) : cc_take_f;
+
+                /* setcc al ; movzx eax, al -- stash the result before
+                 * value_decref clobbers EFLAGS. */
+                emit_byte(&em, 0x0F);
+                emit_byte(&em, (uint8_t)(0x90 | cc_branch_f));
+                emit_byte(&em, 0xC0);
+                emit_byte(&em, 0x0F); emit_byte(&em, 0xB6); emit_byte(&em, 0xC0);
+
+                /* Save result across the two decrefs (same alignment
+                 * dance as the IR_CMP float path). */
+                emit_push_reg(&em, RAX);
+                emit_sub_reg_imm32(&em, RSP, 8);
+                emit_load_vreg(&em, in->src1, a, RDI);
+                emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                emit_load_vreg(&em, in->src2, a, RDI);
+                emit_call_abs(&em, (void *)(uintptr_t)value_decref);
+                emit_add_reg_imm32(&em, RSP, 8);
+                emit_pop_reg(&em, RAX);
+
+                /* test eax, eax ; jnz target  (cc_branch_f already
+                 * accounts for branch_if_false, so a non-zero al means
+                 * the branch should be taken). */
+                emit_byte(&em, 0x85); emit_byte(&em, 0xC0);
+                size_t p_float = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_FIXUP(p_float, in->imm);
+                size_t j_done_float = emit_jmp_rel32_ph(&em);
+
                 /* --- slow path --- */
                 size_t slow_pos = em.pos;
-                patch_rel32(&em, jz_slow_cb, slow_pos);
+                for (int i = 0; i < n_fslow; i++)
+                    patch_rel32(&em, f_slow[i], slow_pos);
                 /* Push a then b onto vm->sp, set ip, call vm_step_jit. */
                 emit_load_vreg(&em, in->src1, a, RAX);
                 emit_vmsp_push_rax(&em);
@@ -1531,7 +1613,8 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 
                 /* Done: fast-path (branch not taken) fall-through lands here.
                  * Slow-path (branch not taken) also falls through to here. */
-                patch_rel32(&em, j_done_fast, em.pos);
+                patch_rel32(&em, j_done_fast,  em.pos);
+                patch_rel32(&em, j_done_float, em.pos);
                 break;
             }
 

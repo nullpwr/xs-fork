@@ -203,10 +203,27 @@ typedef struct {
     int     n_spill_slots;
 } IRAlloc;
 
+/* Reason codes for ralow_lower bailing. After a NULL return from
+ * ralow_lower, callers can pull the most recent reason via the two
+ * getters below. Used by the XS_JIT_STATS=1 diagnostic to build a
+ * histogram instead of re-walking the bytecode. */
+enum {
+    RALOW_BAIL_NONE = 0,
+    RALOW_BAIL_ACTOR_METHOD,
+    RALOW_BAIL_INNER_ACTOR,
+    RALOW_BAIL_UNSUPPORTED_OP,        /* op available via ralow_last_bail_op() */
+    RALOW_BAIL_CALL_ARGC,
+    RALOW_BAIL_MAKE_LARGE,
+    RALOW_BAIL_VSTACK_UNDERFLOW,
+    RALOW_BAIL_CLOSURE_WRITTEN_LOCAL
+};
+
 /* Phase 1: lower bytecode into IR + basic blocks. Returns NULL if the
  * proto uses any opcode outside the supported set, signalling the
  * caller to fall back to the template JIT. */
 IRFunc *ralow_lower(XSProto *proto);
+int     ralow_last_bail_kind(void);
+int     ralow_last_bail_op(void);
 void    irfunc_free(IRFunc *f);
 
 /* Phase 2: compute liveness. Populates block use/def/live_in/live_out. */

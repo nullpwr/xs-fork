@@ -17,6 +17,22 @@ static int ir_try_inline_self(IRFunc *f);
 static void ir_fuse_cmp_branch(IRFunc *f);
 static void ir_elide_refcount_pairs(IRFunc *f);
 
+/* Diagnostic: when ralow_lower returns NULL, the most recent reason is
+ * stashed here so jit.c can build a histogram under XS_JIT_STATS=1
+ * without re-walking the bytecode. */
+static int g_bail_kind = RALOW_BAIL_NONE;
+static int g_bail_op   = -1;
+
+static IRFunc *bail(IRFunc *f, int kind, int op) {
+    g_bail_kind = kind;
+    g_bail_op   = op;
+    if (f) irfunc_free(f);
+    return NULL;
+}
+
+int ralow_last_bail_kind(void) { return g_bail_kind; }
+int ralow_last_bail_op(void)   { return g_bail_op; }
+
 /* --- small growable array for the IR instruction stream --- */
 
 static int ir_emit(IRFunc *f, IROp op, IRVReg dst, IRVReg src1,
@@ -275,7 +291,10 @@ IRFunc *ralow_lower(XSProto *proto) {
      * its inner protos is an actor method, because constructing the
      * closure + spawning the actor reaches into the dispatcher with
      * data layouts the JIT-emitted prologue is unaware of. */
-    if (proto->is_actor_method) return NULL;
+    g_bail_kind = RALOW_BAIL_NONE;
+    g_bail_op   = -1;
+    if (proto->is_actor_method)
+        return bail(NULL, RALOW_BAIL_ACTOR_METHOD, -1);
     /* transitively bail any proto that builds an actor anywhere
      * downstream. spawning + dispatching an actor with an
      * upvalue-bearing method confuses the JIT prologue. */
@@ -299,26 +318,31 @@ IRFunc *ralow_lower(XSProto *proto) {
             }
         }
         free(worklist);
-        if (has_actor) return NULL;
+        if (has_actor) return bail(NULL, RALOW_BAIL_INNER_ACTOR, -1);
     }
     for (int i = 0; i < proto->chunk.len; i++) {
         Opcode op = INSTR_OPCODE(proto->chunk.code[i]);
-        if (!op_supported(op)) return NULL;
+        if (!op_supported(op))
+            return bail(NULL, RALOW_BAIL_UNSUPPORTED_OP, (int)op);
         if (op == OP_CALL) {
             int argc = INSTR_C(proto->chunk.code[i]);
-            if (argc > IR_MAX_CALL_ARGS) return NULL;
+            if (argc > IR_MAX_CALL_ARGS)
+                return bail(NULL, RALOW_BAIL_CALL_ARGC, (int)op);
         }
         if (op == OP_METHOD_CALL) {
             int argc = INSTR_A(proto->chunk.code[i]);
-            if (argc > IR_MAX_CALL_ARGS) return NULL;
+            if (argc > IR_MAX_CALL_ARGS)
+                return bail(NULL, RALOW_BAIL_CALL_ARGC, (int)op);
         }
         if (op == OP_MAKE_ARRAY || op == OP_MAKE_TUPLE) {
             int n = INSTR_C(proto->chunk.code[i]);
-            if (n > IR_MAX_CALL_ARGS) return NULL;
+            if (n > IR_MAX_CALL_ARGS)
+                return bail(NULL, RALOW_BAIL_MAKE_LARGE, (int)op);
         }
         if (op == OP_MAKE_MAP) {
             int n = INSTR_C(proto->chunk.code[i]);
-            if (n * 2 > IR_MAX_CALL_ARGS) return NULL;
+            if (n * 2 > IR_MAX_CALL_ARGS)
+                return bail(NULL, RALOW_BAIL_MAKE_LARGE, (int)op);
         }
     }
 
@@ -354,11 +378,81 @@ IRFunc *ralow_lower(XSProto *proto) {
 
     VRegStack vs = {0};
 
+    /* Stack-merge phi support.
+     *
+     * Bytecode patterns like `a and b` leave a value live on the
+     * operand stack across a JUMP_IF_FALSE, so the merge block's
+     * first op pops something the lowerer's per-block simulation
+     * doesn't see (vs.len was reset to 0 at the boundary). The fix:
+     *
+     *   - For each stack depth slot d, allocate a single `phi_vregs[d]`
+     *     vreg shared by every block that has a value at depth d on
+     *     entry. Well-formed bytecode has a single stack depth at any
+     *     given PC, so a depth-keyed shared vreg matches the (single)
+     *     value flowing through a join.
+     *   - Before a block's terminator (JUMP / LOOP / JIF / RETURN /
+     *     synthetic fall-through), emit IR_MOVE phi_vregs[d] = vs.v[d]
+     *     for every leaked stack item.
+     *   - At block entry, push phi_vregs[0..stack_in_count[bi]) onto vs
+     *     so the lowering of the first ops sees the inherited values.
+     *
+     * stack_in_count[bi] is filled in lazily as predecessors commit
+     * their stack_out to each successor; first writer wins, later
+     * writers are checked for equality and bail on disagreement. */
+    int    *stack_in_count = xs_malloc((size_t)n_starts * sizeof(int));
+    for (int i = 0; i < n_starts; i++) stack_in_count[i] = (i == 0) ? 0 : -1;
+    IRVReg *phi_vregs = NULL;
+    int     phi_cap   = 0;
+    int     phi_disagree = 0;
+
+    /* Grow phi_vregs[] up to depth and allocate a fresh vreg for any
+     * unfilled slot. Distinct macro-local names everywhere so callers
+     * can pass any expression without colliding with our own iterator. */
+    #define PHI_ENSURE(depth) do { \
+        int phi_d_ = (depth); \
+        if (phi_d_ >= phi_cap) { \
+            int phi_nc_ = phi_cap ? phi_cap * 2 : 8; \
+            while (phi_nc_ <= phi_d_) phi_nc_ *= 2; \
+            phi_vregs = xs_realloc(phi_vregs, (size_t)phi_nc_ * sizeof(IRVReg)); \
+            for (int phi_i_ = phi_cap; phi_i_ < phi_nc_; phi_i_++) \
+                phi_vregs[phi_i_] = (IRVReg)-1; \
+            phi_cap = phi_nc_; \
+        } \
+        if (phi_vregs[phi_d_] < 0) phi_vregs[phi_d_] = new_vreg(f); \
+    } while (0)
+
+    /* Emit IR_MOVE phi[d] = vs.v[d] for every leaked stack item, then
+     * commit (or check) stack_in_count for `succ_block`. Used at every
+     * block terminator so the per-depth phi vreg holds the right value
+     * when the successor block enters. */
+    #define COMMIT_SUCC(succ_block, term_pc) do { \
+        int cs_sb_ = (succ_block); \
+        for (int cs_d_ = 0; cs_d_ < vs.len; cs_d_++) { \
+            PHI_ENSURE(cs_d_); \
+            ir_emit(f, IR_MOVE, phi_vregs[cs_d_], vs.v[cs_d_], \
+                    -1, 0, (term_pc)); \
+        } \
+        if (cs_sb_ >= 0) { \
+            if (stack_in_count[cs_sb_] < 0) \
+                stack_in_count[cs_sb_] = vs.len; \
+            else if (stack_in_count[cs_sb_] != vs.len) \
+                phi_disagree = 1; \
+        } \
+    } while (0)
+
     for (int bi = 0; bi < n_starts; bi++) {
         int pc_lo = starts[bi];
         int pc_hi = (bi + 1 < n_starts) ? starts[bi + 1] : proto->chunk.len;
         f->blocks[bi].start = f->n_insts;
         vs.len = 0;  /* reset per-block stack simulation */
+        /* Push the phi vregs that successors saw fit to assign for
+         * this block's input stack height. */
+        if (stack_in_count[bi] > 0) {
+            for (int _d = 0; _d < stack_in_count[bi]; _d++) {
+                PHI_ENSURE(_d);
+                vstack_push(&vs, phi_vregs[_d]);
+            }
+        }
 
         for (int pc = pc_lo; pc < pc_hi; pc++) {
             Instruction ins = proto->chunk.code[pc];
@@ -463,6 +557,7 @@ IRFunc *ralow_lower(XSProto *proto) {
             case OP_JUMP: case OP_LOOP: {
                 int tgt = pc + 1 + sbx;
                 int tb = pc_to_block(starts, n_starts, tgt);
+                COMMIT_SUCC(tb, pc);
                 ir_emit(f, IR_JUMP, -1, -1, -1, tb, pc);
                 f->blocks[bi].succ[0] = tb;
                 f->blocks[bi].n_succ = 1;
@@ -474,6 +569,14 @@ IRFunc *ralow_lower(XSProto *proto) {
                 int tgt = pc + 1 + sbx;
                 int tb = pc_to_block(starts, n_starts, tgt);
                 int fb = pc_to_block(starts, n_starts, pc + 1);
+                /* Both branches inherit the same leaked stack, so we
+                 * COMMIT once for each successor; the IR_MOVE phi
+                 * writes happen unconditionally before the IR_JIF. */
+                COMMIT_SUCC(tb, pc);
+                if (fb != tb && stack_in_count[fb] < 0)
+                    stack_in_count[fb] = vs.len;
+                else if (fb != tb && stack_in_count[fb] != vs.len)
+                    phi_disagree = 1;
                 ir_emit(f, op == OP_JUMP_IF_FALSE ? IR_JIF_FALSE : IR_JIF_TRUE,
                         -1, cond, -1, tb, pc);
                 f->blocks[bi].succ[0] = tb;
@@ -693,8 +796,9 @@ IRFunc *ralow_lower(XSProto *proto) {
                 /* Shouldn't reach here -- op_supported() filtered these. */
                 free(starts);
                 free(vs.v);
-                irfunc_free(f);
-                return NULL;
+                free(stack_in_count);
+                free(phi_vregs);
+                return bail(f, RALOW_BAIL_UNSUPPORTED_OP, (int)op);
             }
         }
         /* Block ended by falling off -- link to the next block if any. */
@@ -708,6 +812,7 @@ IRFunc *ralow_lower(XSProto *proto) {
                  f->insts[last_idx].op != IR_JIF_TRUE &&
                  f->insts[last_idx].op != IR_RETURN)) {
                 /* synthetic fall-through jump */
+                COMMIT_SUCC(bi + 1, pc_hi - 1);
                 ir_emit(f, IR_JUMP, -1, -1, -1, bi + 1, pc_hi - 1);
                 f->blocks[bi].succ[0] = bi + 1;
                 f->blocks[bi].n_succ = 1;
@@ -718,19 +823,24 @@ IRFunc *ralow_lower(XSProto *proto) {
     }
     free(starts);
     int underflowed = vs.underflow;
+    int phi_disagree_final = phi_disagree;
     free(vs.v);
+    free(stack_in_count);
+    free(phi_vregs);
+    #undef PHI_ENSURE
+    #undef COMMIT_SUCC
 
-    /* Per-block stack simulation assumes each block starts with an
-     * empty operand stack. Compiler patterns like `a and b` leak values
-     * across branches (the DUP before JUMP_IF_FALSE stays live on the
-     * interpreter stack into the merge block), so our per-block
-     * re-simulation hits a pop on an empty stack and manufactures a
-     * -1 vreg. Rather than lower that to garbage code, bail out
-     * cleanly so the template JIT handles the proto. */
-    if (underflowed) {
-        irfunc_free(f);
-        return NULL;
-    }
+    /* Either of these means the supported-bytecode invariants we rely
+     * on for the stack-merge model didn't hold. Underflow can still
+     * happen if a block consumes more than its declared stack_in_count
+     * (e.g. an unstructured pattern we haven't classified); disagree
+     * is a successor reached with two different stack heights, which
+     * a phi vreg can't model. In both cases the template JIT path
+     * (interpreter step) handles the proto correctly. */
+    if (underflowed)
+        return bail(f, RALOW_BAIL_VSTACK_UNDERFLOW, -1);
+    if (phi_disagree_final)
+        return bail(f, RALOW_BAIL_VSTACK_UNDERFLOW, -1);
 
     /* Scan the lowered IR for STORE_LOCAL targets. Slots that are
      * never stored stay in "borrow" mode -- the codegen skips the
@@ -765,10 +875,8 @@ IRFunc *ralow_lower(XSProto *proto) {
             UVDesc *d = &inner_proto->uv_descs[u];
             if (!d->is_local) continue;
             if (d->index < 0 || d->index >= f->n_locals) continue;
-            if (f->local_written && f->local_written[d->index]) {
-                irfunc_free(f);
-                return NULL;
-            }
+            if (f->local_written && f->local_written[d->index])
+                return bail(f, RALOW_BAIL_CLOSURE_WRITTEN_LOCAL, -1);
         }
     }
 
