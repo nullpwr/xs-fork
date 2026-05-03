@@ -1440,7 +1440,12 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                  * vm->frames -- which then makes vm_load_global_ic
                  * pick the inner proto's chunk and walks off
                  * chk->consts. Mirrors the post-call drain in
-                 * IR_CALL's slow path. */
+                 * IR_CALL's slow path.
+                 *
+                 * For IR_METHOD_CALL we also try vm_method_call_fast
+                 * before falling through: it inline-runs IC-cached
+                 * native methods (.push, .len, json.parse, ...) so
+                 * the workhorse case skips the dispatch tax. */
 
                 /* mov ecx, [r12 + VM_OFF_FRAME_COUNT] ; stash baseline */
                 emit_byte(&em, 0x41); emit_byte(&em, 0x8B); emit_byte(&em, 0x4C);
@@ -1454,14 +1459,39 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     emit_load_vreg(&em, in->src1, a, RAX);
                     emit_vmsp_push_rax(&em);
                 }
+                int mc_argc = 0;
                 for (int k = 0; k < IR_MAX_CALL_ARGS; k++) {
                     if (in->call_args[k] < 0) break;
                     emit_load_vreg(&em, in->call_args[k], a, RAX);
                     emit_vmsp_push_rax(&em);
+                    mc_argc++;
                 }
 
                 emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
                 emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+
+                size_t j_skip_fast_join = 0;
+                int has_fast = (in->op == IR_METHOD_CALL);
+                if (has_fast) {
+                    /* Try the IC-cached native fast path first. */
+                    emit_mov_rr(&em, RDI, R12);
+                    emit_byte(&em, 0xBE); emit_u32(&em, (uint32_t)mc_argc);
+                    emit_call_abs(&em, (void *)(uintptr_t)vm_method_call_fast);
+                    emit_test_eax_eax(&em);
+                    /* eax == 0 -> fast path took it; jump past slow */
+                    size_t j_slow = emit_jcc_rel32_ph(&em, CC_NZ);
+                    /* Fast path succeeded: result already on vm->sp,
+                     * frame->ip already bumped, no inner frame pushed.
+                     * Pop the result into dst and skip slow. */
+                    emit_refresh_r13(&em);
+                    if (in->dst >= 0) {
+                        emit_vmsp_pop_rax(&em);
+                        emit_store_vreg(&em, in->dst, a, RAX);
+                    }
+                    j_skip_fast_join = emit_jmp_rel32_ph(&em);
+                    patch_rel32(&em, j_slow, em.pos);
+                }
+
                 emit_mov_rr(&em, RDI, R12);
                 emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
                 emit_test_eax_eax(&em);
@@ -1491,6 +1521,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     emit_vmsp_pop_rax(&em);
                     emit_store_vreg(&em, in->dst, a, RAX);
                 }
+                if (has_fast) patch_rel32(&em, j_skip_fast_join, em.pos);
                 break;
             }
 

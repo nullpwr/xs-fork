@@ -170,6 +170,7 @@ int  vm_step(VM *vm);
 int  vm_step_jit(VM *vm);  /* faster variant for JIT (assumes single_step=1) */
 void vm_grow_stack(VM *vm); /* exposed for JIT's loop-top capacity check */
 int  vm_call_closure_fast(VM *vm, int argc);  /* JIT OP_CALL fast path */
+int  vm_method_call_fast(VM *vm, int argc);   /* JIT OP_METHOD_CALL fast path */
 int  vm_return_fast(VM *vm);                  /* JIT OP_RETURN fast path */
 Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx);  /* JIT IC */
 /* Direct helpers for hot dispatched ops. The JIT calls them in place

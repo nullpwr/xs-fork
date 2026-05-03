@@ -1695,7 +1695,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     if (VAL_TAG(obj) == XS_STR) {
         const char *s = obj->s;
         int slen = (int)strlen(s);
-        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0)
+        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0 ||
+            strcmp(method, "size") == 0)
             return xs_int(utf8_strlen(s, slen));
         if (strcmp(method, "upper") == 0 || strcmp(method, "to_upper") == 0) {
             int olen;
@@ -2129,7 +2130,9 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
     // --- array methods
     if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
         XSArray *arr = obj->arr;
-        if (strcmp(method, "len") == 0) return xs_int(arr->len);
+        if (strcmp(method, "len") == 0 || strcmp(method, "size") == 0 ||
+            strcmp(method, "length") == 0)
+            return xs_int(arr->len);
         if (strcmp(method, "push") == 0 || strcmp(method, "append") == 0) {
             for (int j=0;j<argc;j++) array_push(arr, value_incref(args[j]));
             return value_incref(XS_NULL_VAL);

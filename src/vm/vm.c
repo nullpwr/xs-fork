@@ -1569,6 +1569,27 @@ static void vm_opcounts_dump(void) {
                 nm ? nm : "?", (unsigned long long)rows[i].n,
                 100.0 * rows[i].n / total);
     }
+    if (total_jit > 0) {
+        fprintf(stderr, "xs vm opcounts (JIT single-step residue):\n");
+        Row jrows[OP__MAX];
+        for (int i = 0; i < OP__MAX; i++) {
+            jrows[i].op = i; jrows[i].n = g_opcounts_jit_step[i];
+        }
+        for (int i = 0; i < 20 && i < OP__MAX; i++) {
+            int best = i;
+            for (int j = i + 1; j < OP__MAX; j++)
+                if (jrows[j].n > jrows[best].n) best = j;
+            Row tmp = jrows[i]; jrows[i] = jrows[best]; jrows[best] = tmp;
+            if (jrows[i].n == 0) break;
+        }
+        for (int i = 0; i < 20; i++) {
+            if (jrows[i].n == 0) break;
+            const char *nm = bytecode_op_name((Opcode)jrows[i].op);
+            fprintf(stderr, "  %-18s %12llu  (%5.2f%%)\n",
+                    nm ? nm : "?", (unsigned long long)jrows[i].n,
+                    100.0 * jrows[i].n / total_jit);
+        }
+    }
 }
 
 static void vm_opcounts_init(void) {
@@ -6183,6 +6204,23 @@ int vm_return_fast(VM *vm) {
    to surface it on the next step. */
 int vm_call_closure_fast(VM *vm, int argc) {
     Value *callee = vm->sp[-argc - 1];
+    /* Native fast path: most builtins are just a C function. The slow
+       OP_CALL arm does exactly this; doing it here saves the
+       vm_step_jit dispatch tax (~50ns) on every native call from JIT'd
+       code. If the native queues a throw, we return 1 so vm_step_jit's
+       vm_dispatch top-of-loop unwinds; the args+result we just touched
+       are still on the stack but unwind clears them. */
+    if (VAL_TAG(callee) == XS_NATIVE) {
+        Value **args = vm->sp - argc;
+        Value *result = callee->native(NULL, args, argc);
+        for (int i = 0; i < argc; i++) value_decref(*--vm->sp);
+        value_decref(*--vm->sp); /* callee */
+        if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+        *vm->sp++ = result ? result : value_incref(XS_NULL_VAL);
+        if (g_xs_pending_throw) return 1;
+        vm->frames[vm->frame_count - 1].ip += 1; /* past OP_CALL */
+        return 0;
+    }
     if (VAL_TAG(callee) != XS_CLOSURE) return 1;
     XSClosure *cl = callee->cl;
     XSProto *proto = cl->proto;
@@ -6232,6 +6270,106 @@ int vm_call_closure_fast(VM *vm, int argc) {
      * up proto->jit_entry when the enclosing caller is itself a
      * tier-2 frame, so recursive self-calls inside a compiled proto
      * still land on native code. */
+    return 0;
+}
+
+/* JIT fast path for OP_METHOD_CALL. Two routes:
+
+   1. Array / string workhorse methods (.push, .len, .size, .pop) get
+      a tag-checked inline implementation. These dominate in real code
+      (every push or len in a tight loop) and aren't covered by the IC
+      because the interpreter dispatches them through hardcoded type
+      switches rather than caching a resolved Value*.
+
+   2. Map / module receivers with a previously-resolved XS_NATIVE go
+      through the inline cache, mirroring the interp's hot path.
+
+   Everything else returns 1 so vm_step_jit's full OP_METHOD_CALL
+   handles it (closures, signals, channels, generic map methods,
+   tuples writing to themselves, etc.). */
+int vm_method_call_fast(VM *vm, int argc) {
+    if (vm->frame_count == 0) return 1;
+    CallFrame *frame = &vm->frames[vm->frame_count - 1];
+    Instruction instr = *frame->ip;
+    if (INSTR_OPCODE(instr) != OP_METHOD_CALL) return 1;
+    XSProto *proto = frame->closure_val->cl->proto;
+    Value *name_const = proto->chunk.consts[INSTR_Bx(instr)];
+    if (!name_const || VAL_TAG(name_const) != XS_STR) return 1;
+    const char *name = name_const->s;
+    Value *obj = vm->sp[-argc - 1];
+    Value **args = vm->sp - argc;
+
+    /* ---- Array .push / .len / .size / .pop ---- */
+    if (VAL_TAG(obj) == XS_ARRAY) {
+        Value *r = NULL;
+        if ((name[0] == 'p' && name[1] == 'u' &&
+             strcmp(name, "push") == 0) ||
+            (name[0] == 'a' && strcmp(name, "append") == 0)) {
+            for (int j = 0; j < argc; j++)
+                array_push(obj->arr, value_incref(args[j]));
+            r = value_incref(XS_NULL_VAL);
+        } else if (argc == 0 && name[0] == 'l' && strcmp(name, "len") == 0) {
+            r = xs_int(obj->arr->len);
+        } else if (argc == 0 && name[0] == 's' && strcmp(name, "size") == 0) {
+            r = xs_int(obj->arr->len);
+        } else if (argc == 0 && name[0] == 'p' && name[1] == 'o' &&
+                   strcmp(name, "pop") == 0) {
+            if (obj->arr->len > 0) {
+                r = value_incref(obj->arr->items[obj->arr->len - 1]);
+                value_decref(obj->arr->items[--obj->arr->len]);
+            } else {
+                r = value_incref(XS_NULL_VAL);
+            }
+        }
+        if (!r) return 1;
+        for (int j = 0; j < argc; j++) value_decref(*--vm->sp);
+        value_decref(*--vm->sp); /* receiver */
+        if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+        *vm->sp++ = r;
+        if (g_xs_pending_throw) return 1;
+        frame->ip += 1;
+        return 0;
+    }
+
+    /* ---- String .len / .size ---- */
+    if (VAL_TAG(obj) == XS_STR && argc == 0 &&
+        (strcmp(name, "len") == 0 || strcmp(name, "size") == 0 ||
+         strcmp(name, "length") == 0)) {
+        Value *r = xs_int((int64_t)utf8_strlen(obj->s, (int)strlen(obj->s)));
+        value_decref(*--vm->sp); /* receiver */
+        if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+        *vm->sp++ = r;
+        frame->ip += 1;
+        return 0;
+    }
+
+    /* ---- Map / module IC route ---- */
+    if (VAL_TAG(obj) != XS_MAP && VAL_TAG(obj) != XS_MODULE) return 1;
+    int site_id = ic_site_id(
+        (int)((uintptr_t)proto ^
+              (uintptr_t)(frame->ip - proto->chunk.code)));
+    int64_t type_tag = (int64_t)(intptr_t)obj->map;
+    uint8_t is_module = 0, needs_self = 0;
+    Value *fn = ic_lookup_ex(site_id, type_tag, name,
+                             &is_module, &needs_self);
+    if (!fn || VAL_TAG(fn) != XS_NATIVE) return 1;
+    Value *r;
+    if (is_module) {
+        r = fn->native(NULL, args, argc);
+    } else {
+        Value *nargs[17];
+        nargs[0] = obj;
+        int total = 1 + argc;
+        if (total > 17) total = 17;
+        for (int j = 0; j < argc && j < 16; j++) nargs[j + 1] = args[j];
+        r = fn->native(NULL, nargs, total);
+    }
+    for (int j = 0; j < argc; j++) value_decref(*--vm->sp);
+    value_decref(*--vm->sp); /* receiver */
+    if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+    *vm->sp++ = r ? r : value_incref(XS_NULL_VAL);
+    if (g_xs_pending_throw) return 1;
+    frame->ip += 1;
     return 0;
 }
 

@@ -3,6 +3,7 @@
 #include "core/xs_bigint.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 #define MAX_LOCALS   256
@@ -725,6 +726,20 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_UNARY:
+        /* Fold `-LIT` into a single PUSH_CONST so the JIT (and VM) don't
+           dispatch a runtime NEG for source like `-2.0` or `-1`. INT64_MIN
+           is left to the runtime to handle (it has overflow logic). */
+        if (strcmp(n->unary.op, "-") == 0 &&
+            n->unary.expr && n->unary.expr->tag == NODE_LIT_INT &&
+            n->unary.expr->lit_int.ival != INT64_MIN) {
+            emit_const(c, xs_int(-n->unary.expr->lit_int.ival));
+            break;
+        }
+        if (strcmp(n->unary.op, "-") == 0 &&
+            n->unary.expr && n->unary.expr->tag == NODE_LIT_FLOAT) {
+            emit_const(c, xs_float(-n->unary.expr->lit_float.fval));
+            break;
+        }
         compile_node(c, n->unary.expr, 1);
         if (strcmp(n->unary.op, "-") == 0)
             emit(c, MAKE_A(OP_NEG, 0, 0));
