@@ -1351,15 +1351,17 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
              * between when it's set (IR_INDEX_GET, IR_MAKE_RANGE,
              * IR_STORE_FIELD). IR_INDEX_SET pushes src1, src2, then
              * call_args[0]. */
-            case IR_METHOD_CALL: {
-                /* OP_METHOD_CALL on a user-defined closure method
-                 * pushes a new call frame inside vm_step_jit and
-                 * returns; the result we want isn't on top of vm->sp
-                 * yet -- it's still the call args, repurposed as the
-                 * inner frame's locals. We have to drive the inner
-                 * frame to completion (via tier2_run_until) before
-                 * popping the result, otherwise the JIT's outer code
-                 * keeps running while the wrong frame sits on top of
+            case IR_METHOD_CALL:
+            case IR_VM_STEP_DRAIN: {
+                /* Ops that may push a new call frame inside vm_step_jit
+                 * (OP_METHOD_CALL on a closure method, OP_MAKE_INST's
+                 * closure-init branch). When that happens the result
+                 * we want isn't on top of vm->sp yet -- it's still
+                 * the call args, repurposed as the inner frame's
+                 * locals. We have to drive the inner frame to
+                 * completion (via tier2_run_until) before popping
+                 * the result, otherwise the JIT's outer code keeps
+                 * running while the wrong frame sits on top of
                  * vm->frames -- which then makes vm_load_global_ic
                  * pick the inner proto's chunk and walks off
                  * chk->consts. Mirrors the post-call drain in

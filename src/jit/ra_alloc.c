@@ -37,7 +37,7 @@ static int ra_op_uses_call_args(IROp op) {
     return op == IR_CALL || op == IR_METHOD_CALL ||
            op == IR_INDEX_SET ||
            op == IR_MAKE_ARRAY || op == IR_MAKE_TUPLE || op == IR_MAKE_MAP ||
-           op == IR_VM_STEP || op == IR_VM_STEP_CF;
+           op == IR_VM_STEP || op == IR_VM_STEP_CF || op == IR_VM_STEP_DRAIN;
 }
 
 static int inst_uses(const IRInst *in, IRVReg out[IR_MAX_CALL_ARGS + 2]) {

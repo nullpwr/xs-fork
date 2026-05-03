@@ -80,6 +80,14 @@ typedef enum {
      * jit_entry so tier2_run_until / the interpreter can pick up
      * wherever the op left the frame. */
     IR_VM_STEP_CF,
+    /* Same operand flushing as IR_VM_STEP, plus a post-step
+     * frame_count check: if the OP pushed a frame mid-body (e.g.
+     * OP_MAKE_INST's closure-init branch, OP_METHOD_CALL on a user-
+     * defined method) the emitted code drives the inner frame to
+     * completion via tier2_run_until before popping the result. Used
+     * for ops that *might* push a frame -- CF-unconditional ops use
+     * IR_VM_STEP_CF, frame-stable ops use plain IR_VM_STEP. */
+    IR_VM_STEP_DRAIN,
 
     /* pure value consumption */
     IR_STORE_LOCAL,  /* frame->base[imm] = src1 (decref old) */

@@ -175,13 +175,16 @@ static int op_supported(Opcode op) {
         case OP_DEFER_RUN:
         case OP_NURSERY_BEGIN:
         case OP_NURSERY_END:
-        /* Class-construction ops we can dispatch through IR_VM_STEP:
-         * each runs entirely inside the interpreter step and leaves
-         * the result on top of vm->sp before vm_step_jit returns.
-         * (OP_MAKE_INST is intentionally excluded -- its closure-init
-         * branch pushes a new call frame mid-op so the result we'd
-         * pop after vm_step_jit is still a callee local.) */
+        /* Class-construction ops. MAKE_CLASS and INHERIT both leave the
+         * result on top of vm->sp before vm_step_jit returns, so they
+         * lower through plain IR_VM_STEP. OP_MAKE_INST is different:
+         * its closure-init branch pushes a new call frame mid-op
+         * (init runs in its own frame, vm->sp top after vm_step_jit
+         * is the last ctor arg, not the instance). It lowers through
+         * IR_VM_STEP_DRAIN, which adds a post-step frame_count check
+         * + tier2_run_until before popping the result. */
         case OP_MAKE_CLASS:
+        case OP_MAKE_INST:
         case OP_INHERIT:
             return 1;
         default:
@@ -358,6 +361,13 @@ IRFunc *ralow_lower(XSProto *proto) {
             int nfields = (int)INSTR_A(proto->chunk.code[i]);
             if (nfields * 2 > IR_MAX_CALL_ARGS)
                 return bail(NULL, RALOW_BAIL_MAKE_LARGE, (int)op);
+        }
+        if (op == OP_MAKE_INST) {
+            /* INSTR_A = nargs; stack pops class + nargs ctor args.
+             * The class slot rides in src1, args in call_args[]. */
+            int nargs = (int)INSTR_A(proto->chunk.code[i]);
+            if (nargs > IR_MAX_CALL_ARGS)
+                return bail(NULL, RALOW_BAIL_CALL_ARGC, (int)op);
         }
     }
 
@@ -759,6 +769,21 @@ IRFunc *ralow_lower(XSProto *proto) {
                 IRVReg d = new_vreg(f);
                 int idx = ir_emit(f, IR_VM_STEP, d, -1, -1, 0, pc);
                 for (int i = 0; i < n; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_MAKE_INST: {
+                /* stack: [class, arg0, ..., argN-1] -> [instance].
+                 * Routes through IR_VM_STEP_DRAIN because a closure
+                 * init pushes a new frame mid-op; the codegen drains
+                 * any pushed inner frames before popping the result. */
+                int nargs = (int)INSTR_A(ins);
+                IRVReg args[IR_MAX_CALL_ARGS];
+                for (int i = nargs - 1; i >= 0; i--) args[i] = vstack_pop(&vs);
+                IRVReg cls = vstack_pop(&vs);
+                IRVReg d   = new_vreg(f);
+                int idx = ir_emit(f, IR_VM_STEP_DRAIN, d, cls, -1, 0, pc);
+                for (int i = 0; i < nargs; i++) f->insts[idx].call_args[i] = args[i];
                 vstack_push(&vs, d);
                 break;
             }

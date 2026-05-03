@@ -62,7 +62,7 @@ static int op_uses_call_args_as_vregs(IROp op) {
     return op == IR_CALL || op == IR_METHOD_CALL ||
            op == IR_INDEX_SET ||
            op == IR_MAKE_ARRAY || op == IR_MAKE_TUPLE || op == IR_MAKE_MAP ||
-           op == IR_VM_STEP || op == IR_VM_STEP_CF;
+           op == IR_VM_STEP || op == IR_VM_STEP_CF || op == IR_VM_STEP_DRAIN;
 }
 
 static int ir_inst_reads(const IRInst *in, IRVReg reads[IR_MAX_CALL_ARGS + 2],
