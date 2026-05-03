@@ -53,6 +53,7 @@ int     map_has(XSMap *m, const char *k);
 void    map_del(XSMap *m, const char *k);
 char  **map_keys(XSMap *m, int *len_out);
 void    map_free(XSMap *m);
+Value  *map_get_at(XSMap *m, const char *k, int *bucket_out);
 
 XSFunc *func_new(const char *name, Node **params, int nparams, Node *body, Env *closure);
 XSFunc *func_new_ex(const char *name, Node **params, int nparams, Node *body, Env *closure,

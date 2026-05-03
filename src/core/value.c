@@ -46,11 +46,17 @@ static Value *val_alloc(ValueTag tag) {
 }
 
 static void val_free(Value *v) {
-    /* Only recycle XS_INT Values through the freelist. Other tags
-       have complex union members and we'd risk tripping up code that
-       holds stale references. Ints (the dominant arithmetic output)
-       are simple enough to recycle safely. */
-    if (VAL_TAG(v) == XS_INT && g_val_freelist_len < VAL_FREELIST_MAX) {
+    /* Recycle Values whose union member is a plain scalar. XS_INT is
+       the obvious case; XS_FLOAT has the same shape (`double f` in the
+       union, no heap pointers, no refcounts to other objects), so
+       it's safe by the same reasoning. Float-heavy code (mandelbrot,
+       n-body) allocates and frees a fresh boxed float per arithmetic
+       op; routing those through the freelist removes the malloc/free
+       round trip on the hot path. Everything else (strings, arrays,
+       maps, closures, ...) frees normally because their union members
+       own heap state that needs explicit teardown. */
+    ValueTag t = VAL_TAG(v);
+    if ((t == XS_INT || t == XS_FLOAT) && g_val_freelist_len < VAL_FREELIST_MAX) {
         v->fn = (XSFunc *)g_val_freelist;
         g_val_freelist = v;
         g_val_freelist_len++;
@@ -880,6 +886,26 @@ Value *map_get(XSMap *m, const char *k) {
     int tries = 0;
     while (m->keys[idx] && tries < m->cap) {
         if (strcmp(m->keys[idx], k) == 0) return m->vals[idx];
+        idx = (idx + 1) % (uint32_t)m->cap;
+        tries++;
+    }
+    return NULL;
+}
+
+/* Same lookup as map_get, but also records the bucket index that held
+ * the match. Used by inline caches that want to remember "this name
+ * lives at bucket N in maps with this shape" so subsequent lookups
+ * can skip the hash + probing. Sets *bucket_out to -1 on miss. */
+Value *map_get_at(XSMap *m, const char *k, int *bucket_out) {
+    if (bucket_out) *bucket_out = -1;
+    if (!m) return NULL;
+    uint32_t idx = hash_str(k) % (uint32_t)m->cap;
+    int tries = 0;
+    while (m->keys[idx] && tries < m->cap) {
+        if (strcmp(m->keys[idx], k) == 0) {
+            if (bucket_out) *bucket_out = (int)idx;
+            return m->vals[idx];
+        }
         idx = (idx + 1) % (uint32_t)m->cap;
         tries++;
     }

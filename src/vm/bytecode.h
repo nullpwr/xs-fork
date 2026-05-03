@@ -143,16 +143,19 @@ typedef struct {
     int          len, cap;
     Value      **consts;
     int          nconsts, cap_consts;
-    /* Inline caches: one Value* slot per instruction. Populated lazily
-       on first execution. The only opcode currently using these is
-       OP_LOAD_GLOBAL, which stashes the resolved global value pointer
-       at chunk.ic[ip] so subsequent hits skip the hashmap lookup.
-       vm->global_version bumps on every OP_STORE_GLOBAL; the IC stores
-       the version it observed so stale cached pointers are discarded
-       after a global is reassigned. Lazy-allocated: NULL until first
-       LOAD_GLOBAL executes for this chunk. */
-    Value      **ic;           /* parallel to code[], slots are Value* */
-    uint64_t    *ic_version;   /* parallel to ic[], stored vm->global_version */
+    /* Inline caches: one slot per instruction. Populated lazily on
+       first execution. Per-opcode interpretation:
+         OP_LOAD_GLOBAL: ic[ip] = cached Value* of the global
+                         ic_version[ip] = vm->global_version snapshot
+         OP_LOAD_FIELD:  ic_class[ip] = receiver's XSClass* (identity)
+                         ic_version[ip] = (fields->cap << 32) | bucket
+       ic[] is owned (refcounted) and freed via value_decref in
+       proto_free. ic_class[] is borrowed -- the class pointer is
+       kept alive by the live instances that reach the IC, so we
+       just free the array itself. */
+    Value      **ic;           /* parallel to code[], owned Value* (LOAD_GLOBAL) */
+    struct XSClass **ic_class; /* parallel to code[], borrowed (LOAD_FIELD) */
+    uint64_t    *ic_version;   /* parallel to code[], opcode-specific */
 } XSChunk;
 
 typedef struct XSProto XSProto;
@@ -197,6 +200,7 @@ void     proto_free(XSProto *p);
 int      chunk_write(XSChunk *c, Instruction i);
 int      chunk_add_const(XSChunk *c, Value *v);
 void     proto_dump(XSProto *p);
+const char *bytecode_op_name(Opcode op);
 
 /* bytecode serialization (.xsc format) */
 int      proto_write_file(XSProto *p, const char *path);

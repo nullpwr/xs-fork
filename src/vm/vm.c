@@ -1532,8 +1532,55 @@ static Value *vm_try_map_op(VM *vm, Value *a, const char *op, Value *b) {
     return vm_invoke(vm, fn, args, 2);
 }
 
+/* Per-opcode execution histogram, populated only when XS_VM_OPCOUNTS=1.
+ * Atexit handler dumps a sorted top-N so you can see exactly where each
+ * benchmark spends its dispatch cycles. Cost when disabled is one
+ * never-taken branch per dispatched opcode. */
+static int g_opcounts_enabled = -1;
+static uint64_t g_opcounts[OP__MAX];
+static uint64_t g_opcounts_jit_step[OP__MAX];   /* subset dispatched via single_step */
+
+static void vm_opcounts_dump(void) {
+    uint64_t total = 0, total_jit = 0;
+    for (int i = 0; i < OP__MAX; i++) {
+        total     += g_opcounts[i];
+        total_jit += g_opcounts_jit_step[i];
+    }
+    if (total == 0) return;
+    fprintf(stderr, "xs vm opcounts: %llu ops dispatched"
+            " (%llu via JIT single-step, %llu in pure VM)\n",
+            (unsigned long long)total, (unsigned long long)total_jit,
+            (unsigned long long)(total - total_jit));
+    typedef struct { int op; uint64_t n; } Row;
+    Row rows[OP__MAX];
+    for (int i = 0; i < OP__MAX; i++) { rows[i].op = i; rows[i].n = g_opcounts[i]; }
+    /* selection sort top-20; we only need the top of the list */
+    for (int i = 0; i < 20 && i < OP__MAX; i++) {
+        int best = i;
+        for (int j = i + 1; j < OP__MAX; j++)
+            if (rows[j].n > rows[best].n) best = j;
+        Row tmp = rows[i]; rows[i] = rows[best]; rows[best] = tmp;
+        if (rows[i].n == 0) break;
+    }
+    for (int i = 0; i < 20; i++) {
+        if (rows[i].n == 0) break;
+        const char *nm = bytecode_op_name((Opcode)rows[i].op);
+        fprintf(stderr, "  %-18s %12llu  (%5.2f%%)\n",
+                nm ? nm : "?", (unsigned long long)rows[i].n,
+                100.0 * rows[i].n / total);
+    }
+}
+
+static void vm_opcounts_init(void) {
+    if (g_opcounts_enabled >= 0) return;
+    const char *env = getenv("XS_VM_OPCOUNTS");
+    g_opcounts_enabled = (env && *env && env[0] != '0') ? 1 : 0;
+    if (g_opcounts_enabled) atexit(vm_opcounts_dump);
+}
+
 int vm_run(VM *vm, XSProto *proto) {
     xs_limits_reset();
+    vm_opcounts_init();
     g_vm_for_invoke = vm;
     g_plugin_vm = vm;
     XSClosure *top_cl    = xs_malloc(sizeof *top_cl);
@@ -1613,6 +1660,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         Instruction instr = *frame->ip++;
         Opcode op = INSTR_OPCODE(instr);
 
+        if (g_opcounts_enabled > 0) {
+            g_opcounts[op]++;
+            if (vm->single_step) g_opcounts_jit_step[op]++;
+        }
+
         switch (op) {
 
         case OP_NOP: break;
@@ -1661,8 +1713,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
             if (!chk->ic) {
                 chk->ic = xs_calloc((size_t)chk->len, sizeof(Value *));
-                chk->ic_version = xs_calloc((size_t)chk->len, sizeof(uint64_t));
+                if (!chk->ic_version)
+                    chk->ic_version = xs_calloc((size_t)chk->len,
+                                                sizeof(uint64_t));
             }
+            /* The field IC also writes to ic_version, but only when the
+             * receiver is XS_INST -- different opcode at the same IP can
+             * never happen, so the two never alias. The version field
+             * for LOAD_GLOBAL means "global_version snapshot"; for
+             * LOAD_FIELD it means "(cap << 32) | bucket". */
             Value *cached = chk->ic[ip_idx];
             if (cached && chk->ic_version[ip_idx] == vm->global_version) {
                 PUSH(value_incref(cached));
@@ -2096,6 +2155,56 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_LOAD_FIELD: {
             const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *obj = POP(); Value *r = NULL;
+            /* Inline cache for the dominant case: instance-of-class
+             * field reads. Cache shape = (XSClass*, fields->cap) and
+             * the bucket index where `name` lives. Hot benchmarks
+             * (n-body, anything with a per-iteration `obj.field`) call
+             * this thousands to millions of times on the same shape;
+             * skipping hash+probe + collision walking is a big win for
+             * both --vm and --jit (the JIT routes IR_LOAD_FIELD through
+             * vm_step_jit, so this case is shared). */
+            XSChunk *chk = &PROTO->chunk;
+            int ip_idx = (int)(frame->ip - chk->code) - 1;
+            if (VAL_TAG(obj) == XS_INST && obj->inst && obj->inst->fields
+                && ip_idx >= 0 && ip_idx < chk->len) {
+                if (!chk->ic_class) {
+                    chk->ic_class = xs_calloc((size_t)chk->len,
+                                              sizeof(struct XSClass *));
+                    if (!chk->ic_version)
+                        chk->ic_version = xs_calloc((size_t)chk->len,
+                                                    sizeof(uint64_t));
+                }
+                XSClass *expected = chk->ic_class[ip_idx];
+                uint64_t packed = chk->ic_version[ip_idx];
+                int cached_cap    = (int)(packed >> 32);
+                int cached_bucket = (int)(packed & 0xFFFFFFFFu);
+                XSMap *fields = obj->inst->fields;
+                if (expected && expected == obj->inst->class_
+                    && cached_cap == fields->cap
+                    && cached_bucket >= 0 && cached_bucket < fields->cap
+                    && fields->keys[cached_bucket]
+                    && strcmp(fields->keys[cached_bucket], name) == 0) {
+                    Value *v = fields->vals[cached_bucket];
+                    if (v) {
+                        r = value_incref(v);
+                        value_decref(obj); PUSH(r); break;
+                    }
+                }
+                /* Cold or stale -- do the lookup, record (class, cap, bucket). */
+                int bucket = -1;
+                Value *v = map_get_at(fields, name, &bucket);
+                if (v && bucket >= 0) {
+                    chk->ic_class[ip_idx]   = obj->inst->class_;
+                    chk->ic_version[ip_idx] =
+                        ((uint64_t)(uint32_t)fields->cap << 32) |
+                        (uint64_t)(uint32_t)bucket;
+                    r = value_incref(v);
+                    value_decref(obj); PUSH(r); break;
+                }
+                /* Field not on the instance directly -- fall through to
+                 * the slow path so methods / inherited fallbacks still
+                 * resolve correctly. */
+            }
             if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 Value *cid = map_get(obj->map, "_chan_id");
                 int is_chan = (cid && VAL_TAG(cid) == XS_INT);
@@ -5870,7 +5979,8 @@ Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx) {
     }
     if (!chk->ic) {
         chk->ic = xs_calloc((size_t)chk->len, sizeof(Value *));
-        chk->ic_version = xs_calloc((size_t)chk->len, sizeof(uint64_t));
+        if (!chk->ic_version)
+            chk->ic_version = xs_calloc((size_t)chk->len, sizeof(uint64_t));
     }
     Value *cached = chk->ic[ip_idx];
     if (cached && chk->ic_version[ip_idx] == vm->global_version) {
@@ -5970,6 +6080,7 @@ int vm_call_closure_fast(VM *vm, int argc) {
 
 int vm_run_with(VM *vm, XSProto *proto, int (*entry)(VM *)) {
     if (!vm || !proto || !entry) return 1;
+    vm_opcounts_init();
     g_vm_for_invoke = vm;
     g_plugin_vm = vm;
     XSClosure *top_cl = xs_malloc(sizeof *top_cl);

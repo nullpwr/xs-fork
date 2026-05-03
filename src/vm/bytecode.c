@@ -23,8 +23,11 @@ void proto_free(XSProto *p) {
     if (p->chunk.ic) {
         for (int i = 0; i < p->chunk.len; i++) value_decref(p->chunk.ic[i]);
         free(p->chunk.ic);
-        free(p->chunk.ic_version);
     }
+    /* The field IC stores borrowed XSClass* identity pointers, not owned
+     * Values, so just drop the array. */
+    free(p->chunk.ic_class);
+    free(p->chunk.ic_version);
     for (int i = 0; i < p->n_inner; i++) proto_free(p->inner[i]);
     free(p->inner);
     free(p->uv_descs);
@@ -54,28 +57,112 @@ int chunk_add_const(XSChunk *c, Value *v) {
     return c->nconsts - 1;
 }
 
-static const char *op_name(Opcode op) {
+const char *bytecode_op_name(Opcode op) {
     static const char *names[] = {
-        "NOP","PUSH_CONST","PUSH_NULL","PUSH_TRUE","PUSH_FALSE","POP","DUP",
-        "LOAD_LOCAL","STORE_LOCAL","LOAD_UPVALUE","STORE_UPVALUE",
-        "LOAD_GLOBAL","STORE_GLOBAL",
-        "ADD","SUB","MUL","DIV","MOD","POW","NEG","NOT",
-        "EQ","NEQ","LT","GT","LTE","GTE","CONCAT",
-        "MAKE_ARRAY","MAKE_TUPLE","MAKE_MAP","INDEX_GET","INDEX_SET",
-        "LOAD_FIELD","STORE_FIELD",
-        "JUMP","JUMP_IF_FALSE","JUMP_IF_TRUE",
-        "MAKE_RANGE","ITER_LEN","ITER_GET","METHOD_CALL",
-        "MAKE_CLOSURE","CALL","TAIL_CALL","RETURN",
-        "SWAP",
-        "BAND","BOR","BXOR","BNOT","SHL","SHR",
-        "THROW","TRY_BEGIN","TRY_END","CATCH",
-        "TRACE_CALL","TRACE_RETURN","TRACE_STORE","TRACE_IO",
-        "AND","OR","SPREAD","LOOP",
-        "EFFECT_CALL","EFFECT_RESUME","EFFECT_HANDLE",
-        "HANDLE_BODY_END","EFFECT_DONE",
-        "AWAIT","YIELD","SPAWN",
+        [OP_NOP] = "NOP",
+        [OP_PUSH_CONST] = "PUSH_CONST",
+        [OP_PUSH_NULL] = "PUSH_NULL",
+        [OP_PUSH_TRUE] = "PUSH_TRUE",
+        [OP_PUSH_FALSE] = "PUSH_FALSE",
+        [OP_POP] = "POP",
+        [OP_DUP] = "DUP",
+        [OP_LOAD_LOCAL] = "LOAD_LOCAL",
+        [OP_STORE_LOCAL] = "STORE_LOCAL",
+        [OP_LOAD_UPVALUE] = "LOAD_UPVALUE",
+        [OP_STORE_UPVALUE] = "STORE_UPVALUE",
+        [OP_LOAD_GLOBAL] = "LOAD_GLOBAL",
+        [OP_STORE_GLOBAL] = "STORE_GLOBAL",
+        [OP_ADD] = "ADD",
+        [OP_SUB] = "SUB",
+        [OP_MUL] = "MUL",
+        [OP_DIV] = "DIV",
+        [OP_MOD] = "MOD",
+        [OP_POW] = "POW",
+        [OP_NEG] = "NEG",
+        [OP_NOT] = "NOT",
+        [OP_EQ] = "EQ",
+        [OP_NEQ] = "NEQ",
+        [OP_LT] = "LT",
+        [OP_GT] = "GT",
+        [OP_LTE] = "LTE",
+        [OP_GTE] = "GTE",
+        [OP_CONCAT] = "CONCAT",
+        [OP_MAKE_ARRAY] = "MAKE_ARRAY",
+        [OP_MAKE_TUPLE] = "MAKE_TUPLE",
+        [OP_MAKE_MAP] = "MAKE_MAP",
+        [OP_INDEX_GET] = "INDEX_GET",
+        [OP_INDEX_SET] = "INDEX_SET",
+        [OP_LOAD_FIELD] = "LOAD_FIELD",
+        [OP_STORE_FIELD] = "STORE_FIELD",
+        [OP_JUMP] = "JUMP",
+        [OP_JUMP_IF_FALSE] = "JUMP_IF_FALSE",
+        [OP_JUMP_IF_TRUE] = "JUMP_IF_TRUE",
+        [OP_MAKE_RANGE] = "MAKE_RANGE",
+        [OP_ITER_LEN] = "ITER_LEN",
+        [OP_ITER_GET] = "ITER_GET",
+        [OP_METHOD_CALL] = "METHOD_CALL",
+        [OP_MAKE_CLOSURE] = "MAKE_CLOSURE",
+        [OP_CALL] = "CALL",
+        [OP_TAIL_CALL] = "TAIL_CALL",
+        [OP_CALL_KW] = "CALL_KW",
+        [OP_RETURN] = "RETURN",
+        [OP_SWAP] = "SWAP",
+        [OP_BAND] = "BAND",
+        [OP_BOR] = "BOR",
+        [OP_BXOR] = "BXOR",
+        [OP_BNOT] = "BNOT",
+        [OP_SHL] = "SHL",
+        [OP_SHR] = "SHR",
+        [OP_THROW] = "THROW",
+        [OP_TRY_BEGIN] = "TRY_BEGIN",
+        [OP_TRY_END] = "TRY_END",
+        [OP_CATCH] = "CATCH",
+        [OP_TRACE_CALL] = "TRACE_CALL",
+        [OP_TRACE_RETURN] = "TRACE_RETURN",
+        [OP_TRACE_STORE] = "TRACE_STORE",
+        [OP_TRACE_IO] = "TRACE_IO",
+        [OP_AND] = "AND",
+        [OP_OR] = "OR",
+        [OP_SPREAD] = "SPREAD",
+        [OP_LOOP] = "LOOP",
+        [OP_EFFECT_CALL] = "EFFECT_CALL",
+        [OP_EFFECT_RESUME] = "EFFECT_RESUME",
+        [OP_EFFECT_HANDLE] = "EFFECT_HANDLE",
+        [OP_HANDLE_BODY_END] = "HANDLE_BODY_END",
+        [OP_EFFECT_DONE] = "EFFECT_DONE",
+        [OP_AWAIT] = "AWAIT",
+        [OP_YIELD] = "YIELD",
+        [OP_SPAWN] = "SPAWN",
+        [OP_MAKE_CLASS] = "MAKE_CLASS",
+        [OP_MAKE_ENUM] = "MAKE_ENUM",
+        [OP_MAKE_INST] = "MAKE_INST",
+        [OP_IMPL_METHOD] = "IMPL_METHOD",
+        [OP_TRAIT_APPLY] = "TRAIT_APPLY",
+        [OP_INHERIT] = "INHERIT",
+        [OP_MAKE_MODULE] = "MAKE_MODULE",
+        [OP_END_MODULE] = "END_MODULE",
+        [OP_IMPORT] = "IMPORT",
+        [OP_IMPORT_ITEM] = "IMPORT_ITEM",
+        [OP_DEFER_PUSH] = "DEFER_PUSH",
+        [OP_DEFER_RUN] = "DEFER_RUN",
+        [OP_MAKE_ACTOR] = "MAKE_ACTOR",
+        [OP_SEND] = "SEND",
+        [OP_FLOOR_DIV] = "FLOOR_DIV",
+        [OP_SPACESHIP] = "SPACESHIP",
+        [OP_OPT_CHAIN] = "OPT_CHAIN",
+        [OP_NULL_COALESCE] = "NULL_COALESCE",
+        [OP_TRY_OP] = "TRY_OP",
+        [OP_PIPE] = "PIPE",
+        [OP_IN] = "IN",
+        [OP_IS] = "IS",
+        [OP_MAP_MERGE] = "MAP_MERGE",
+        [OP_CLOSE_UPVALUES] = "CLOSE_UPVALUES",
+        [OP_NURSERY_BEGIN] = "NURSERY_BEGIN",
+        [OP_NURSERY_END] = "NURSERY_END",
     };
-    return (unsigned)op < OP__MAX ? names[op] : "?";
+    if ((unsigned)op >= OP__MAX) return "?";
+    const char *n = names[op];
+    return n ? n : "?";
 }
 
 /* .xsc binary format:
@@ -262,7 +349,7 @@ void proto_dump(XSProto *p) {
     for (int i = 0; i < p->chunk.len; i++) {
         Instruction in = p->chunk.code[i];
         printf("  %04d  %-20s A=%-3d B=%-3d C=%-3d Bx=%-5d sBx=%d\n",
-               i, op_name(INSTR_OPCODE(in)),
+               i, bytecode_op_name(INSTR_OPCODE(in)),
                INSTR_A(in), INSTR_B(in), INSTR_C(in),
                INSTR_Bx(in), (int)INSTR_sBx(in));
     }
