@@ -30,6 +30,7 @@ Value *value_incref(Value *v);
 void   value_decref(Value *v);
 
 int     value_truthy(Value *v);
+int     value_is_callable(Value *v);
 char   *value_repr(Value *v);
 char   *value_str(Value *v);
 int     value_equal(Value *a, Value *b);

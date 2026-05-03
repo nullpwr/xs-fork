@@ -177,6 +177,15 @@ Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx);  /* JIT IC */
    the VM and returns an exit code). vm_run_with sweeps the same global
    state as vm_run on entry/exit so the two backends stay swappable. */
 int  vm_run_with(VM *vm, XSProto *proto, int (*entry)(VM *));
+/* Invoke a callable Value (XS_CLOSURE / XS_FUNC / XS_NATIVE) on a fresh
+   VM frame and return the result. Used by interp-side native callbacks
+   that receive a closure produced by the bytecode compiler. */
+Value *vm_invoke_public(VM *vm, Value *fn, Value **args, int argc);
+/* Most-recently-active VM, set by vm_run/vm_run_with so interp-side
+   helpers can dispatch into the bytecode backend without plumbing a
+   VM* through every native. NULL outside vm_run. Thread-local because
+   spawn-workers each run their own VM. */
+extern _Thread_local VM *g_vm_for_invoke;
 void upvalue_close_all(Upvalue **list, Value **cutoff);
 
 #endif /* VM_H */

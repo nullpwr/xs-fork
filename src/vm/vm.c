@@ -31,7 +31,7 @@ static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc);
 /* Thread-local so per-thread VMs can resolve callback fn-targets without
    trampling the parent's pointer; native callbacks (array.map, etc.)
    thread their work through whichever VM the current thread is running. */
-static _Thread_local VM *g_vm_for_invoke;
+_Thread_local VM *g_vm_for_invoke;
 
 static Upvalue *upvalue_new_open(Value **slot) {
     Upvalue *u = xs_malloc(sizeof *u);

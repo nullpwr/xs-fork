@@ -344,6 +344,21 @@ void value_decref(Value *v) {
     if (v->refcount <= 0) free_value(v);
 }
 
+/* Tag-level "is this thing callable" predicate. Centralises the set of
+   tags that natives accept as a callback so backend differences don't
+   leak: --interp produces XS_OVERLOAD for `fn h(){}`, --vm produces
+   XS_CLOSURE, and both backends still hand around XS_FUNC anonymous
+   lambdas plus stdlib XS_NATIVE entries. */
+int value_is_callable(Value *v) {
+    if (!v) return 0;
+    ValueTag t = VAL_TAG(v);
+    return t == XS_FUNC || t == XS_NATIVE || t == XS_OVERLOAD
+#ifdef XSC_ENABLE_VM
+        || t == XS_CLOSURE
+#endif
+        ;
+}
+
 int value_truthy(Value *v) {
     if (!v) return 0;
     switch (VAL_TAG(v)) {

@@ -26,6 +26,9 @@
 #include "optimizer/inline_cache.h"
 #include "runtime/async.h"
 #include "runtime/concurrent.h"
+#ifdef XSC_ENABLE_VM
+#include "vm/vm.h"
+#endif
 #include <time.h>
 #include <limits.h>
 #ifndef PATH_MAX
@@ -946,6 +949,23 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
         interp_pop_frame(i);
         return result ? result : value_incref(XS_NULL_VAL);
     }
+
+#ifdef XSC_ENABLE_VM
+    if (VAL_TAG(callee) == XS_CLOSURE) {
+        /* Bytecode closure invoked from interp-side native (e.g.
+           http.serve handler, signal subscriber, map.filter callback).
+           The closure was built by the bytecode compiler and only the
+           VM knows how to push the right frame. Route through the
+           thread-local current VM. Falls through to the not-callable
+           error below if we're somehow on a thread without a live VM. */
+        if (g_vm_for_invoke) {
+            Value *result = vm_invoke_public(g_vm_for_invoke, callee, args, argc);
+            TRACE_RETURN(i, frame_name ? frame_name : "<call>", result);
+            interp_pop_frame(i);
+            return result ? result : value_incref(XS_NULL_VAL);
+        }
+    }
+#endif
 
     if (VAL_TAG(callee) == XS_FUNC) {
         XSFunc *fn = callee->fn;

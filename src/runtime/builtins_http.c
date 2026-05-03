@@ -208,7 +208,7 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
             fprintf(stderr, "http.serve: map argument missing 'routes'\n");
             return value_incref(XS_NULL_VAL);
         }
-    } else if (htag != XS_FUNC && htag != XS_NATIVE) {
+    } else if (!value_is_callable(handler)) {
         fprintf(stderr, "http.serve: expected (port: int, handler|router)\n");
         return value_incref(XS_NULL_VAL);
     }
@@ -313,8 +313,7 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
                 for (int mi = 0; mi < mws->arr->len && !res; mi++) {
                     Value *mw = mws->arr->items[mi];
                     if (!mw) continue;
-                    int mt = VAL_TAG(mw);
-                    if (mt != XS_FUNC && mt != XS_NATIVE) continue;
+                    if (!value_is_callable(mw)) continue;
                     Value *margs[1] = { req };
                     Value *mres = call_value(ig, mw, margs, 1, "http.serve middleware");
                     if (mres && (VAL_TAG(mres) == XS_MAP || VAL_TAG(mres) == XS_MODULE) && mres->map) {
@@ -352,7 +351,7 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
                 }
                 if (!res) {
                     Value *nf = map_get(router->map, "not_found");
-                    if (nf && (VAL_TAG(nf) == XS_FUNC || VAL_TAG(nf) == XS_NATIVE)) {
+                    if (value_is_callable(nf)) {
                         Value *args[1] = { req };
                         res = call_value(ig, nf, args, 1, "http.serve not_found");
                     } else {

@@ -238,6 +238,11 @@ static Value *builtin_type(Interp *i, Value **args, int argc) {
     case XS_FUNC:   return xs_str("fn");
     case XS_NATIVE: return xs_str("fn");
     case XS_CLOSURE: return xs_str("fn");
+    /* Named `fn h(){}` under --interp wraps the function in an
+       XS_OVERLOAD set of size 1 (so adding a second arity later is
+       transparent). The wrapper is still callable like a fn -- report
+       the same name so backend choice doesn't change type() output. */
+    case XS_OVERLOAD: return xs_str("fn");
     case XS_STRUCT_VAL: return xs_str(args[0]->st->type_name ? args[0]->st->type_name : "struct");
     case XS_ENUM_VAL:   return xs_str(args[0]->en->type_name ? args[0]->en->type_name : "enum");
     case XS_CLASS_VAL:  return xs_str(args[0]->cls->name ? args[0]->cls->name : "class");
