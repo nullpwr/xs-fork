@@ -1351,6 +1351,72 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
              * between when it's set (IR_INDEX_GET, IR_MAKE_RANGE,
              * IR_STORE_FIELD). IR_INDEX_SET pushes src1, src2, then
              * call_args[0]. */
+            case IR_METHOD_CALL: {
+                /* OP_METHOD_CALL on a user-defined closure method
+                 * pushes a new call frame inside vm_step_jit and
+                 * returns; the result we want isn't on top of vm->sp
+                 * yet -- it's still the call args, repurposed as the
+                 * inner frame's locals. We have to drive the inner
+                 * frame to completion (via tier2_run_until) before
+                 * popping the result, otherwise the JIT's outer code
+                 * keeps running while the wrong frame sits on top of
+                 * vm->frames -- which then makes vm_load_global_ic
+                 * pick the inner proto's chunk and walks off
+                 * chk->consts. Mirrors the post-call drain in
+                 * IR_CALL's slow path. */
+
+                /* mov ecx, [r12 + VM_OFF_FRAME_COUNT] ; stash baseline */
+                emit_byte(&em, 0x41); emit_byte(&em, 0x8B); emit_byte(&em, 0x4C);
+                emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_FRAME_COUNT);
+                emit_byte(&em, 0x89); emit_byte(&em, 0x4D);
+                emit_byte(&em, (uint8_t)(int8_t)RC_STASH_DISP);
+
+                /* Push receiver + args. Same operand layout the
+                 * interpreter expects for OP_METHOD_CALL. */
+                if (in->src1 >= 0) {
+                    emit_load_vreg(&em, in->src1, a, RAX);
+                    emit_vmsp_push_rax(&em);
+                }
+                for (int k = 0; k < IR_MAX_CALL_ARGS; k++) {
+                    if (in->call_args[k] < 0) break;
+                    emit_load_vreg(&em, in->call_args[k], a, RAX);
+                    emit_vmsp_push_rax(&em);
+                }
+
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_err_mc = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_err_mc);
+
+                /* If a frame was pushed (closure method case), drain
+                 * via tier2_run_until before pulling the result. */
+                {
+                    /* mov esi, [rbp + RC_STASH_DISP] */
+                    emit_byte(&em, 0x8B); emit_byte(&em, 0x75);
+                    emit_byte(&em, (uint8_t)(int8_t)RC_STASH_DISP);
+                    /* cmp esi, [r12 + VM_OFF_FRAME_COUNT] */
+                    emit_byte(&em, 0x41); emit_byte(&em, 0x3B); emit_byte(&em, 0x74);
+                    emit_byte(&em, 0x24); emit_byte(&em, (uint8_t)VM_OFF_FRAME_COUNT);
+                    /* jge .no_drain */
+                    size_t j_no_drain = emit_jcc_rel32_ph(&em, CC_GE);
+                    emit_mov_rr(&em, RDI, R12);
+                    emit_call_abs(&em, (void *)(uintptr_t)tier2_run_until);
+                    emit_test_eax_eax(&em);
+                    size_t j_err_drain = emit_jcc_rel32_ph(&em, CC_NZ);
+                    ADD_ERR_EXIT(j_err_drain);
+                    patch_rel32(&em, j_no_drain, em.pos);
+                }
+                emit_refresh_r13(&em);
+                if (in->dst >= 0) {
+                    emit_vmsp_pop_rax(&em);
+                    emit_store_vreg(&em, in->dst, a, RAX);
+                }
+                break;
+            }
+
             case IR_INDEX_GET:
             case IR_INDEX_SET:
             case IR_LOAD_FIELD:
@@ -1359,7 +1425,6 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
             case IR_MAKE_ARRAY:
             case IR_MAKE_TUPLE:
             case IR_MAKE_MAP:
-            case IR_METHOD_CALL:
             case IR_VM_STEP:
             case IR_VM_STEP_CF: {
                 if (in->src1 >= 0) {
