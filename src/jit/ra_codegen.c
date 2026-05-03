@@ -1057,19 +1057,23 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     has_float_done_jump = 1;
                 }
 
-                /* --- string fast path (IR_ADD only) ---
-                 * When both ADD operands are XS_STR, call vm_concat_fast
-                 * directly and skip vm_step_jit. Hash + string benches
-                 * dispatched ~1000 string-ADDs each through the slow
-                 * path; this drops them to zero. Sits between the float
-                 * fast path and the slow path so float misses (e.g. one
-                 * operand is a string, the other is a number) flow into
-                 * the string check before falling all the way through. */
+                /* --- string fast path (IR_ADD / IR_EQ / IR_NE) ---
+                 * When both operands are XS_STR, call the appropriate
+                 * helper directly:
+                 *   IR_ADD  -> vm_concat_fast      (returns new string)
+                 *   IR_EQ   -> vm_str_eq_fast(.., 0)   (TRUE/FALSE)
+                 *   IR_NE   -> vm_str_eq_fast(.., 1)   (TRUE/FALSE)
+                 * Sits between the float fast path and the slow path so
+                 * float misses (e.g. one operand is a string, the other
+                 * is a number) flow through the string check before
+                 * falling all the way through. */
                 int is_string_arith = (in->op == IR_ADD);
+                int is_string_cmp   = (in->op == IR_EQ || in->op == IR_NE);
+                int has_string_path = is_string_arith || is_string_cmp;
                 size_t str_done_jump = 0;
                 int has_str_done = 0;
                 size_t str_slow_jumps[8]; int n_sslow = 0;
-                if (is_string_arith) {
+                if (has_string_path) {
                     size_t str_entry = em.pos;
                     /* Float misses now route here instead of straight
                      * to slow. Bitwise / MOD / SUB / MUL etc. don't
@@ -1108,12 +1112,18 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                     emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, 0x05);
                     str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
 
-                    /* vm_concat_fast(a, b) -- arg0=rdi, arg1=rsi.
-                     * Helper consumes both refs and returns +1 result
-                     * in rax. */
+                    /* arg0=rdi, arg1=rsi. Helper consumes both refs
+                     * and returns +1 result in rax. */
                     emit_mov_rr(&em, RDI, RCX);
                     emit_mov_rr(&em, RSI, RAX);
-                    emit_call_abs(&em, (void *)(uintptr_t)vm_concat_fast);
+                    if (is_string_arith) {
+                        emit_call_abs(&em, (void *)(uintptr_t)vm_concat_fast);
+                    } else {
+                        /* mov edx, 0/1  (invert flag for IR_NE) */
+                        emit_byte(&em, 0xBA);
+                        emit_u32(&em, in->op == IR_NE ? 1u : 0u);
+                        emit_call_abs(&em, (void *)(uintptr_t)vm_str_eq_fast);
+                    }
                     emit_store_vreg(&em, in->dst, a, RAX);
                     str_done_jump = emit_jmp_rel32_ph(&em);
                     has_str_done = 1;
@@ -1121,7 +1131,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 
                 /* --- slow path --- */
                 size_t slow_pos = em.pos;
-                if (!has_float_path && !is_string_arith) patch_rel32(&em, jz_slow, slow_pos);
+                if (!has_float_path && !has_string_path) patch_rel32(&em, jz_slow, slow_pos);
                 for (int i = 0; i < n_jo; i++) patch_rel32(&em, (size_t)jo_slow_list[i], slow_pos);
                 for (int i = 0; i < n_fslow; i++)
                     patch_rel32(&em, float_slow_jumps[i], slow_pos);
@@ -1691,10 +1701,70 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 ADD_FIXUP(p_float, in->imm);
                 size_t j_done_float = emit_jmp_rel32_ph(&em);
 
+                /* --- string fast path (only for EQ/NE kinds) ---
+                 * Routes float-misses (one or both operands not float)
+                 * here when the compare is == or !=. Tag-checks both
+                 * for XS_STR, calls vm_str_eq_branch with a pre-XORed
+                 * "take when equal" flag, and branches on the bool
+                 * result -- skips materialising TRUE/FALSE.
+                 * Bench_strings dispatched 500 EQ via the slow path
+                 * before this; with the fix it goes to zero. */
+                int is_eq_kind = (kind == 4 /* EQ */ || kind == 5 /* NE */);
+                size_t str_slow_jumps[8]; int n_sslow = 0;
+                size_t j_done_str = 0; int has_str_done = 0;
+                if (is_eq_kind) {
+                    size_t str_entry = em.pos;
+                    /* Float misses now go here instead of straight to slow. */
+                    for (int i = 0; i < n_fslow; i++)
+                        patch_rel32(&em, f_slow[i], str_entry);
+                    n_fslow = 0;
+
+                    emit_load_vreg(&em, in->src1, a, RCX);
+                    emit_load_vreg(&em, in->src2, a, RAX);
+
+                    /* Reject SMI / NULL / non-STR (XS_STR == 5). */
+                    emit_byte(&em, 0xF6); emit_byte(&em, 0xC1); emit_byte(&em, 0x01);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_byte(&em, 0xA8); emit_byte(&em, 0x01);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_test_rr(&em, RCX, RCX);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    emit_test_rr(&em, RAX, RAX);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_Z);
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x39); emit_byte(&em, 0x05);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+                    emit_byte(&em, 0x83); emit_byte(&em, 0x38); emit_byte(&em, 0x05);
+                    str_slow_jumps[n_sslow++] = emit_jcc_rel32_ph(&em, CC_NZ);
+
+                    /* take_when_equal = (kind==EQ) XOR branch_if_false.
+                     * Truth table:
+                     *   EQ + fall-through (bif=0): take if equal -> 1
+                     *   EQ + branch-on-false:      take if NOT equal -> 0
+                     *   NE + fall-through (bif=0): take if NOT equal -> 0
+                     *   NE + branch-on-false:      take if equal -> 1 */
+                    int take_when_equal = ((kind == 4) ? 1 : 0) ^ branch_if_false;
+
+                    /* vm_str_eq_branch(a, b, take_when_equal). */
+                    emit_mov_rr(&em, RDI, RCX);
+                    emit_mov_rr(&em, RSI, RAX);
+                    /* mov edx, take_when_equal */
+                    emit_byte(&em, 0xBA);
+                    emit_u32(&em, (uint32_t)take_when_equal);
+                    emit_call_abs(&em, (void *)(uintptr_t)vm_str_eq_branch);
+                    /* test eax, eax ; jnz target */
+                    emit_byte(&em, 0x85); emit_byte(&em, 0xC0);
+                    size_t p_str = emit_jcc_rel32_ph(&em, CC_NZ);
+                    ADD_FIXUP(p_str, in->imm);
+                    j_done_str = emit_jmp_rel32_ph(&em);
+                    has_str_done = 1;
+                }
+
                 /* --- slow path --- */
                 size_t slow_pos = em.pos;
                 for (int i = 0; i < n_fslow; i++)
                     patch_rel32(&em, f_slow[i], slow_pos);
+                for (int i = 0; i < n_sslow; i++)
+                    patch_rel32(&em, str_slow_jumps[i], slow_pos);
                 /* Push a then b onto vm->sp, set ip, call vm_step_jit. */
                 emit_load_vreg(&em, in->src1, a, RAX);
                 emit_vmsp_push_rax(&em);
@@ -1773,6 +1843,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                  * Slow-path (branch not taken) also falls through to here. */
                 patch_rel32(&em, j_done_fast,  em.pos);
                 patch_rel32(&em, j_done_float, em.pos);
+                if (has_str_done) patch_rel32(&em, j_done_str, em.pos);
                 break;
             }
 

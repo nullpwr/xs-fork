@@ -179,6 +179,8 @@ Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx);  /* JIT IC */
    return a fresh +1 result. */
 Value *vm_concat_fast(Value *a, Value *b);
 Value *vm_iter_get_fast(Value *iter, Value *idx, int want_pairs);
+Value *vm_str_eq_fast(Value *a, Value *b, int invert);
+int    vm_str_eq_branch(Value *a, Value *b, int take_when_equal);
 /* Set up the top frame for `proto` then hand control to `entry` (which
    must be a function pointer to JIT-emitted machine code that takes
    the VM and returns an exit code). vm_run_with sweeps the same global

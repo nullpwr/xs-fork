@@ -5964,6 +5964,29 @@ int vm_step_jit(VM *vm) {
     return 1;
 }
 
+/* JIT helper for `s == s` / `s != s`: returns the TRUE / FALSE
+   singleton (incref'd) and consumes both string operands. The JIT
+   tag-checks both for XS_STR before the call, so we trust both
+   `s` pointers are non-NULL. `invert` is 1 for IR_NE, 0 for IR_EQ. */
+Value *vm_str_eq_fast(Value *a, Value *b, int invert) {
+    int eq = strcmp(a->s, b->s) == 0;
+    Value *r = value_incref((eq ^ invert) ? XS_TRUE_VAL : XS_FALSE_VAL);
+    value_decref(a); value_decref(b);
+    return r;
+}
+
+/* JIT helper for the IR_CMP_BR fused string path: skip materialising
+   a TRUE/FALSE singleton and report directly whether the branch
+   should be taken. `take_when_equal` is 1 if the caller wants to
+   branch on equality (kind=EQ + fall-through, or kind=NE + branch-
+   if-false), 0 otherwise. The codegen pre-XORs kind/branch_if_false
+   into one bit at compile time so this helper sees a single flag. */
+int vm_str_eq_branch(Value *a, Value *b, int take_when_equal) {
+    int eq = strcmp(a->s, b->s) == 0;
+    value_decref(a); value_decref(b);
+    return eq == take_when_equal;
+}
+
 /* JIT helper for OP_CONCAT: stringifies both operands, concatenates,
    returns a fresh +1 string. Both inputs are decref'd. Mirror of
    the OP_CONCAT case body in vm_dispatch with the operand pop and
