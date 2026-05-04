@@ -1193,10 +1193,37 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 emit_store_vreg(&em, in->dst, a, RCX);
                 size_t jmp_done_un = emit_jmp_rel32_ph(&em);
 
-                /* Slow path. */
+                /* Float fast path for IR_NEG only: the SMI miss above
+                 * mostly catches arithmetic with one or both float ops,
+                 * since IR_NEG just negates a single value. Calls
+                 * vm_float_neg which returns NULL on non-float (we then
+                 * fall through to vm_step_jit).
+                 *
+                 * IR_BNOT skips this path -- float bitwise-not isn't
+                 * defined and would just be a slow-path bail anyway. */
                 size_t slow_pos = em.pos;
                 patch_rel32(&em, jz_unslow, slow_pos);
                 if (jo_un >= 0) patch_rel32(&em, (size_t)jo_un, slow_pos);
+
+                size_t j_post_float_jmp = 0;
+                int has_float = (in->op == IR_NEG);
+                if (has_float) {
+                    emit_load_vreg(&em, in->src1, a, RDI);
+                    emit_call_abs(&em, (void *)(uintptr_t)vm_float_neg);
+                    emit_test_rr(&em, RAX, RAX);
+                    /* jz -> slow_path_step (vm_step_jit handles the
+                     * non-float / dunder cases) */
+                    size_t j_zero = emit_jcc_rel32_ph(&em, CC_Z);
+                    /* Float fast path success: rax holds the new value. */
+                    emit_store_vreg(&em, in->dst, a, RAX);
+                    j_post_float_jmp = emit_jmp_rel32_ph(&em);
+                    /* On null return, vm_float_neg already decref'd
+                     * nothing (it bailed before that), so the operand
+                     * is still owned by us; the slow path needs to
+                     * push it back onto vm->sp. */
+                    patch_rel32(&em, j_zero, em.pos);
+                }
+
                 emit_load_vreg(&em, in->src1, a, RAX);
                 emit_vmsp_push_rax(&em);
                 emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
@@ -1209,6 +1236,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 emit_vmsp_pop_rax(&em);
                 emit_store_vreg(&em, in->dst, a, RAX);
 
+                if (has_float) patch_rel32(&em, j_post_float_jmp, em.pos);
                 patch_rel32(&em, jmp_done_un, em.pos);
                 break;
             }
@@ -1590,7 +1618,37 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 break;
             }
 
-            case IR_INDEX_GET:
+            case IR_INDEX_GET: {
+                /* Try vm_index_get_fast first (covers array/tuple [int],
+                 * map [str], range [int]). On NULL we fall through to
+                 * the generic IR_VM_STEP block below. */
+                emit_load_vreg(&em, in->src1, a, RDI);
+                emit_load_vreg(&em, in->src2, a, RSI);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_index_get_fast);
+                emit_test_rr(&em, RAX, RAX);
+                size_t j_idx_zero = emit_jcc_rel32_ph(&em, CC_Z);
+                /* Fast path: rax has the +1 result. */
+                emit_store_vreg(&em, in->dst, a, RAX);
+                size_t j_idx_done = emit_jmp_rel32_ph(&em);
+                patch_rel32(&em, j_idx_zero, em.pos);
+                /* Slow path: replicate the IR_VM_STEP body for INDEX_GET. */
+                emit_load_vreg(&em, in->src1, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_load_vreg(&em, in->src2, a, RAX);
+                emit_vmsp_push_rax(&em);
+                emit_mov_reg_imm64(&em, RAX, (uint64_t)(uintptr_t)(code_base + bc_off));
+                emit_mov_mem_r13_reg(&em, FRAME_OFF_IP, RAX);
+                emit_mov_rr(&em, RDI, R12);
+                emit_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                emit_test_eax_eax(&em);
+                size_t j_idx_err = emit_jcc_rel32_ph(&em, CC_NZ);
+                ADD_ERR_EXIT(j_idx_err);
+                emit_vmsp_pop_rax(&em);
+                emit_store_vreg(&em, in->dst, a, RAX);
+                patch_rel32(&em, j_idx_done, em.pos);
+                break;
+            }
+
             case IR_INDEX_SET:
             case IR_LOAD_FIELD:
             case IR_STORE_FIELD:

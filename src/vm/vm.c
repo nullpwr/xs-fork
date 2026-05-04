@@ -5985,6 +5985,59 @@ int vm_step_jit(VM *vm) {
     return 1;
 }
 
+/* JIT helper for OP_NEG on a float: takes +1 ownership of v, returns
+   a fresh +1 negated float on success, or NULL when v isn't a float so
+   the caller knows to fall through to the slow path. The SMI path is
+   still inlined in machine code (1 cycle), so this only runs when the
+   tag check there missed. */
+Value *vm_float_neg(Value *v) {
+    if (VAL_TAG(v) != XS_FLOAT) return NULL;
+    Value *r = xs_float(-v->f);
+    value_decref(v);
+    return r;
+}
+
+/* JIT helper for OP_INDEX_GET. Returns a fresh +1 result on hit and
+   consumes the +1 references on col / idx; returns NULL on miss with
+   refs untouched so the caller can run the full slow path. Covers the
+   three high-frequency shapes the bytecode handler does inline:
+     - array / tuple [int]   (with negative-index wrap)
+     - map [str]             (skipping channel-private keys)
+     - range [int]
+   String indexing, range slices, and map-with-non-str-key all go to
+   the slow path; their codepaths allocate or surface errors and the
+   wins of inlining them are smaller. */
+Value *vm_index_get_fast(Value *col, Value *idx) {
+    if ((VAL_TAG(col) == XS_ARRAY || VAL_TAG(col) == XS_TUPLE) &&
+        VAL_TAG(idx) == XS_INT) {
+        int64_t i = VAL_INT(idx);
+        int64_t n = col->arr->len;
+        if (i < 0) i += n;
+        Value *r = (i >= 0 && i < n)
+                 ? value_incref(col->arr->items[i])
+                 : value_incref(XS_NULL_VAL);
+        value_decref(idx); value_decref(col);
+        return r;
+    }
+    if (VAL_TAG(col) == XS_MAP && VAL_TAG(idx) == XS_STR) {
+        /* Channels store a few private keys we hide from index_get;
+           punt those to the slow path so the existing logic runs. */
+        Value *cid = map_get(col->map, "_chan_id");
+        if (cid && VAL_TAG(cid) == XS_INT) return NULL;
+        Value *v = map_get(col->map, idx->s);
+        Value *r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
+        value_decref(idx); value_decref(col);
+        return r;
+    }
+    if (VAL_TAG(col) == XS_RANGE && VAL_TAG(idx) == XS_INT && col->range) {
+        int64_t step = col->range->step ? col->range->step : 1;
+        Value *r = xs_int(col->range->start + VAL_INT(idx) * step);
+        value_decref(idx); value_decref(col);
+        return r;
+    }
+    return NULL;
+}
+
 /* JIT helper for OP_MAKE_ARRAY / OP_MAKE_TUPLE. The JIT pushes `n`
    items onto vm->sp before the call; the helper consumes them in
    insertion order, packages them into a fresh array (or tuple),
@@ -6299,7 +6352,7 @@ int vm_method_call_fast(VM *vm, int argc) {
     Value *obj = vm->sp[-argc - 1];
     Value **args = vm->sp - argc;
 
-    /* ---- Array .push / .len / .size / .pop ---- */
+    /* ---- Array .push / .len / .size / .pop / .concat ---- */
     if (VAL_TAG(obj) == XS_ARRAY) {
         Value *r = NULL;
         if ((name[0] == 'p' && name[1] == 'u' &&
@@ -6320,6 +6373,23 @@ int vm_method_call_fast(VM *vm, int argc) {
             } else {
                 r = value_incref(XS_NULL_VAL);
             }
+        } else if (name[0] == 'c' && strcmp(name, "concat") == 0 &&
+                   argc >= 1) {
+            /* Build a new array combining receiver + each array arg.
+               Non-array args get dropped, mirroring the slow-path. */
+            Value *out = xs_array_new();
+            for (int j = 0; j < obj->arr->len; j++)
+                array_push(out->arr, value_incref(obj->arr->items[j]));
+            for (int a2 = 0; a2 < argc; a2++) {
+                /* match the slow path: only XS_ARRAY contributes;
+                   tuple args go through the slow path's null-fallback. */
+                if (VAL_TAG(args[a2]) == XS_ARRAY) {
+                    for (int j = 0; j < args[a2]->arr->len; j++)
+                        array_push(out->arr,
+                                   value_incref(args[a2]->arr->items[j]));
+                }
+            }
+            r = out;
         }
         if (!r) return 1;
         for (int j = 0; j < argc; j++) value_decref(*--vm->sp);
@@ -6331,16 +6401,47 @@ int vm_method_call_fast(VM *vm, int argc) {
         return 0;
     }
 
-    /* ---- String .len / .size ---- */
-    if (VAL_TAG(obj) == XS_STR && argc == 0 &&
-        (strcmp(name, "len") == 0 || strcmp(name, "size") == 0 ||
-         strcmp(name, "length") == 0)) {
-        Value *r = xs_int((int64_t)utf8_strlen(obj->s, (int)strlen(obj->s)));
-        value_decref(*--vm->sp); /* receiver */
-        if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
-        *vm->sp++ = r;
-        frame->ip += 1;
-        return 0;
+    /* ---- String workhorse methods (no-arg transforms) ---- */
+    if (VAL_TAG(obj) == XS_STR && argc == 0) {
+        const char *s = obj->s;
+        int slen = (int)strlen(s);
+        Value *r = NULL;
+        if (strcmp(name, "len") == 0 || strcmp(name, "size") == 0 ||
+            strcmp(name, "length") == 0) {
+            r = xs_int((int64_t)utf8_strlen(s, slen));
+        } else if (strcmp(name, "upper") == 0 ||
+                   strcmp(name, "to_upper") == 0) {
+            int olen = 0;
+            char *u = utf8_str_upper(s, slen, &olen);
+            r = xs_str(u);
+            free(u);
+        } else if (strcmp(name, "lower") == 0 ||
+                   strcmp(name, "to_lower") == 0) {
+            int olen = 0;
+            char *u = utf8_str_lower(s, slen, &olen);
+            r = xs_str(u);
+            free(u);
+        } else if (strcmp(name, "trim") == 0) {
+            int b = 0, e = slen;
+            while (b < e && (s[b] == ' ' || s[b] == '\t' ||
+                             s[b] == '\n' || s[b] == '\r')) b++;
+            while (e > b && (s[e-1] == ' ' || s[e-1] == '\t' ||
+                             s[e-1] == '\n' || s[e-1] == '\r')) e--;
+            char *buf = xs_malloc((size_t)(e - b) + 1);
+            memcpy(buf, s + b, (size_t)(e - b));
+            buf[e - b] = 0;
+            r = xs_str(buf);
+            free(buf);
+        } else if (strcmp(name, "byte_len") == 0) {
+            r = xs_int(slen);
+        }
+        if (r) {
+            value_decref(*--vm->sp); /* receiver */
+            if (vm->sp - vm->stack >= vm->stack_cap) vm_grow_stack(vm);
+            *vm->sp++ = r;
+            frame->ip += 1;
+            return 0;
+        }
     }
 
     /* ---- Map / module IC route ---- */

@@ -689,6 +689,51 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             emit(c, MAKE_B(OP_CALL, 0, 0, 1));
             break;
         }
+        /* Fold a few of the obvious LIT op LIT cases: numeric arithmetic
+           on int / float literals where the result is exact. Catches
+           the `2 ** 31` shape from random / hash code that's otherwise
+           recomputed every loop iteration. Skip when overflow could
+           happen (signed int **, *, +, -); the slow path handles those
+           with bigint promotion. */
+        if (n->binop.left  && n->binop.left->tag  == NODE_LIT_INT &&
+            n->binop.right && n->binop.right->tag == NODE_LIT_INT) {
+            int64_t a = n->binop.left->lit_int.ival;
+            int64_t b = n->binop.right->lit_int.ival;
+            int64_t r = 0;
+            int folded = 0;
+            if (strcmp(op, "**") == 0 && b >= 0 && b < 63) {
+                r = 1; folded = 1;
+                for (int64_t e = 0; e < b && folded; e++) {
+                    if (__builtin_mul_overflow(r, a, &r)) folded = 0;
+                }
+            } else if (strcmp(op, "+") == 0) {
+                folded = !__builtin_add_overflow(a, b, &r);
+            } else if (strcmp(op, "-") == 0) {
+                folded = !__builtin_sub_overflow(a, b, &r);
+            } else if (strcmp(op, "*") == 0) {
+                folded = !__builtin_mul_overflow(a, b, &r);
+            }
+            if (folded) {
+                emit_const(c, xs_int(r));
+                break;
+            }
+        }
+        if (n->binop.left  && n->binop.left->tag  == NODE_LIT_FLOAT &&
+            n->binop.right && n->binop.right->tag == NODE_LIT_FLOAT) {
+            double a = n->binop.left->lit_float.fval;
+            double b = n->binop.right->lit_float.fval;
+            double r = 0.0;
+            int folded = 1;
+            if      (strcmp(op, "+") == 0) r = a + b;
+            else if (strcmp(op, "-") == 0) r = a - b;
+            else if (strcmp(op, "*") == 0) r = a * b;
+            else folded = 0;
+            if (folded) {
+                emit_const(c, xs_float(r));
+                break;
+            }
+        }
+
         compile_node(c, n->binop.left,  1);
         compile_node(c, n->binop.right, 1);
         Opcode bop = OP_NOP;

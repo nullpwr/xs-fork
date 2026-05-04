@@ -180,6 +180,8 @@ Value *vm_load_global_ic(VM *vm, int ip_idx, uint16_t const_idx);  /* JIT IC */
    return a fresh +1 result. */
 Value *vm_concat_fast(Value *a, Value *b);
 Value *vm_iter_get_fast(Value *iter, Value *idx, int want_pairs);
+Value *vm_float_neg(Value *v);
+Value *vm_index_get_fast(Value *col, Value *idx);
 Value *vm_str_eq_fast(Value *a, Value *b, int invert);
 int    vm_str_eq_branch(Value *a, Value *b, int take_when_equal);
 Value *vm_make_array_fast(VM *vm, int n, int is_tuple);
