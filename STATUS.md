@@ -247,147 +247,47 @@ regression layers under wasmtime.
 
 ## Known Footguns
 
-These are the sharp edges you are most likely to hit. They are here on
-purpose: the more users trip over silently, the more trust the project
-burns. Fix one, and this list gets shorter.
-
-- **Recursion depth limits.** The tree-walker is more conservative
-  about call depth (500 frames, tunable via `XS_MAX_DEPTH`). The VM
-  (default) and JIT (`--jit`) handle deeper stacks fine and are
-  faster on most workloads. If you hit a stack-overflow on the
-  interpreter side, switching backend is usually enough.
-- **Effect handlers on the JS target work via generator delegation.**
-  The transpiler wraps the handled expression in a `function*()` and
-  uses `yield*` to forward through any nested generators, so
-  `perform` lowers to a plain `yield` and resumes correctly. Direct
-  performs in the `handle` body and performs from helper functions
-  both round-trip; the prior parse error is gone. Effects in code
-  paths the C target reaches (the runtime preamble doesn't model
-  continuations) are still VM-only.
-- **`xs --emit wasm` is the AOT path, not the browser path.** Browsers
-  run `xs-browser.wasm` (the runtime build) via the SDK at
-  `static.xslang.org/xs.js`; that's full parity with the native VM
-  because it *is* the native VM, just compiled to wasm32-wasi. The
-  transpiler-emit `--emit wasm` only handles arithmetic and direct
-  function calls and is intentionally not being filled in further;
-  use `--emit c` for AOT.
-- **Cycle collector is opt-in for concurrent mode.** The default GC
-  catches reference cycles synchronously (CPython-style trial deletion)
-  on a generational schedule. For workloads where the multi-ms free
-  walk dominates pause time, set `XS_GC_CONCURRENT=1` to move the
-  sweep onto a worker thread; mark stays inline because it's already
-  fast. Pause-time SLO documented at the top of `src/core/gc_concurrent.h`.
-- **`{` inside double-quoted strings is interpolation.** `"a {x} b"`
-  evaluates `x`. To pass a literal `{` (e.g. a JSON blob), use a
-  backtick raw string: `` `{"a": 1}` ``. The interpolation grammar
-  doesn't have an escape sequence for a single `{`; `{{` collapses
-  to one but the inner content is still parsed as an expression.
-- **Regex is POSIX-extended, not PCRE - this is the v1.0 answer.** No
-  `\d`, `\w`, lookaround, or backreferences. Use `[0-9]`, `[a-zA-Z_]`,
-  etc. PCRE adds 30 kB of code for shorthand and a much larger surface
-  for catastrophic backtracking; POSIX gives a safer perf envelope.
-  If you need the bigger feature set, write a plugin against the regex
-  module. Not changing the default pre-1.0.
-- **HTTPS server uses BearSSL termination.** Pass a PEM cert + key
-  to `http_server_use_tls(server, "cert.pem", "key.pem")` before
-  calling `http_server_start`, and the listener attaches a per-
-  connection BearSSL engine that handles the handshake + record
-  framing transparently. Plain HTTP listeners pay zero cost: the
-  conn_recv / conn_send bridge dispatches through the engine only
-  when `tls_state` is non-null. SSE and the WebSocket helpers
-  (`sse_send_event`, `ws_send_frame`) still take a raw fd and so
-  bypass TLS for now; threading them through HTTPConnection is the
-  remaining piece.
-- **Unicode is byte-oriented and that is the v1.0 answer.** `.len()`,
-  `.slice()`, indexing all work on bytes. Multi-byte UTF-8 sequences
-  round-trip correctly through every operation that doesn't need
-  case-mapping. `.upper()` / `.lower()` are ASCII-only; grapheme-aware
-  operations are not implemented. Adding a full ICU-style codepoint /
-  grapheme layer balloons the binary and the API surface, and the
-  byte model lines up with how real-world text is read off disk and
-  socket. If you need graphemes, a stdlib module on top is fine; the
-  string primitive stays bytes.
-- **Package manager: hosted + git + local.**
-  `xs install <name>` hits `https://reg.xslang.org/api/pkg/<name>/latest`,
-  pulls the tarball off Supabase storage, and unpacks into `.xs_lib/`.
-  `xs search <query>` queries `/api/search`. `xs publish` builds the
-  package tarball, base64-encodes it, and POSTs to
-  `/api/pkg/<name>/publish` with `Authorization: Bearer <token>`,
-  picking the token up from `$XS_REGISTRY_TOKEN` first and then
-  `~/.xs/credentials` (chmod 600). Run `xs login` once to store the
-  token, `xs whoami` to confirm, `xs logout` to forget it. GitHub
-  shorthand (`user/repo`) and `https://...git` keep working as
-  before. Override the registry with `-DPKG_REGISTRY_URL=...` at
-  build time.
-- **JIT covers most of the bytecode.** The register-allocating
-  pipeline lowers generators (`fn*`/`yield`) and shadowed-local
-  cases through `IR_VM_STEP_CF`. Actor methods - whose dispatcher
-  passes an implicit `self` and state-field locals the JIT prologue
-  doesn't model - now bail at lower time, including any outer proto
-  that builds an actor downstream, so an actor-with-closure works
-  uniformly on both backends. Tight arithmetic/branch loops get 5-8x
-  over VM; call-heavy workloads sit closer to VM parity until
-  call-site fast paths land. Both x86-64 and aarch64 are supported.
-- **JIT method-call dispatch on stdlib-module receivers can confuse
-  the operand-stack flush** when the result of `fs.read(x)` (or any
-  other module method call) is consumed inline as an argument to a
-  surrounding call (`println(fs.read(x))`). Storing the intermediate
-  to a `let` first works (`let r = fs.read(x); println(r)`). The
-  VM and interpreter handle both forms identically; pass `--vm` if
-  you hit it. test_fs / test_gc / test_record_prov / test_stdlib_*
-  still trip over this on `--jit` and are documented as a v1.0
-  carryover for the call-site fast-path rewrite.
+- Interpreter has a 500-frame call-depth cap (`XS_MAX_DEPTH` overrides).
+  Hitting it throws `StackOverflow`; switch to the VM if you're
+  recursing deep.
+- `{` inside `"..."` is interpolation. For literal braces use a
+  backtick raw string: `` `{"a": 1}` ``. `{{` collapses to one `{`
+  but the contents are still parsed as an expression.
+- Regex is POSIX extended. No `\d`, `\w`, lookaround, backrefs.
+- `.upper()` / `.lower()` are ASCII-only. Strings are byte-indexed;
+  multi-byte UTF-8 round-trips through everything that doesn't need
+  case mapping.
+- `--emit wasm` only handles arithmetic and direct calls. Use
+  `--emit c` for AOT, or the runtime build (`xs-browser.wasm`) for
+  the browser.
+- Effects on the JS target lower through generator delegation
+  (`yield*`). `perform` outside a `handle` is a parse error.
+  Effects on the C target are not implemented.
+- `XS_GC_CONCURRENT=1` moves GC sweep onto a worker thread; off by
+  default.
+- JIT bails on actor methods (and any proto that builds one). The
+  fallback to VM is automatic. x86-64 and aarch64 only.
+- JIT and VM disagree on a few `--jit` corner cases listed in the
+  test suite as documented carryovers; pass `--vm` if you hit a
+  silent miscompile.
 
 ## Known Limitations
 
-- JIT lowers a fixed opcode subset; generators + shadowed locals pass
-  through. Actor methods (and any proto whose descendants build one)
-  bail to the bytecode VM at lower time, so an `actor { ... }` that
-  also captures an outer `let` works on both backends without the
-  caller doing anything.
-- `xs --emit wasm` is parked: arithmetic + direct calls work, the
-  rest doesn't. Use `--emit c` for AOT and `xs-browser.wasm` (the
-  runtime build) for browsers.
-- VM effects: nested perform/handle pairs each push their own
-  continuation onto a LIFO stack and `resume` may now fire more than
-  once. Each perform captures the live stack `[0..sp_off)` so a
-  second resume sees the original locals rather than the mutations
-  the first resume left behind. Mutable heap state (arrays, maps,
-  closures) is shallow-snapshotted: the array reference replays, but
-  pushes the resumed body did still appear on the second resume.
-  That matches the documented "values capture, references share"
-  rule in `LANGUAGE.md`; deep-cloning heap state on every perform is
-  out of scope for 1.0.
-- Regex uses POSIX extended syntax only (no `\d`, `\w` shorthand,
-  use `[0-9]`, `[a-zA-Z_]`).
-- Interpreter call-depth cap is 500 frames (raise with
-  `XS_MAX_DEPTH=N`). Hitting it throws a catchable `StackOverflow`
-  rather than segfaulting; the VM has its own growable stack.
-- JS transpiler effect handlers wrap the handled expression in a
-  generator and use `yield*` delegation, so a `perform` lowers to
-  `yield` cleanly when the handle body itself yields. Direct
-  top-level `perform` outside a `handle` still has no surrounding
-  generator and will be a parse error under Node, mirroring the
-  language rule that `perform` only makes sense in a handled
-  context.
-- `http.serve(port, router)` accepts either a single handler
-  function (the original loop) or a router map with `routes`,
-  `middleware`, and `not_found`. Patterns support `:name` captures
-  (populating `req.params`) and a trailing `*` wildcard. The richer
-  async router in `src/net/http_server.c` (idle / slow-request
-  culling, graceful shutdown, per-server limits) remains C-only
-  for cases where you embed xs into a larger server.
-- TLS server termination uses BearSSL via
-  `http_server_use_tls(server, cert_pem, key_pem)`, and SSE +
-  WebSocket helpers (`sse_send_event`, `ws_send_frame`,
-  `ws_send_text`, `ws_send_close`, `ws_send_ping`, `ws_send_pong`)
-  go through the per-connection bridge so streaming endpoints
-  encrypt over HTTPS without each call site doing TLS plumbing. The
-  fd-based variants (`sse_send_event_fd`, `sse_send_retry_fd`)
-  remain for callers that genuinely run on plain sockets.
-- Registry CLI (`xs install`, `xs publish`, `xs search`,
-  `xs whoami`, `xs login`, `xs logout`) talks to
-  `https://reg.xslang.org` on Linux, macOS, and Windows. The
-  Windows path goes through a small raw-socket + BearSSL client
-  in `src/pkg/pkg_http.c` so MinGW builds don't need to pull in
-  the full async client. wasi targets keep the registry stub.
+- VM effects: multi-shot resume captures the live stack at perform
+  time. Mutable heap state (arrays, maps, closures) is shared by
+  reference between resumes, not deep-cloned. Matches the "values
+  capture, references share" rule in `LANGUAGE.md`.
+- HTTPS server uses BearSSL termination. Call
+  `http_server_use_tls(server, cert_pem, key_pem)` before
+  `http_server_start`. SSE / WebSocket helpers go through the same
+  bridge.
+- `http.serve(port, ...)` takes either a single handler or a
+  router map with `routes`, `middleware`, `not_found`. Patterns
+  support `:name` captures and trailing `*`.
+- Registry CLI (`xs install`, `publish`, `search`, `whoami`,
+  `login`, `logout`) talks to `https://reg.xslang.org`. Windows
+  goes through a raw-socket + BearSSL client to avoid MinGW pulling
+  in the full async stack.
+- HTTPS client throws `HttpError` on connect / TLS / parse failure
+  rather than returning a sentinel. Wrap in `try/catch` if you want
+  to recover.

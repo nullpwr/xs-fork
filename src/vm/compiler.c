@@ -2454,7 +2454,25 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         return;
     }
 
-    case NODE_YIELD:
+    case NODE_YIELD: {
+        /* tagged block: NODE_TAG_DECL desugared the body into a fn with
+           an implicit __block param. inside that body `yield` means
+           "invoke the block" -- not "produce the next generator value".
+           interp does the same check at runtime via env_get("__block");
+           we resolve it at compile time so the VM/JIT pick it up too.
+           checks the local first, then walks the upvalue chain so a
+           nested fn inside the tag still yields-as-call (interp does
+           the env-walk for free). */
+        int block_slot = local_resolve(c->current, "__block");
+        int block_uv   = block_slot < 0
+                        ? upvalue_resolve(c->current, "__block") : -1;
+        if (block_slot >= 0 || block_uv >= 0) {
+            if (block_slot >= 0) emit_a(c, OP_LOAD_LOCAL,   block_slot);
+            else                 emit_a(c, OP_LOAD_UPVALUE, block_uv);
+            emit(c, MAKE_B(OP_CALL, 0, 0, 0));
+            if (!want_value) emit(c, MAKE_A(OP_POP, 0, 0));
+            return;
+        }
         if (n->yield_.value)
             compile_node(c, n->yield_.value, 1);
         else
@@ -2462,6 +2480,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         emit(c, MAKE_A(OP_YIELD, 0, 0));
         if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         return;
+    }
 
     /* actor */
     case NODE_ACTOR_DECL: {

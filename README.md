@@ -1,6 +1,6 @@
 # XS
 
-A general-purpose programming language with gradual typing, multiple execution backends, and a plugin system that lets you modify anything. Written in C, builds on Linux, macOS, and Windows with zero dependencies. Started building privately in 2024 on a self-hosted Gitea, mirrored to GitHub for the v1.0 launch.
+A general-purpose programming language. Gradual typing, multiple execution backends, plugin system. Written in C. Builds on Linux, macOS, and Windows with zero dependencies.
 
 ```xs
 -- types are optional. add them when you want enforcement.

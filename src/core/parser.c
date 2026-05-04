@@ -1214,6 +1214,12 @@ static Node *parse_primary(Parser *p) {
         if (!is_map && t1->kind == TK_RBRACE) { is_map = 1; /* empty {} → empty map */
         } else if (!is_map && t1->kind == TK_IDENT && t2->kind == TK_COLON) {
             is_map = 1;
+        } else if (!is_map && t2->kind == TK_COLON &&
+                   t1->kind >= TK_IF && t1->kind <= TK_LOAD) {
+            /* keyword as bareword map key; the parser body lifts these
+               into string keys. lets you put `handle:` / `fn:` /
+               `type:` on a config map without quoting. */
+            is_map = 1;
         } else if (!is_map && t1->kind == TK_STRING && t2->kind == TK_COLON) {
             is_map = 1;
         } else if (!is_map && (t1->kind == TK_DOTDOT || t1->kind == TK_DOTDOTDOT)) {
@@ -1233,7 +1239,27 @@ static Node *parse_primary(Parser *p) {
                     nodelist_push(&keys, sp);
                     nodelist_push(&vals, NULL);
                 } else {
-                    Node *k = parse_expr(p, 0);
+                    Token *kt = pp_peek(p, 0);
+                    Node *k = NULL;
+                    /* Any keyword followed by `:` is a bareword key.
+                       Names like `handle`, `fn`, `effect`, `type`, etc.
+                       are common enough on framework-style maps that
+                       requiring quotes for them is just friction.
+                       The lexer keeps the source text on tok->sval, so
+                       we use that rather than the printable form (which
+                       isn't filled in for every keyword). */
+                    if (pp_peek(p, 1)->kind == TK_COLON &&
+                        kt->kind >= TK_IF && kt->kind <= TK_LOAD) {
+                        const char *kw = kt->sval ? kt->sval
+                                                  : token_kind_name(kt->kind);
+                        pp_advance(p);
+                        k = node_new(NODE_LIT_STRING, kt->span);
+                        k->lit_string.sval = xs_strdup(kw);
+                        k->lit_string.parts = nodelist_new();
+                        k->lit_string.interpolated = 0;
+                    } else {
+                        k = parse_expr(p, 0);
+                    }
                     pp_expect(p, TK_COLON, "expected ':' in map");
                     Node *v = parse_expr(p, 0);
                     /* Check for map comprehension: {k: v for pat in iter} */
@@ -1275,7 +1301,20 @@ static Node *parse_primary(Parser *p) {
                     nodelist_push(&keys, sp);
                     nodelist_push(&vals, NULL);
                 } else {
-                    Node *k = parse_expr(p, 0);
+                    Token *kt2 = pp_peek(p, 0);
+                    Node *k = NULL;
+                    if (pp_peek(p, 1)->kind == TK_COLON &&
+                        kt2->kind >= TK_IF && kt2->kind <= TK_LOAD) {
+                        const char *kw = kt2->sval ? kt2->sval
+                                                   : token_kind_name(kt2->kind);
+                        pp_advance(p);
+                        k = node_new(NODE_LIT_STRING, kt2->span);
+                        k->lit_string.sval = xs_strdup(kw);
+                        k->lit_string.parts = nodelist_new();
+                        k->lit_string.interpolated = 0;
+                    } else {
+                        k = parse_expr(p, 0);
+                    }
                     pp_expect(p, TK_COLON, "expected ':' in map");
                     Node *v = parse_expr(p, 0);
                     if (k) nodelist_push(&keys, k);
@@ -1459,7 +1498,7 @@ static Node *parse_postfix(Parser *p, Node *left) {
             pp_advance(p);
             Token *name_tok = pp_peek(p, 0);
             if (name_tok->kind == TK_IDENT ||
-                (name_tok->kind >= TK_IF && name_tok->kind <= TK_PANIC)) {
+                (name_tok->kind >= TK_IF && name_tok->kind <= TK_LOAD)) {
                 pp_advance(p);
                 char *fname = xs_strdup(name_tok->sval ? name_tok->sval :
                                         token_kind_name(name_tok->kind));

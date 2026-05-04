@@ -5,6 +5,7 @@
 #include "runtime/builtins.h"
 #include "tls/xs_tls.h"
 #include "core/value.h"
+#include "runtime/error.h"
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
@@ -548,8 +549,11 @@ Value *http_do_request(const char *method, const char *url,
                               size_t body_len) {
     char host[512], path[2048];
     int port;
-    if (http_parse_url(url, host, sizeof host, &port, path, sizeof path) < 0)
+    if (http_parse_url(url, host, sizeof host, &port, path, sizeof path) < 0) {
+        xs_runtime_error(span_zero(), "HttpError", NULL,
+            "could not parse URL '%s'", url);
         return value_incref(XS_NULL_VAL);
+    }
 
     int use_tls = (strncmp(url, "https://", 8) == 0);
 
@@ -560,14 +564,16 @@ Value *http_do_request(const char *method, const char *url,
     if (!from_pool) {
         fd = http_connect(host, port);
         if (fd < 0) {
-            fprintf(stderr, "error: could not connect to %s:%d\n", host, port);
+            xs_runtime_error(span_zero(), "HttpError", NULL,
+                "could not connect to %s:%d", host, port);
             return value_incref(XS_NULL_VAL);
         }
         if (use_tls) {
             tls = xs_tls_connect(fd, host);
             if (!tls) {
-                fprintf(stderr, "error: TLS handshake failed for %s\n", host);
                 close(fd);
+                xs_runtime_error(span_zero(), "HttpError", NULL,
+                    "TLS handshake failed for %s", host);
                 return value_incref(XS_NULL_VAL);
             }
         }
