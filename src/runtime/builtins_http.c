@@ -132,7 +132,11 @@ static Value *native_http_request(Interp *ig, Value **a, int n) {
 /* Match `pattern` against `path` and populate params. Pattern segments
  * starting with ':' capture the corresponding path segment by name.
  * Returns 1 on match, 0 on miss. params is allocated even on miss so
- * the caller's only job is to value_decref it. */
+ * the caller's only job is to value_decref it.
+ * Only used by native_http_serve below; MinGW + wasi route the call
+ * through the stub branch so the helper would otherwise be flagged
+ * unused there. */
+#if !defined(__MINGW32__) && !defined(__wasi__)
 static int route_match(const char *pattern, const char *path, Value **params_out) {
     Value *params = xs_map_new();
     *params_out = params;
@@ -166,6 +170,7 @@ static int route_match(const char *pattern, const char *path, Value **params_out
     }
     return 1;
 }
+#endif /* !MINGW32 && !wasi */
 
 /* http.serve(port, handler)
    HTTP/1.1 server. `handler` is either:

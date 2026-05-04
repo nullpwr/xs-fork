@@ -636,7 +636,7 @@ static void lint_node(XSLint *l, Node *n) {
            wrapped in an EXPR_STMT bypasses the iter and body entirely
            and the lint mistakenly flags `xs` as unused. */
         if (n->expr_stmt.expr) {
-            NodeTag tag = VAL_TAG(n->expr_stmt.expr);
+            NodeTag tag = n->expr_stmt.expr->tag;
             if (tag == NODE_FOR || tag == NODE_WHILE || tag == NODE_LOOP
                 || tag == NODE_IF  || tag == NODE_MATCH
                 || tag == NODE_TRY || tag == NODE_BLOCK) {

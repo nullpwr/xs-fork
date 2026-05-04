@@ -217,7 +217,7 @@ fi
 if [ -f tests/test_cli.sh ]; then
     cli_output=$(bash tests/test_cli.sh 2>&1)
     cli_rc=$?
-    cli_pass=$(echo "$cli_output" | grep -oP '\d+ passed' | grep -oP '\d+')
+    cli_pass=$(echo "$cli_output" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
     if [ "$cli_rc" -eq 0 ]; then
         pass=$((pass + 1)); echo "  ok    test_cli (${cli_pass:-0} checks)"
     else
@@ -229,7 +229,7 @@ fi
 if [ -f tests/test_limits.sh ]; then
     lim_output=$(bash tests/test_limits.sh 2>&1)
     lim_rc=$?
-    lim_pass=$(echo "$lim_output" | grep -oP '\d+ passed' | grep -oP '\d+')
+    lim_pass=$(echo "$lim_output" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
     if [ "$lim_rc" -eq 0 ]; then
         pass=$((pass + 1)); echo "  ok    test_limits (${lim_pass:-0} checks)"
     else

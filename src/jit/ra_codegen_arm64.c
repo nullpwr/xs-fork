@@ -844,13 +844,73 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
             case IR_MAKE_CLOSURE:
             case IR_INDEX_GET:
             case IR_INDEX_SET:
+            case IR_METHOD_CALL:
+            case IR_VM_STEP_DRAIN: {
+                /* Same shape as the x86 drain path. OP_METHOD_CALL on
+                 * a closure method (and OP_MAKE_INST's closure-init
+                 * branch routed through IR_VM_STEP_DRAIN) push a new
+                 * frame inside vm_step_jit but return before the body
+                 * runs. We have to drive that frame to completion via
+                 * tier2_run_until before pulling the result, otherwise
+                 * we pop the wrong slot off vm->sp (a re-purposed
+                 * argument rather than the actual return value). */
+                if (in->src1 >= 0) {
+                    emit_load_vreg(&em, in->src1, a, 0);
+                    emit_vmsp_push_x0(&em);
+                }
+                if (in->src2 >= 0) {
+                    emit_load_vreg(&em, in->src2, a, 0);
+                    emit_vmsp_push_x0(&em);
+                }
+                for (int k = 0; k < IR_MAX_CALL_ARGS; k++) {
+                    if (in->call_args[k] < 0) break;
+                    emit_load_vreg(&em, in->call_args[k], a, 0);
+                    emit_vmsp_push_x0(&em);
+                }
+                /* w0 = vm->frame_count; stash to [x29 + RC_STASH_DISP] */
+                a_ldr_w_off(&em, 0, X_VM, VM_OFF_FRAME_COUNT);
+                emit_u32(&em, 0xB9000000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                               ((uint32_t)29u << 5) | 0u);
+                /* frame->ip = code_base + bc_off */
+                a_mov_imm64(&em, 0, (uint64_t)(uintptr_t)(code_base + bc_off));
+                a_str_off(&em, 0, X_FRAME, FRAME_OFF_IP);
+                a_mov_reg(&em, 0, X_VM);
+                a_call_abs(&em, (void *)(uintptr_t)vm_step_jit);
+                size_t j_err_mc = em.pos;
+                emit_u32(&em, 0x35000000u | 0u); /* CBNZ w0, .err */
+                ADD_ERR_EXIT(j_err_mc);
+
+                /* If a frame was pushed (closure path), drain it. */
+                {
+                    /* w1 = baseline */
+                    emit_u32(&em, 0xB9400000u | ((uint32_t)(RC_STASH_DISP / 4) << 10) |
+                                   ((uint32_t)29u << 5) | 1u);
+                    a_ldr_w_off(&em, 2, X_VM, VM_OFF_FRAME_COUNT);
+                    /* CMP w1, w2 */
+                    emit_u32(&em, 0x6B00001Fu | ((uint32_t)2u << 16) |
+                                   ((uint32_t)1u << 5));
+                    size_t j_no_drain = a_bcond_ph(&em, CC_GE);
+                    a_mov_reg(&em, 0, X_VM);
+                    a_call_abs(&em, (void *)(uintptr_t)tier2_run_until);
+                    size_t j_err_drain = em.pos;
+                    emit_u32(&em, 0x35000000u | 0u);
+                    ADD_ERR_EXIT(j_err_drain);
+                    patch_bcond(&em, j_no_drain, em.pos);
+                }
+                emit_refresh_frame(&em);
+                if (in->dst >= 0) {
+                    emit_vmsp_pop_x0(&em);
+                    emit_store_vreg(&em, in->dst, a, 0);
+                }
+                break;
+            }
+
             case IR_LOAD_FIELD:
             case IR_STORE_FIELD:
             case IR_MAKE_RANGE:
             case IR_MAKE_ARRAY:
             case IR_MAKE_TUPLE:
             case IR_MAKE_MAP:
-            case IR_METHOD_CALL:
             case IR_VM_STEP:
             case IR_VM_STEP_CF: {
                 if (in->src1 >= 0) {

@@ -13,6 +13,9 @@
 #    undef errno
 #  endif
 #  define errno          (WSAGetLastError())
+#  ifdef EWOULDBLOCK  /* mingw's errno.h supplies a value for posix code */
+#    undef EWOULDBLOCK
+#  endif
 #  define EWOULDBLOCK    WSAEWOULDBLOCK
 #  define EINTR_LIKE(e)  ((e) == WSAEINTR)
 #  ifndef ssize_t

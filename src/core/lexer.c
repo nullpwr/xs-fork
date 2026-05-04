@@ -696,9 +696,6 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
         if (pfx == 'x' || pfx == 'b' || pfx == 'o') {
             sb_push(&sb, ladvance(l));
             int digits = 0;
-            int (*ok)(char) = pfx == 'x'
-                ? (int(*)(char))isxdigit
-                : (pfx == 'b' ? (int(*)(char))NULL : (int(*)(char))NULL);
             for (;;) {
                 char c = lpeek(l, 0);
                 int is_digit;
@@ -718,7 +715,6 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
             }
             if (last_was_underscore)
                 emit_bad_underscore(l, sl, sc, sp, "trailing");
-            (void)ok;
             char *s = sb_finish(&sb);
             if (digits == 0) {
                 Span bad = {0};

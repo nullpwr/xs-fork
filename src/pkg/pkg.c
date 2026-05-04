@@ -1180,11 +1180,16 @@ int pkg_publish(const char *path) {
     snprintf(publish_url, sizeof(publish_url),
              "%s/api/pkg/%s/publish", PKG_REGISTRY_URL, name);
 
-    char auth_header[2048];
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", token);
+    /* token comes from a registry response of unbounded size; allocate
+       on the heap so an unusually long bearer token doesn't get
+       silently truncated into a stack buffer. */
+    size_t auth_len = strlen(token) + sizeof("Bearer ");
+    char *auth_header = xs_malloc(auth_len);
+    snprintf(auth_header, auth_len, "Bearer %s", token);
 
     XSMap *headers = map_new();
     Value *auth_v = xs_str(auth_header);
+    free(auth_header);
     map_set(headers, "Authorization", auth_v);
     value_decref(auth_v);
     Value *ct_v = xs_str("application/json");
