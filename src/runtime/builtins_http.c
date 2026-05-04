@@ -6,6 +6,7 @@
 #include "net/http_server.h"
 #include "runtime/concurrent.h"
 #include "core/value.h"
+#include "runtime/error.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -32,7 +33,10 @@ static Value *native_http_get(Interp *ig, Value **a, int n) {
     }
     return http_do_request("GET",a[0]->s,hdrs,NULL,0);
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 static Value *native_http_post(Interp *ig, Value **a, int n) {
@@ -48,7 +52,10 @@ static Value *native_http_post(Interp *ig, Value **a, int n) {
     }
     return http_do_request("POST",a[0]->s,hdrs,body,body_len);
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 static Value *native_http_put(Interp *ig, Value **a, int n) {
@@ -64,7 +71,10 @@ static Value *native_http_put(Interp *ig, Value **a, int n) {
     }
     return http_do_request("PUT",a[0]->s,hdrs,body,body_len);
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 static Value *native_http_delete(Interp *ig, Value **a, int n) {
@@ -78,7 +88,10 @@ static Value *native_http_delete(Interp *ig, Value **a, int n) {
     }
     return http_do_request("DELETE",a[0]->s,hdrs,NULL,0);
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 static Value *native_http_patch(Interp *ig, Value **a, int n) {
@@ -94,7 +107,10 @@ static Value *native_http_patch(Interp *ig, Value **a, int n) {
     }
     return http_do_request("PATCH",a[0]->s,hdrs,body,body_len);
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 
@@ -125,7 +141,10 @@ static Value *native_http_request(Interp *ig, Value **a, int n) {
     }
     return result;
 #else
-    (void)a;(void)n; return value_incref(XS_NULL_VAL);
+    (void)a;(void)n;
+    xs_runtime_error(span_zero(), "HttpError", NULL,
+        "http client not available on this platform");
+    return value_incref(XS_NULL_VAL);
 #endif
 }
 
