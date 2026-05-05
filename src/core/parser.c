@@ -444,10 +444,11 @@ static int is_known_decorator(const char *name) {
 
 /* @cron / @every / @delayed schedule the function with no caller, so
    they can't accept parameters. @export / @once / @watch and the
-   lifecycle hooks all also fire without args, so we apply the same
-   no-params rule to them. @bench and @example are caller-driven
-   discovery markers and are allowed to take params (the runner passes
-   the test harness in). */
+   no-arg lifecycle hooks (start / exit / signal) all also fire
+   without args, so we apply the same no-params rule to them.
+   @on_panic receives the exception, and @bench / @example are
+   caller-driven discovery markers (the runner passes a test harness),
+   so they can declare params. */
 static int decorator_forbids_params(const char *name) {
     if (!name) return 0;
     return strcmp(name, "every") == 0 ||
@@ -456,7 +457,6 @@ static int decorator_forbids_params(const char *name) {
            strcmp(name, "on_start") == 0 ||
            strcmp(name, "on_exit") == 0 ||
            strcmp(name, "on_signal") == 0 ||
-           strcmp(name, "on_panic") == 0 ||
            strcmp(name, "watch") == 0 ||
            strcmp(name, "export") == 0 ||
            strcmp(name, "once") == 0;

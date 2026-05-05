@@ -10313,6 +10313,9 @@ void interp_run(Interp *i, Node *program) {
                         sn->span.file ? sn->span.file : "<unknown>",
                         sn->span.line, sn->span.col, s);
                 free(s);
+                /* Park the value before CF_CLEAR drops it so @on_panic
+                   below sees the cause rather than a null. */
+                if (exc) i->unhandled_exception_value = value_incref(exc);
                 CF_CLEAR(i);
                 /* Record that the program failed so the CLI can exit non-zero. */
                 i->had_unhandled_exception = 1;
@@ -10330,7 +10333,11 @@ run_done:;
         if (res) value_decref(res);
     }
     trigger_run_event_loop(i);
-    if (i->had_unhandled_exception && i->cf.value)
-        trigger_fire_on_panic(i, i->cf.value);
+    if (i->had_unhandled_exception && i->unhandled_exception_value)
+        trigger_fire_on_panic(i, i->unhandled_exception_value);
     trigger_fire_on_exit(i);
+    if (i->unhandled_exception_value) {
+        value_decref(i->unhandled_exception_value);
+        i->unhandled_exception_value = NULL;
+    }
 }

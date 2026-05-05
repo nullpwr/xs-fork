@@ -137,8 +137,12 @@ struct Interp {
     void        *debug_hook_data;
 
     /* Set when interp_run surfaced an unhandled exception at top level.
-       Consulted by the CLI to return a non-zero exit code. */
+       Consulted by the CLI to return a non-zero exit code. The value
+       is parked here (separately from cf.value, which gets cleared as
+       soon as the diagnostic is rendered) so @on_panic can still see
+       what went wrong. */
     int          had_unhandled_exception;
+    Value       *unhandled_exception_value;
 };
 
 Interp *interp_new(const char *filename);
