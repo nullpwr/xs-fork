@@ -7,6 +7,7 @@
 #include "runtime/builtins.h"
 #include "runtime/error.h"
 #include "runtime/triggers.h"
+#include "runtime/concurrent.h"
 #include "optimizer/inline_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -367,6 +368,37 @@ static Value *vm_exit_fn(Interp *interp, Value **args, int argc) {
     (void)interp;
     int code = (argc >= 1 && VAL_TAG(args[0]) == XS_INT) ? (int)VAL_INT(args[0]) : 0;
     exit(code);
+}
+
+/* Backs `del <name>` under the VM for the global case. The compiler
+   nulls out a local slot when the name resolves locally, and falls
+   back to a call to this native for globals so the binding actually
+   disappears from the globals map (matching --interp's "subsequent
+   reads throw" semantics). */
+static Value *vm_del_global(Interp *interp, Value **args, int argc) {
+    (void)interp;
+    if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return xs_null();
+    extern _Thread_local VM *g_vm_for_invoke;
+    if (g_vm_for_invoke && g_vm_for_invoke->globals)
+        map_del(g_vm_for_invoke->globals, args[0]->s);
+    return xs_null();
+}
+
+/* Backs `pause <duration>` under the VM. The interp handles it
+   inline; the VM compiler emits a call here. Accepts a Duration,
+   an int (treated as ms), or a float (treated as ms) so the source
+   `pause 1000` and `pause 500ms` both work the same way they do
+   under --interp. */
+static Value *vm_pause(Interp *interp, Value **args, int argc) {
+    (void)interp;
+    if (argc < 1) return xs_null();
+    double secs = 0;
+    Value *v = args[0];
+    if (VAL_TAG(v) == XS_DURATION)   secs = (double)v->i / 1e9;
+    else if (VAL_TAG(v) == XS_FLOAT) secs = v->f / 1000.0;
+    else if (VAL_IS_INT(v))          secs = (double)VAL_INT(v) / 1000.0;
+    if (secs > 0) xs_sleep_seconds(secs);
+    return xs_null();
 }
 
 static Value *vm_input(Interp *interp, Value **args, int argc) {
@@ -1012,6 +1044,8 @@ static void vm_register_stdlib(VM *vm) {
     REG("__trigger_registry_name", trigger_native_name);
     REG("__register_decorator",    trigger_native_register);
     REG("exit",    vm_exit_fn);
+    REG("__pause", vm_pause);
+    REG("__del_global", vm_del_global);
     REG("input",   vm_input);
     REG("contains", vm_contains);
     REG("sorted",  vm_sorted);

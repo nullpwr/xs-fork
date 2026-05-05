@@ -136,6 +136,10 @@
           "match": "\\b0b[01_]+\\b"
         },
         {
+          "name": "constant.numeric.duration.xs",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?(ns|us|ms|s|m|h|d)(\\d+(ns|us|ms|s|m|h|d))*\\b"
+        },
+        {
           "name": "constant.numeric.float.xs",
           "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9_]+)?\\b"
         }

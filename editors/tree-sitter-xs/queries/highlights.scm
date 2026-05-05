@@ -23,7 +23,9 @@
 (char_literal) @string
 (boolean_literal) @constant.builtin
 (null_literal) @constant.builtin
-(universal_literal) @number
+; durations get their own capture so themes can paint 5s / 100ms
+; differently from a bare number - they are a real first-class type.
+(duration_literal) @constant.numeric.duration
 
 ; comments
 (line_comment)  @comment

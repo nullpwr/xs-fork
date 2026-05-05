@@ -20,7 +20,7 @@
 ["self" "super"] @variable.builtin
 
 (number_literal) @constant.numeric
-(universal_literal) @constant.numeric
+(duration_literal) @constant.numeric.float
 (string_literal) @string
 (char_literal) @constant.character
 (line_comment)  @comment

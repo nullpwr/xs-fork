@@ -388,7 +388,7 @@ module.exports = grammar({
       $.char_literal,
       $.boolean_literal,
       $.null_literal,
-      $.universal_literal,
+      $.duration_literal,
       $.identifier,
       $.self_expression,
       $.array_literal,
@@ -532,14 +532,12 @@ module.exports = grammar({
     boolean_literal: $ => choice('true', 'false'),
     null_literal:    $ => 'null',
 
-    /* Universal literals: 500ms, #ff6600, 2025-01-20, 10MB, 45deg */
-    universal_literal: $ => token(choice(
-      /[0-9]+(\.[0-9]+)?(ns|us|ms|s|min|h|d|w|mo|y)/,
-      /#[0-9a-fA-F]{3,8}/,
-      /[0-9]+-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)?/,
-      /[0-9]+(\.[0-9]+)?(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/,
-      /[0-9]+(\.[0-9]+)?(deg|rad|turn|grad)/,
-    )),
+    /* Duration literals: 500ms, 5s, 1ns, 1m30s. Compound forms come
+       through the lexer as one token (e.g. 1m30s, 2h45m). The unit
+       set matches xs's lexer: ns, us, ms, s, m, h, d. */
+    duration_literal: $ => token(
+      /[0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h|d)([0-9]+(ns|us|ms|s|m|h|d))*/
+    ),
 
     identifier: $ => /[a-z_][a-zA-Z0-9_]*/,
   },

@@ -1555,6 +1555,17 @@ static void emit_symbol(char *buf, size_t bufsz, int *off, int *first,
     int el = span.end_line > 0 ? span.end_line - 1 : sl;
     int ec = span.end_col  > 0 ? span.end_col  - 1 : sc + (int)strlen(name);
 
+    /* selectionRange must be contained in the full range. The natural
+       choice is "the declaration's identifier", but we don't track the
+       identifier's exact column, only the declaration start. So fall
+       back to using the full range as the selection range -- VS Code
+       et al. accept that and just highlight the whole declaration when
+       you click the symbol in the outline. The previous code computed
+       (sl, sc + len(name)) which could escape the full range when the
+       parser produced an incomplete-source node with a small end_col. */
+    int sel_sl = sl, sel_sc = sc;
+    int sel_el = el, sel_ec = ec;
+
     char escaped[256];
     json_escape_into(escaped, sizeof(escaped), name);
 
@@ -1569,7 +1580,7 @@ static void emit_symbol(char *buf, size_t bufsz, int *off, int *first,
         "}",
         escaped, kind,
         sl, sc, el, ec,
-        sl, sc, sl, sc + (int)strlen(name));
+        sel_sl, sel_sc, sel_el, sel_ec);
 }
 
 static void collect_symbols_json(Node *n, char *buf, size_t bufsz, int *off, int *first, const char *uri) {

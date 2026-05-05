@@ -17,7 +17,7 @@
 ["self" "super"] @variable.builtin
 
 (number_literal) @number
-(universal_literal) @number
+(duration_literal) @number.float
 (string_literal) @string
 (char_literal) @string.special
 (line_comment)  @comment

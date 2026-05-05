@@ -2905,6 +2905,36 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         compile_node(c, n->debounce_.body, want_value);
         return;
 
+    case NODE_PAUSE:
+        /* `pause <duration>` lowers to a call to the __pause native;
+           the interpreter handles the same node directly. */
+        compile_name_load(c, "__pause");
+        compile_node(c, n->pause_.duration, 1);
+        emit(c, MAKE_B(OP_CALL, 0, 0, 1));
+        if (!want_value) emit(c, MAKE_A(OP_POP, 0, 0));
+        return;
+
+    case NODE_DEL: {
+        /* `del name`: clear a local slot if the name resolves to one,
+           otherwise drop the global binding. The interp throws on a
+           subsequent read because env_get walks the chain and finds
+           nothing; the VM's local slots can't be made un-defined,
+           so they get nulled instead. The global path is exact. */
+        const char *dname = n->del_.name;
+        int slot = dname ? local_resolve(c->current, dname) : -1;
+        if (slot >= 0) {
+            emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+            emit_a(c, OP_STORE_LOCAL, slot);
+        } else if (dname) {
+            compile_name_load(c, "__del_global");
+            emit_const(c, xs_str(dname));
+            emit(c, MAKE_B(OP_CALL, 0, 0, 1));
+            emit(c, MAKE_A(OP_POP, 0, 0));
+        }
+        if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+        return;
+    }
+
     case NODE_PLUGIN_DECL:
         /* Plugin metadata and parser productions are registered during
            parsing; nothing to emit at runtime. */
