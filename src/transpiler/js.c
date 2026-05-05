@@ -61,6 +61,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_LIT_FLOAT:
         sb_printf(s, "%g", n->lit_float.fval);
         break;
+    case NODE_LIT_DURATION:
+        sb_printf(s, "%lld", (long long)n->lit_duration.ns);
+        break;
     case NODE_LIT_STRING:
         sb_addc(s, '"');
         if (n->lit_string.sval) {

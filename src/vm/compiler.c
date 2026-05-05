@@ -2848,33 +2848,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_LIT_DURATION:
-        emit_const(c, xs_float(n->lit_duration.ms));
-        break;
-
-    case NODE_LIT_COLOR: {
-        /* build a map with r,g,b,a fields */
-        emit_const(c, xs_str("r"));
-        emit_const(c, xs_int(n->lit_color.r));
-        emit_const(c, xs_str("g"));
-        emit_const(c, xs_int(n->lit_color.g));
-        emit_const(c, xs_str("b"));
-        emit_const(c, xs_int(n->lit_color.b));
-        emit_const(c, xs_str("a"));
-        emit_const(c, xs_int(n->lit_color.a));
-        emit(c, MAKE_B(OP_MAKE_MAP, 0, 0, 4));
-        break;
-    }
-
-    case NODE_LIT_DATE:
-        emit_const(c, xs_str(n->lit_date.value));
-        break;
-
-    case NODE_LIT_SIZE:
-        emit_const(c, xs_float(n->lit_size.bytes));
-        break;
-
-    case NODE_LIT_ANGLE:
-        emit_const(c, xs_float(n->lit_angle.radians));
+        emit_const(c, xs_duration(n->lit_duration.ns));
         break;
 
     case NODE_EVERY:

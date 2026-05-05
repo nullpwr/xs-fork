@@ -352,6 +352,13 @@ void node_free(Node *n) {
         free(n->fn_decl.type_params);
         free(n->fn_decl.type_bounds);
         free(n->fn_decl.type_param_variance);
+        for (int i = 0; i < n->fn_decl.n_decorators; i++) {
+            free(n->fn_decl.decorators[i].name);
+            for (int j = 0; j < n->fn_decl.decorators[i].n_args; j++)
+                node_free(n->fn_decl.decorators[i].args[j]);
+            free(n->fn_decl.decorators[i].args);
+        }
+        free(n->fn_decl.decorators);
         break;
     case NODE_CLASS_DECL:
         free(n->class_decl.name);
@@ -493,12 +500,6 @@ void node_free(Node *n) {
         free(n->adapt_fn.bodies);
         break;
     case NODE_LIT_DURATION: break;
-    case NODE_LIT_COLOR: break;
-    case NODE_LIT_DATE:
-        free(n->lit_date.value);
-        break;
-    case NODE_LIT_SIZE: break;
-    case NODE_LIT_ANGLE: break;
     case NODE_EVERY:
         node_free(n->every_.interval);
         node_free(n->every_.body);

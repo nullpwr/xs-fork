@@ -141,10 +141,6 @@ typedef enum {
     NODE_ADAPT_FN,
 
     NODE_LIT_DURATION,
-    NODE_LIT_COLOR,
-    NODE_LIT_DATE,
-    NODE_LIT_SIZE,
-    NODE_LIT_ANGLE,
     NODE_EVERY,
     NODE_AFTER,
     NODE_TIMEOUT,
@@ -207,6 +203,15 @@ typedef struct {
 ParamList paramlist_new(void);
 void      paramlist_push(ParamList *pl, Param p);
 void      paramlist_free(ParamList *pl);
+
+/* Function-level decorator. `args` are unevaluated expression nodes;
+   the trigger registry evaluates them at proto load time. */
+typedef struct {
+    char  *name;
+    Node **args;
+    int    n_args;
+    Span   span;
+} Decorator;
 
 /* Match arm */
 typedef struct {
@@ -403,6 +408,8 @@ struct Node {
             TypeExpr **type_bounds;
             int       *type_param_variance; /* 0=invariant, +1=covariant, -1=contravariant */
             int        n_type_params;
+            Decorator *decorators;
+            int        n_decorators;
         } fn_decl;
 
         struct {
@@ -602,11 +609,7 @@ struct Node {
             int        nbranches;
         } adapt_fn;
 
-        struct { double ms; } lit_duration;     /* stored as milliseconds */
-        struct { int r, g, b, a; } lit_color;   /* RGBA 0-255 */
-        struct { char *value; } lit_date;       /* ISO string */
-        struct { double bytes; } lit_size;      /* stored as bytes */
-        struct { double radians; } lit_angle;   /* stored as radians */
+        struct { int64_t ns; } lit_duration;    /* stored as nanoseconds */
 
         struct { Node *interval; Node *body; } every_;
         struct { Node *delay; Node *body; } after_;

@@ -51,7 +51,7 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Standard library (37 modules) | works |
 | HTTPS client via embedded BearSSL | works |
 | Generational refcount GC + concurrent cycle collector | works |
-| Universal literals (duration, color, date, size, angle) | works |
+| First-class `Duration` type (`5s`, `100ms`, `1ns`, `2m30s`) | works |
 | Temporal primitives (every, after, timeout, debounce) | works |
 | Multi-line strings (triple-quote) | works |
 | `do` expressions | works |

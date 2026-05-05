@@ -2153,33 +2153,12 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Special literal types ---- */
 
     case NODE_LIT_DURATION:
-        /* Store duration as float (milliseconds) */
-        emit_int_val(code, (int32_t)node->lit_duration.ms);
-        break;
-
-    case NODE_LIT_COLOR: {
-        /* Pack RGBA as i32: 0xRRGGBBAA */
-        int32_t packed = (node->lit_color.r << 24) | (node->lit_color.g << 16) |
-                         (node->lit_color.b << 8) | node->lit_color.a;
-        emit_int_val(code, packed);
-        break;
-    }
-
-    case NODE_LIT_DATE: {
-        const char *d = node->lit_date.value ? node->lit_date.value : "";
-        int slen = 0;
-        int off = strtab_add_with_len(ctx->strtab, d, &slen);
-        emit_str_val(code, off, slen);
-        break;
-    }
-
-    case NODE_LIT_SIZE:
-        emit_int_val(code, (int32_t)node->lit_size.bytes);
-        break;
-
-    case NODE_LIT_ANGLE:
-        /* Store radians as int (scaled by 1000) */
-        emit_int_val(code, (int32_t)(node->lit_angle.radians * 1000.0));
+        /* WASM has no dedicated duration cell yet; carry the ns count
+           through the f64 lane so values up to ~104 days survive without
+           loss. Past that, sub-second precision is lost but the magnitude
+           is preserved. The real Duration type lives in the interp/vm. */
+        emit_f64_const(code, (double)node->lit_duration.ns);
+        emit_call(code, RT_VAL_NEW_F64);
         break;
 
     /* ---- Pattern nodes used as expressions ---- */

@@ -4265,6 +4265,47 @@ static Value *eval_binop(Interp *i, Node *n) {
         }
     }
 
+    /* Duration arithmetic. Two durations add/sub in ns; comparisons map
+       directly. dur*scalar / scalar*dur / dur/scalar scale ns. dur/dur
+       is a unitless float ratio. Anything else with a duration is a
+       type error. */
+    if (VAL_TAG(left) == XS_DURATION || VAL_TAG(right) == XS_DURATION) {
+        int ld = VAL_TAG(left) == XS_DURATION;
+        int rd = VAL_TAG(right) == XS_DURATION;
+        int ls = VAL_TAG(left) == XS_INT || VAL_TAG(left) == XS_FLOAT;
+        int rs = VAL_TAG(right) == XS_INT || VAL_TAG(right) == XS_FLOAT;
+        int64_t lns = ld ? left->i : 0;
+        int64_t rns = rd ? right->i : 0;
+        double lscale = ls ? (VAL_TAG(left) == XS_FLOAT ? left->f : (double)VAL_INT(left)) : 0.0;
+        double rscale = rs ? (VAL_TAG(right) == XS_FLOAT ? right->f : (double)VAL_INT(right)) : 0.0;
+        if (op[0]=='=' && op[1]=='=') { result = (ld && rd && lns == rns) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+        if (op[0]=='!' && op[1]=='=') { result = !(ld && rd && lns == rns) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+        if (ld && rd) {
+            if (op[0]=='<' && op[1]=='\0') { result = lns <  rns ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+            if (op[0]=='>' && op[1]=='\0') { result = lns >  rns ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+            if (op[0]=='<' && op[1]=='=') { result = lns <= rns ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+            if (op[0]=='>' && op[1]=='=') { result = lns >= rns ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL); goto done; }
+            if (op[0]=='+' && op[1]=='\0') { result = xs_duration(lns + rns); goto done; }
+            if (op[0]=='-' && op[1]=='\0') { result = xs_duration(lns - rns); goto done; }
+            if (op[0]=='/' && op[1]=='\0') {
+                if (rns == 0) { xs_runtime_error(n->span, "division by zero", NULL, "cannot divide by zero"); result = value_incref(XS_NULL_VAL); goto done; }
+                result = xs_float((double)lns / (double)rns); goto done;
+            }
+            if (op[0]=='%' && op[1]=='\0') {
+                if (rns == 0) { xs_runtime_error(n->span, "modulo by zero", NULL, "cannot take remainder with divisor zero"); result = value_incref(XS_NULL_VAL); goto done; }
+                result = xs_duration(lns % rns); goto done;
+            }
+        }
+        if (ld && rs && op[0]=='*' && op[1]=='\0') { result = xs_duration((int64_t)((double)lns * rscale)); goto done; }
+        if (ls && rd && op[0]=='*' && op[1]=='\0') { result = xs_duration((int64_t)(lscale * (double)rns)); goto done; }
+        if (ld && rs && op[0]=='/' && op[1]=='\0') {
+            if (rscale == 0.0) { xs_runtime_error(n->span, "division by zero", NULL, "cannot divide by zero"); result = value_incref(XS_NULL_VAL); goto done; }
+            result = xs_duration((int64_t)((double)lns / rscale)); goto done;
+        }
+        xs_runtime_error(n->span, "type mismatch", NULL, "operator '%s' is not defined for these operands", op);
+        result = value_incref(XS_NULL_VAL); goto done;
+    }
+
     if (VAL_TAG(left) == XS_INT && VAL_TAG(right) == XS_INT) {
         int64_t a = VAL_INT(left), b = VAL_INT(right);
         if (op[0]=='=' && op[1]=='=') { result=a==b?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL); goto done; }
@@ -5614,6 +5655,17 @@ do_call: ;
                     result = value_incref(XS_NULL_VAL);
             }
         }
+        /* Duration component accessors */
+        if (!result && VAL_TAG(obj) == XS_DURATION) {
+            int64_t ns = obj->i;
+            if      (strcmp(name, "ns") == 0) result = xs_int(ns);
+            else if (strcmp(name, "us") == 0) result = xs_float((double)ns / 1e3);
+            else if (strcmp(name, "ms") == 0) result = xs_float((double)ns / 1e6);
+            else if (strcmp(name, "s")  == 0) result = xs_float((double)ns / 1e9);
+            else if (strcmp(name, "m")  == 0) result = xs_float((double)ns / 60e9);
+            else if (strcmp(name, "h")  == 0) result = xs_float((double)ns / 3600e9);
+            else if (strcmp(name, "d")  == 0) result = xs_float((double)ns / 86400e9);
+        }
         /* Property-style: .len, .is_empty, etc. */
         if (!result) {
             if (strcmp(name,"len")==0) {
@@ -6803,24 +6855,7 @@ do_call: ;
     }
 
     case NODE_LIT_DURATION: {
-        return xs_float(n->lit_duration.ms);
-    }
-    case NODE_LIT_COLOR: {
-        Value *v = xs_map_new();
-        map_take(v->map, "r", xs_int(n->lit_color.r));
-        map_take(v->map, "g", xs_int(n->lit_color.g));
-        map_take(v->map, "b", xs_int(n->lit_color.b));
-        map_take(v->map, "a", xs_int(n->lit_color.a));
-        return v;
-    }
-    case NODE_LIT_DATE: {
-        return xs_str(n->lit_date.value);
-    }
-    case NODE_LIT_SIZE: {
-        return xs_float(n->lit_size.bytes);
-    }
-    case NODE_LIT_ANGLE: {
-        return xs_float(n->lit_angle.radians);
+        return xs_duration(n->lit_duration.ns);
     }
     case NODE_EVERY: {
         Value *interval = EVAL(i, n->every_.interval);
@@ -6853,7 +6888,8 @@ do_call: ;
         Value *dur = EVAL(i, n->pause_.duration);
         if (i->cf.signal) { value_decref(dur); return value_incref(XS_NULL_VAL); }
         double ms = 0;
-        if (VAL_TAG(dur) == XS_INT) ms = (double)VAL_INT(dur);
+        if (VAL_TAG(dur) == XS_DURATION) ms = (double)dur->i / 1e6;
+        else if (VAL_TAG(dur) == XS_INT) ms = (double)VAL_INT(dur);
         else if (VAL_TAG(dur) == XS_FLOAT) ms = dur->f;
         value_decref(dur);
         if (ms > 0) {
@@ -6958,7 +6994,6 @@ static Value *load_xs_module_file(Interp *i, const char *filepath) {
     TokenArray ta = lexer_tokenize(&lex);
     Parser p;
     parser_init(&p, &ta, filepath_owned);
-    p.literals = lex.literals;
     Node *prog = parser_parse(&p);
     token_array_free(&ta);
     if (!prog || p.had_error) {

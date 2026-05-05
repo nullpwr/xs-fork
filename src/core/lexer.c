@@ -783,35 +783,7 @@ static Token lex_number(Lexer *l, int sl, int sc, int sp) {
         if (lpeek(l,0)=='+'||lpeek(l,0)=='-') sb_push(&sb,ladvance(l));
         while (isdigit(lpeek(l,0))) sb_push(&sb,ladvance(l));
     }
-    /* consume optional suffix like i32, u64, f64 */
-    if (strchr("iuf",lpeek(l,0))) {
-        while (isalnum(lpeek(l,0))) ladvance(l);
-    }
-
     char *s = sb_finish(&sb);
-
-    /* date literal: 2024-03-15 or 2024-03-15T14:30:00 */
-    if (!is_float && (l->literals & 0x04) && strlen(s) == 4 && lpeek(l,0) == '-'
-        && isdigit(lpeek(l,1)) && isdigit(lpeek(l,2))
-        && lpeek(l,3) == '-' && isdigit(lpeek(l,4)) && isdigit(lpeek(l,5))) {
-        StrBuf db; sb_init(&db);
-        sb_push_str(&db, s);
-        sb_push(&db, ladvance(l)); /* - */
-        sb_push(&db, ladvance(l)); sb_push(&db, ladvance(l)); /* MM */
-        sb_push(&db, ladvance(l)); /* - */
-        sb_push(&db, ladvance(l)); sb_push(&db, ladvance(l)); /* DD */
-        /* optional T time part */
-        if (lpeek(l,0) == 'T' && isdigit(lpeek(l,1))) {
-            sb_push(&db, ladvance(l)); /* T */
-            while (isdigit(lpeek(l,0)) || lpeek(l,0) == ':')
-                sb_push(&db, ladvance(l));
-        }
-        free(s);
-        t.kind = TK_STRING;
-        t.sval = sb_finish(&db);
-        t.span = make_span(l,sl,sc,sp);
-        return t;
-    }
 
     if (is_float) { t.kind=TK_FLOAT; t.fval=atof(s); }
     else {
@@ -1036,19 +1008,6 @@ static void lex_next(Lexer *l) {
     }
 
     if (ch=='#') {
-        /* color literal: #fff or #ff6600 (always lex when hex follows #) */
-        if (isxdigit(lpeek(l,1))) {
-            ladvance(l); /* consume '#' */
-            StrBuf csb; sb_init(&csb);
-            sb_push(&csb, '#');
-            while (isxdigit(lpeek(l,0)))
-                sb_push(&csb, ladvance(l));
-            char *color = sb_finish(&csb);
-            Token t; t.kind = TK_STRING; t.sval = color;
-            t.span = make_span(l, sl, sc, sp);
-            ta_push(&l->tokens, t);
-            return;
-        }
         if (lpeek(l,1)=='[') {
             ladvance(l); ladvance(l);
             Token t; t.kind=TK_HASH_BRACKET; t.sval=NULL;
@@ -1351,7 +1310,6 @@ void lexer_init(Lexer *l, const char *source, const char *filename) {
     l->line      = 1;
     l->col       = 1;
     l->paren_depth = 0;
-    l->literals    = 0;
     l->tokens.items = NULL;
     l->tokens.len   = 0;
     l->tokens.cap   = 0;
@@ -1361,43 +1319,7 @@ void lexer_init(Lexer *l, const char *source, const char *filename) {
     l->n_errors       = 0;
 }
 
-/* Pre-scan source for `use literals ...` to set lexer flags before tokenizing */
-static void prescan_literals(Lexer *l) {
-    const char *s = l->source;
-    while (*s) {
-        /* skip whitespace and newlines */
-        while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-        if (*s == '-' && *(s+1) == '-') { while (*s && *s != '\n') s++; continue; }
-        if (*s == '#' && *(s+1) == '!') { while (*s && *s != '\n') s++; continue; }
-        /* look for "use" */
-        if (strncmp(s, "use", 3) == 0 && (s[3] == ' ' || s[3] == '\t')) {
-            s += 3;
-            while (*s == ' ' || *s == '\t') s++;
-            if (strncmp(s, "literals", 8) == 0 && (s[8] == ' ' || s[8] == '\t' || s[8] == '\n' || s[8] == '\0')) {
-                s += 8;
-                /* parse literal names */
-                while (*s && *s != '\n' && *s != ';') {
-                    while (*s == ' ' || *s == '\t' || *s == ',') s++;
-                    if (*s == '\n' || *s == '\0' || *s == ';') break;
-                    const char *start = s;
-                    while (*s && *s != ' ' && *s != '\t' && *s != ',' && *s != '\n' && *s != ';') s++;
-                    int len = (int)(s - start);
-                    if (len == 8 && strncmp(start, "duration", 8) == 0) l->literals |= 0x01;
-                    else if (len == 5 && strncmp(start, "color", 5) == 0) l->literals |= 0x02;
-                    else if (len == 4 && strncmp(start, "date", 4) == 0) l->literals |= 0x04;
-                    else if (len == 4 && strncmp(start, "size", 4) == 0) l->literals |= 0x08;
-                    else if (len == 5 && strncmp(start, "angle", 5) == 0) l->literals |= 0x10;
-                }
-                continue;
-            }
-        }
-        /* skip past current line for non-use statements */
-        while (*s && *s != '\n') s++;
-    }
-}
-
 TokenArray lexer_tokenize(Lexer *l) {
-    prescan_literals(l);
     int srclen = (int)strlen(l->source);
     while (l->pos < srclen)
         lex_next(l);

@@ -20,7 +20,10 @@ static Value *native_time_now(Interp *i, Value **args, int argc) {
 
 static Value *native_time_sleep(Interp *i, Value **args, int argc) {
     if (argc<1) return value_incref(XS_NULL_VAL);
-    double secs = VAL_TAG(args[0])==XS_FLOAT?args[0]->f:(double)VAL_INT(args[0]);
+    double secs;
+    if (VAL_TAG(args[0]) == XS_DURATION) secs = (double)args[0]->i / 1e9;
+    else if (VAL_TAG(args[0]) == XS_FLOAT) secs = args[0]->f;
+    else secs = (double)VAL_INT(args[0]);
     xs_sleep_seconds(secs);
     if (xs_task_is_cancelled()) {
         Value *err = xs_error_new("Cancelled",
@@ -69,7 +72,10 @@ TIME_COMPONENT(second, tm_sec)
 
 static Value *native_time_sleep_ms(Interp *ig, Value **a, int n) {
     if (n<1) return value_incref(XS_NULL_VAL);
-    int64_t ms=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
+    int64_t ms;
+    if (VAL_TAG(a[0]) == XS_DURATION) ms = a[0]->i / 1000000;
+    else if (VAL_TAG(a[0]) == XS_INT) ms = VAL_INT(a[0]);
+    else ms = (int64_t)a[0]->f;
     if (ms <= 0) return value_incref(XS_NULL_VAL);
     /* Goes through xs_sleep_seconds so the GIL drops while we wait,
        letting parallel spawn workers actually progress in parallel. */

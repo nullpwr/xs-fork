@@ -130,7 +130,7 @@ for the backend matrix.
 - Function overloading (dispatch by argument count)
 - Tagged blocks (`tag`) for user-defined control structures
 - Inline C blocks for performance-critical code (`inline c { ... }`)
-- Universal literals: durations (`5s`, `200ms`), colors (`#ff6600`), dates, sizes (`10kb`), angles (`90deg`)
+- First-class `Duration` type with native suffixes (`5s`, `200ms`, `1ns`, `2m30s`)
 - Temporal primitives: `every`, `after`, `timeout`, `debounce` for scheduling
 - Algebraic effects (`effect`/`perform`/`handle`/`resume`)
 - All the concurrency: spawn, async/await, actors, channels, nurseries

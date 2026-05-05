@@ -3201,110 +3201,56 @@ Foreign function interface for calling native C code.
 
 ---
 
-## Universal Literals
+## Duration
 
-XS supports domain-specific literal types for durations, colors, dates, sizes, and angles. Enable them with a `use literals` pragma at the top of your file:
-
-```xs
-use literals duration, color, date, size, angle
-```
-
-You can enable all of them or pick just the ones you need. Without the pragma, these literals aren't available.
-
-### Duration
-
-Duration literals represent time values, stored internally as milliseconds:
+XS has a first-class `Duration` type. Any number written with a time suffix is a duration; no pragma or import is required:
 
 ```xs
-use literals duration
+let timeout = 5s
+let frame   = 200ms
+let warmup  = 2m30s
+let tick    = 100ns
+let micro   = 50us
 
-let timeout = 5s         -- 5000 ms
-let frame = 200ms        -- 200 ms
-let warmup = 2m30s       -- 150000 ms
-let hour = 1h            -- 3600000 ms
-let ttl = 3d             -- 259200000 ms
-
-println(timeout)         -- 5000
-println(warmup + 1s)     -- 151000
+println(timeout)         -- 5s
+println(warmup + 1s)     -- 2m31s
+println((1500ms).s)      -- 1.5
 ```
 
-Supported suffixes: `ms`, `s`, `m`, `h`, `d`. You can combine them like `2m30s` or `1h15m`.
+Supported suffixes: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. The suffix has to sit immediately after the number (no whitespace) so a bare identifier on the next line stays an identifier. Compound forms like `2m30s` or `1h15m` are also supported.
 
-### Color
+Internally, every duration is an `int64_t` count of nanoseconds, so the range is around plus or minus 292 years and there's no float drift on arithmetic. Arithmetic mirrors what you'd expect:
 
-Color literals use hex notation, stored as a map with `r`, `g`, `b`, `a` keys:
+| operation               | result        |
+|-------------------------|---------------|
+| `dur + dur`, `dur - dur`| `Duration`    |
+| `dur * scalar`, `scalar * dur`, `dur / scalar` | `Duration` |
+| `dur / dur`             | `float` (ratio) |
+| `dur < dur`, `dur == dur` | `bool`      |
+
+Comparisons against non-durations are a type error rather than a silent coercion.
+
+The repr picks the largest readable unit and trims trailing zeros, so `1500ns` prints as `1.5us`, `2500ms` prints as `2.5s`, and `90s` prints as `1m30s`. Component accessors (`.ns`, `.us`, `.ms`, `.s`, `.m`, `.h`, `.d`) read the duration in that unit, returning an int for `.ns` and a float for the rest.
 
 ```xs
-use literals color
-
-let orange = #ff6600
-let white = #fff            -- shorthand, expands to #ffffff
-let semi = #ff660080        -- with alpha
-
-println(orange.r)           -- 255
-println(orange.g)           -- 102
-println(orange.b)           -- 0
-println(semi.a)             -- 128
+let dt = 750ms
+println(dt.ns)            -- 750000000
+println(dt.s)             -- 0.75
 ```
 
-Three-character shorthand (`#abc`) expands to six characters (`#aabbcc`). Alpha defaults to 255 if not specified.
-
-### Date
-
-Date literals use ISO format, stored as an ISO date string:
-
-```xs
-use literals date
-
-let release = 2024-03-15
-println(release)            -- "2024-03-15"
-```
-
-### Size
-
-Size literals represent byte counts, stored internally as bytes:
-
-```xs
-use literals size
-
-let chunk = 10kb            -- 10240
-let cache = 2mb             -- 2097152
-let disk = 1gb              -- 1073741824
-
-println(chunk)              -- 10240
-```
-
-Supported suffixes: `b`, `kb`, `mb`, `gb`, `tb`. Uses binary units (1kb = 1024 bytes).
-
-### Angle
-
-Angle literals, stored internally as radians:
-
-```xs
-use literals angle
-
-let right = 90deg           -- ~1.5708 rad
-let pi = 3.14rad            -- 3.14 rad
-
-println(right)              -- 1.5707963267948966
-println(pi)                 -- 3.14
-```
-
-Supported suffixes: `deg`, `rad`. Degree values are converted to radians automatically.
+The transpilers carry durations as raw nanosecond counts (numbers in the JS backend, `int64_t` in the C and WASM backends); a richer Duration runtime in those targets is a follow-up.
 
 ---
 
 ## Temporal Primitives
 
-Temporal primitives provide built-in scheduling constructs. They pair naturally with duration literals but also accept plain numeric values (interpreted as milliseconds).
+Temporal primitives are scheduling constructs that take a `Duration`. They also accept plain numbers, which are interpreted as milliseconds for compatibility.
 
 ### every
 
 Runs a block repeatedly at a fixed interval. In the interpreter, the body runs once (for deterministic script execution). When transpiled to JavaScript, it maps to `setInterval`.
 
 ```xs
-use literals duration
-
 every 1s {
     println("tick")
 }
@@ -3315,8 +3261,6 @@ every 1s {
 Runs a block once after a delay:
 
 ```xs
-use literals duration
-
 after 500ms {
     println("delayed hello")
 }
@@ -3327,8 +3271,6 @@ after 500ms {
 Runs a block with a time limit. If the block doesn't finish in time, the `else` fallback runs instead:
 
 ```xs
-use literals duration
-
 timeout 2s {
     let result = slow_computation()
     println(result)
@@ -3342,8 +3284,6 @@ timeout 2s {
 Debounces execution - if called repeatedly, only the last call within the window actually runs:
 
 ```xs
-use literals duration
-
 debounce 300ms {
     println("search: {query}")
 }
@@ -3351,11 +3291,7 @@ debounce 300ms {
 
 ### Practical examples
 
-Combining duration literals with temporal primitives:
-
 ```xs
-use literals duration
-
 -- polling with every
 var health = "unknown"
 every 30s {

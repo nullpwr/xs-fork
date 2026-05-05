@@ -56,6 +56,7 @@ typedef enum {
     XS_REGEX,
     XS_MODULE,
     XS_OVERLOAD,
+    XS_DURATION,
 #ifdef XSC_ENABLE_VM
     XS_CLOSURE,
 #endif

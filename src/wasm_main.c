@@ -84,7 +84,6 @@ int main(int argc, char **argv) {
 
     Parser p;
     parser_init(&p, &lex.tokens, filename);
-    p.literals = lex.literals;
     Node *program = parser_parse(&p);
 
     if (p.had_error) {

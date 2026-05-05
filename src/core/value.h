@@ -21,6 +21,7 @@ Value *xs_module(XSMap *m);
 Value *xs_regex(const char *pattern);
 Value *xs_bigint_val(XSBigInt *b);
 Value *xs_overload_new(void);
+Value *xs_duration(int64_t ns);
 
 extern Value *XS_NULL_VAL;
 extern Value *XS_TRUE_VAL;

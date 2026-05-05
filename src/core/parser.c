@@ -154,7 +154,6 @@ void parser_init(Parser *p, TokenArray *ta, const char *filename) {
     p->max_errors  = 10;
     p->panic_mode  = 0;
     p->no_arrow_lambda = 0;
-    p->literals    = 0;
     p->diag        = NULL;
     memset(&p->error, 0, sizeof(p->error));
 }
@@ -423,6 +422,73 @@ static void parse_error_at(Parser *p, Span span, const char *code,
 static Node *parse_expr(Parser *p, int min_prec);
 static Node *parse_stmt(Parser *p);
 static Node *parse_block(Parser *p);
+
+/* Decorators recognised on fn declarations. Anything else is a parse
+   error. Names starting with '@' are stored without the leading '@';
+   '#[name]' uses the same name space. */
+static int is_known_decorator(const char *name) {
+    if (!name) return 0;
+    static const char *known[] = {
+        "on_start", "on_exit", "on_signal", "on_panic",
+        "every", "cron", "delayed",
+        "watch",
+        "bench", "example",
+        "export",
+        "once",
+        NULL
+    };
+    for (int i = 0; known[i]; i++)
+        if (strcmp(name, known[i]) == 0) return 1;
+    return 0;
+}
+
+/* @cron / @every / @delayed schedule the function with no caller, so
+   they can't accept parameters. @export / @once / @watch and the
+   lifecycle hooks all also fire without args, so we apply the same
+   no-params rule to them. @bench and @example are caller-driven
+   discovery markers and are allowed to take params (the runner passes
+   the test harness in). */
+static int decorator_forbids_params(const char *name) {
+    if (!name) return 0;
+    return strcmp(name, "every") == 0 ||
+           strcmp(name, "cron") == 0 ||
+           strcmp(name, "delayed") == 0 ||
+           strcmp(name, "on_start") == 0 ||
+           strcmp(name, "on_exit") == 0 ||
+           strcmp(name, "on_signal") == 0 ||
+           strcmp(name, "on_panic") == 0 ||
+           strcmp(name, "watch") == 0 ||
+           strcmp(name, "export") == 0 ||
+           strcmp(name, "once") == 0;
+}
+
+static void validate_decorators(Parser *p, int n_params,
+                                Decorator *decs, int n_decs) {
+    int once_count = 0;
+    int trigger_count = 0;
+    for (int i = 0; i < n_decs; i++) {
+        const char *name = decs[i].name;
+        if (!is_known_decorator(name)) {
+            parse_error_at(p, decs[i].span, "P0051",
+                "unknown decorator '@%s'", name ? name : "?");
+            continue;
+        }
+        if (strcmp(name, "once") == 0) once_count++;
+        else trigger_count++;
+        if (decorator_forbids_params(name) && n_params > 0) {
+            parse_error_at(p, decs[i].span, "P0052",
+                "@%s cannot decorate a fn with parameters", name);
+        }
+    }
+    if (once_count > 0 && trigger_count == 0) {
+        parse_error_at(p, decs[0].span, "P0053",
+            "@once must compose with a trigger decorator");
+    }
+    if (once_count > 1) {
+        parse_error_at(p, decs[0].span, "P0054",
+            "@once can only appear once");
+    }
+}
 static Node *parse_pattern(Parser *p);
 static Node *parse_prefix(Parser *p);
 static Node *parse_postfix(Parser *p, Node *left);
@@ -572,105 +638,58 @@ static Node *parse_primary(Parser *p) {
     switch (tok->kind) {
     case TK_INT: {
         pp_advance(p);
-        double numval = (double)tok->ival;
-        /* check for unit suffix literals */
-        if (p->literals) {
-            Token *suf = pp_peek(p, 0);
-            if (suf->kind == TK_IDENT && suf->sval) {
-                /* duration suffixes */
-                if ((p->literals & 0x01) && strcmp(suf->sval, "ms") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval;
-                    return n;
-                }
-                if ((p->literals & 0x01) && strcmp(suf->sval, "s") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval * 1000.0;
-                    return n;
-                }
-                if ((p->literals & 0x01) && strcmp(suf->sval, "m") == 0) {
-                    pp_advance(p);
-                    double total = numval * 60000.0;
-                    /* compound: 2m30s - check if next token is number+s */
-                    Token *nx2 = pp_peek(p, 0);
-                    if (nx2->kind == TK_INT) {
-                        double sub = (double)nx2->ival;
-                        Token *suf2 = pp_peek(p, 1);
-                        if (suf2->kind == TK_IDENT && suf2->sval && strcmp(suf2->sval, "s") == 0) {
-                            pp_advance(p); pp_advance(p);
-                            total += sub * 1000.0;
-                        }
+        Token *suf = pp_peek(p, 0);
+        /* Require the unit suffix to sit immediately after the number,
+           with no intervening whitespace -- otherwise `count = 5\ns =
+           ...` would silently turn the float on the previous line into
+           a duration when the next line starts with `s`/`m`/`h`/etc. */
+        int adjacent = (suf->span.offset == tok->span.offset + tok->span.length);
+        if (adjacent && suf->kind == TK_IDENT && suf->sval) {
+            int64_t ival = tok->ival;
+            int64_t dur = 0;
+            int matched = 0;
+            if      (strcmp(suf->sval, "ns") == 0) { dur = ival; matched = 1; }
+            else if (strcmp(suf->sval, "us") == 0) { dur = ival * 1000LL; matched = 1; }
+            else if (strcmp(suf->sval, "ms") == 0) { dur = ival * 1000000LL; matched = 1; }
+            else if (strcmp(suf->sval, "s") == 0)  { dur = ival * 1000000000LL; matched = 1; }
+            else if (strcmp(suf->sval, "h") == 0)  { dur = ival * 3600LL * 1000000000LL; matched = 1; }
+            else if (strcmp(suf->sval, "d") == 0)  { dur = ival * 86400LL * 1000000000LL; matched = 1; }
+            else if (strcmp(suf->sval, "m") == 0) {
+                dur = ival * 60LL * 1000000000LL;
+                matched = 1;
+                pp_advance(p);
+                /* compound: 2m30s - peek for INT followed by 's' suffix */
+                Token *nx2 = pp_peek(p, 0);
+                if (nx2->kind == TK_INT) {
+                    Token *suf2 = pp_peek(p, 1);
+                    if (suf2->kind == TK_IDENT && suf2->sval && strcmp(suf2->sval, "s") == 0) {
+                        dur += nx2->ival * 1000000000LL;
+                        pp_advance(p); pp_advance(p);
                     }
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = total;
-                    return n;
                 }
+                Node *n = node_new(NODE_LIT_DURATION, span);
+                n->lit_duration.ns = dur;
+                return n;
+            }
+            else if (suf->sval[0] == 'm' && isdigit(suf->sval[1])) {
                 /* compound: 2m30s lexed as INT + IDENT("m30s") */
-                if ((p->literals & 0x01) && suf->sval[0] == 'm' && isdigit(suf->sval[1])) {
-                    pp_advance(p);
-                    double total = numval * 60000.0;
-                    const char *rest = suf->sval + 1;
-                    char *endp = NULL;
-                    double sub = strtod(rest, &endp);
-                    if (endp && (*endp == 's' || *endp == '\0')) {
-                        total += sub * 1000.0;
-                    }
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = total;
-                    return n;
+                int64_t total = ival * 60LL * 1000000000LL;
+                const char *rest = suf->sval + 1;
+                char *endp = NULL;
+                long long sub = strtoll(rest, &endp, 10);
+                if (endp && (*endp == 's' || *endp == '\0')) {
+                    total += (int64_t)sub * 1000000000LL;
                 }
-                if ((p->literals & 0x01) && strcmp(suf->sval, "h") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval * 3600000.0;
-                    return n;
-                }
-                if ((p->literals & 0x01) && strcmp(suf->sval, "d") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval * 86400000.0;
-                    return n;
-                }
-                /* size suffixes */
-                if ((p->literals & 0x08) && strcmp(suf->sval, "kb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1024.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "mb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1048576.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "gb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1073741824.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "tb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1099511627776.0;
-                    return n;
-                }
-                /* angle suffixes */
-                if ((p->literals & 0x10) && strcmp(suf->sval, "deg") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_ANGLE, span);
-                    n->lit_angle.radians = numval * 3.14159265358979323846 / 180.0;
-                    return n;
-                }
-                if ((p->literals & 0x10) && strcmp(suf->sval, "rad") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_ANGLE, span);
-                    n->lit_angle.radians = numval;
-                    return n;
-                }
+                pp_advance(p);
+                Node *n = node_new(NODE_LIT_DURATION, span);
+                n->lit_duration.ns = total;
+                return n;
+            }
+            if (matched) {
+                pp_advance(p);
+                Node *n = node_new(NODE_LIT_DURATION, span);
+                n->lit_duration.ns = dur;
+                return n;
             }
         }
         Node *n = node_new(NODE_LIT_INT, span);
@@ -687,58 +706,23 @@ static Node *parse_primary(Parser *p) {
         pp_advance(p);
         double numval = tok->fval;
         /* check for unit suffix literals */
-        if (p->literals) {
+        {
             Token *suf = pp_peek(p, 0);
-            if (suf->kind == TK_IDENT && suf->sval) {
-                /* duration suffixes */
-                if ((p->literals & 0x01) && strcmp(suf->sval, "ms") == 0) {
+            int adjacent = (suf->span.offset == tok->span.offset + tok->span.length);
+            if (adjacent && suf->kind == TK_IDENT && suf->sval) {
+                double scale = 0.0;
+                int matched = 0;
+                if      (strcmp(suf->sval, "ns") == 0) { scale = 1.0;          matched = 1; }
+                else if (strcmp(suf->sval, "us") == 0) { scale = 1e3;          matched = 1; }
+                else if (strcmp(suf->sval, "ms") == 0) { scale = 1e6;          matched = 1; }
+                else if (strcmp(suf->sval, "s") == 0)  { scale = 1e9;          matched = 1; }
+                else if (strcmp(suf->sval, "m") == 0)  { scale = 60e9;         matched = 1; }
+                else if (strcmp(suf->sval, "h") == 0)  { scale = 3600e9;       matched = 1; }
+                else if (strcmp(suf->sval, "d") == 0)  { scale = 86400e9;      matched = 1; }
+                if (matched) {
                     pp_advance(p);
                     Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval;
-                    return n;
-                }
-                if ((p->literals & 0x01) && strcmp(suf->sval, "s") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_DURATION, span);
-                    n->lit_duration.ms = numval * 1000.0;
-                    return n;
-                }
-                /* size suffixes */
-                if ((p->literals & 0x08) && strcmp(suf->sval, "mb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1048576.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "gb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1073741824.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "kb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1024.0;
-                    return n;
-                }
-                if ((p->literals & 0x08) && strcmp(suf->sval, "tb") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_SIZE, span);
-                    n->lit_size.bytes = numval * 1099511627776.0;
-                    return n;
-                }
-                /* angle suffixes */
-                if ((p->literals & 0x10) && strcmp(suf->sval, "deg") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_ANGLE, span);
-                    n->lit_angle.radians = numval * 3.14159265358979323846 / 180.0;
-                    return n;
-                }
-                if ((p->literals & 0x10) && strcmp(suf->sval, "rad") == 0) {
-                    pp_advance(p);
-                    Node *n = node_new(NODE_LIT_ANGLE, span);
-                    n->lit_angle.radians = numval;
+                    n->lit_duration.ns = (int64_t)(numval * scale);
                     return n;
                 }
             }
@@ -759,35 +743,6 @@ static Node *parse_primary(Parser *p) {
     }
     case TK_STRING: {
         pp_advance(p);
-        /* color literal: "#ff6600" or "#fff" from lexer */
-        if ((p->literals & 0x02) && tok->sval && tok->sval[0] == '#') {
-            const char *hex = tok->sval + 1;
-            int hlen = (int)strlen(hex);
-            int r = 0, g = 0, b = 0, a = 255;
-            if (hlen == 3) {
-                int rr, gg, bb;
-                sscanf(hex, "%1x%1x%1x", &rr, &gg, &bb);
-                r = rr * 17; g = gg * 17; b = bb * 17;
-            } else if (hlen == 6) {
-                sscanf(hex, "%02x%02x%02x", &r, &g, &b);
-            } else if (hlen == 8) {
-                sscanf(hex, "%02x%02x%02x%02x", &r, &g, &b, &a);
-            }
-            Node *n = node_new(NODE_LIT_COLOR, span);
-            n->lit_color.r = r;
-            n->lit_color.g = g;
-            n->lit_color.b = b;
-            n->lit_color.a = a;
-            return n;
-        }
-        /* date literal: "2024-03-15" from lexer */
-        if ((p->literals & 0x04) && tok->sval && strlen(tok->sval) >= 10 &&
-            tok->sval[4] == '-' && tok->sval[7] == '-' &&
-            isdigit(tok->sval[0]) && isdigit(tok->sval[5]) && isdigit(tok->sval[8])) {
-            Node *n = node_new(NODE_LIT_DATE, span);
-            n->lit_date.value = xs_strdup(tok->sval);
-            return n;
-        }
         return parse_string_literal(p, tok);
     }
     case TK_RAW_STRING: {
@@ -3613,35 +3568,6 @@ static Node *parse_use(Parser *p) {
     Token *kw = pp_expect(p, TK_USE, "expected 'use'");
     Span span = kw->span;
 
-    /* check for `use literals duration, color, date, size, angle` */
-    {
-        Token *next2 = pp_peek(p, 0);
-        if (next2->kind == TK_IDENT && next2->sval && strcmp(next2->sval, "literals") == 0) {
-            pp_advance(p); /* consume 'literals' */
-            /* parse comma-separated list of literal type names */
-            while (!pp_at_end(p)) {
-                Token *lt = pp_peek(p, 0);
-                if (lt->kind != TK_IDENT) break;
-                if (lt->sval) {
-                    if (strcmp(lt->sval, "duration") == 0) p->literals |= 0x01;
-                    else if (strcmp(lt->sval, "color") == 0) p->literals |= 0x02;
-                    else if (strcmp(lt->sval, "date") == 0) p->literals |= 0x04;
-                    else if (strcmp(lt->sval, "size") == 0) p->literals |= 0x08;
-                    else if (strcmp(lt->sval, "angle") == 0) p->literals |= 0x10;
-                    /* unknown literal types are silently ignored */
-                }
-                pp_advance(p);
-                if (!pp_match(p, TK_COMMA)) break;
-            }
-            pp_match(p, TK_SEMICOLON);
-            /* return a no-op node */
-            Node *n = node_new(NODE_EXPR_STMT, span);
-            n->expr_stmt.expr = NULL;
-            n->expr_stmt.has_semicolon = 1;
-            return n;
-        }
-    }
-
     /* check for `use plugin "path"` */
     int is_plugin = 0;
     Token *next = pp_peek(p, 0);
@@ -4030,15 +3956,18 @@ static Node *parse_stmt(Parser *p) {
         pp_expect(p, TK_RBRACKET, "expected ']' after #[attribute]");
     }
 
-    /* skip @ attributes, detect @pure, @deprecated, @scoped, @[macro] */
+    /* skip @ attributes, detect @pure, @deprecated, @scoped, @[macro] and
+     * collect the trigger / discovery / api / modifier decorators into a
+     * unified list that gets attached to the fn_decl below. */
     int fn_is_pure = 0;
     int decl_is_scoped = 0;
     int fn_is_macro = 0;
+    Decorator *decorators = NULL;
+    int n_decorators = 0;
     while (pp_check(p, TK_AT)) {
+        Span at_span = pp_peek(p, 0)->span;
         pp_advance(p); /* consume @ */
-        /* @[name] form: bracketed attribute. used for macro markers
-         * to keep them visually distinct from value-flavor attributes
-         * like @pure / @scoped. */
+        /* @[name] form: bracketed attribute, currently used for @[macro]. */
         if (pp_check(p, TK_LBRACKET)) {
             pp_advance(p);
             Token *bn = pp_peek(p, 0);
@@ -4051,30 +3980,66 @@ static Node *parse_stmt(Parser *p) {
             continue;
         }
         Token *attr = pp_peek(p, 0);
+        const char *attr_name = attr->sval;
         int is_deprecated = 0;
-        if (attr->kind == TK_IDENT && attr->sval && strcmp(attr->sval, "pure") == 0)
-            fn_is_pure = 1;
-        if (attr->kind == TK_IDENT && attr->sval && strcmp(attr->sval, "deprecated") == 0)
-            is_deprecated = 1;
-        if (attr->kind == TK_IDENT && attr->sval && strcmp(attr->sval, "scoped") == 0)
-            decl_is_scoped = 1;
+        int legacy = 0;
+        if (attr_name) {
+            if      (strcmp(attr_name, "pure") == 0)       { fn_is_pure = 1;       legacy = 1; }
+            else if (strcmp(attr_name, "deprecated") == 0) { is_deprecated = 1;    legacy = 1; }
+            else if (strcmp(attr_name, "scoped") == 0)     { decl_is_scoped = 1;   legacy = 1; }
+        }
         pp_advance(p); /* consume attribute name */
+        Node **dec_args = NULL;
+        int n_dec_args = 0;
         if (pp_check(p, TK_LPAREN)) {
-            int d=1; pp_advance(p);
-            /* For @deprecated, capture the first string argument */
+            pp_advance(p);
+            /* For @deprecated, capture the first string argument
+               directly so the legacy field stays populated. */
             if (is_deprecated && !fn_deprecated_msg && pp_peek(p,0)->kind == TK_STRING) {
                 fn_deprecated_msg = xs_strdup(pp_peek(p,0)->sval ? pp_peek(p,0)->sval : "deprecated");
+            }
+            if (legacy) {
+                /* Legacy attributes pre-date expression-args; keep the
+                   skip-until-matching-paren behaviour so quirky inputs
+                   like @deprecated("foo (bar)") don't suddenly fail to
+                   parse. */
+                int d = 1;
+                while (!pp_at_end(p) && d > 0) {
+                    if (pp_peek(p,0)->kind == TK_LPAREN) d++;
+                    else if (pp_peek(p,0)->kind == TK_RPAREN) d--;
+                    if (d > 0) pp_advance(p); else pp_advance(p);
+                }
+            } else {
+                /* Trigger / api / discovery decorators: parse args as
+                   expressions so values like 1s, "INT", "0 * * * *"
+                   become real nodes the runtime can inspect. */
+                if (!pp_check(p, TK_RPAREN)) {
+                    while (1) {
+                        Node *arg = parse_expr(p, 0);
+                        if (!arg) break;
+                        dec_args = xs_realloc(dec_args, sizeof(Node*) * (n_dec_args + 1));
+                        dec_args[n_dec_args++] = arg;
+                        if (!pp_match(p, TK_COMMA)) break;
+                    }
+                }
+                pp_expect(p, TK_RPAREN, "expected ')' after decorator arguments");
             }
             if (is_deprecated && !fn_deprecated_msg) {
                 fn_deprecated_msg = xs_strdup("deprecated");
             }
-            while (!pp_at_end(p) && d > 0) {
-                if (pp_peek(p,0)->kind == TK_LPAREN) d++;
-                else if (pp_peek(p,0)->kind == TK_RPAREN) d--;
-                pp_advance(p);
-            }
         } else if (is_deprecated && !fn_deprecated_msg) {
             fn_deprecated_msg = xs_strdup("deprecated");
+        }
+        if (!legacy && attr_name) {
+            decorators = xs_realloc(decorators, sizeof(Decorator) * (n_decorators + 1));
+            Decorator *d = &decorators[n_decorators++];
+            d->name = xs_strdup(attr_name);
+            d->args = dec_args;
+            d->n_args = n_dec_args;
+            d->span = at_span;
+        } else if (dec_args) {
+            for (int j = 0; j < n_dec_args; j++) node_free(dec_args[j]);
+            free(dec_args);
         }
     }
 
@@ -4130,10 +4095,35 @@ static Node *parse_stmt(Parser *p) {
             } else {
                 free(fn_deprecated_msg);
             }
+            if (n_decorators > 0) {
+                fn_node->fn_decl.decorators = decorators;
+                fn_node->fn_decl.n_decorators = n_decorators;
+                validate_decorators(p, fn_node->fn_decl.params.len, decorators, n_decorators);
+                decorators = NULL;
+                n_decorators = 0;
+            }
         } else {
             free(fn_deprecated_msg);
         }
+        if (decorators) {
+            for (int j = 0; j < n_decorators; j++) {
+                free(decorators[j].name);
+                for (int k = 0; k < decorators[j].n_args; k++) node_free(decorators[j].args[k]);
+                free(decorators[j].args);
+            }
+            free(decorators);
+        }
         return fn_node;
+    }
+    if (n_decorators > 0) {
+        parse_error_at(p, decorators[0].span, "P0050",
+            "decorators only apply to fn declarations");
+        for (int j = 0; j < n_decorators; j++) {
+            free(decorators[j].name);
+            for (int k = 0; k < decorators[j].n_args; k++) node_free(decorators[j].args[k]);
+            free(decorators[j].args);
+        }
+        free(decorators);
     }
     if (tok->kind == TK_MACRO) {
         /* macro name!(params) { body } → fn name(params) { body } */

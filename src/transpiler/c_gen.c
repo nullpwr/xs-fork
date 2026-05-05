@@ -518,6 +518,11 @@ static void emit_expr(SB *s, Node *n, int depth) {
          * figs, which truncates literals like 123456789.0. */
         sb_printf(s, "XS_FLOAT(%.17g)", n->lit_float.fval);
         break;
+    case NODE_LIT_DURATION:
+        /* The c backend treats durations as plain int64 ns counts; the
+           real Duration type lives in the interp/vm. */
+        sb_printf(s, "XS_INT(%lldLL)", (long long)n->lit_duration.ns);
+        break;
     case NODE_LIT_STRING:
         sb_add(s, "XS_STR(\"");
         if (n->lit_string.sval) {

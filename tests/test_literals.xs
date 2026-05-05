@@ -1,42 +1,52 @@
-use literals duration, color, date, size, angle
+-- duration is a real first-class type. ns is the canonical unit.
 
--- durations
-assert_eq(type(5s), "float")
-assert_eq(5s, 5000)
-assert_eq(200ms, 200)
-assert_eq(2m, 120000)
-assert_eq(1h, 3600000)
-assert_eq(3d, 259200000)
+assert_eq(typeof(5s), "duration")
+assert_eq(typeof(100ms), "duration")
+assert_eq(typeof(1ns), "duration")
+assert_eq(typeof(2us), "duration")
+assert_eq(typeof(2.5s), "duration")
 
--- colors
-let c = #ff6600
-assert_eq(c.r, 255)
-assert_eq(c.g, 102)
-assert_eq(c.b, 0)
+-- equality and ordering
+assert_eq(1s, 1s)
+assert(500ms < 1s)
+assert(2h > 90m)
+assert(1d == 24h)
 
-let white = #ffffff
-assert_eq(white.r, 255)
-assert_eq(white.g, 255)
-assert_eq(white.b, 255)
+-- nanosecond accessors round-trip
+assert_eq((5s).ns, 5000000000)
+assert_eq((1ms).ns, 1000000)
+assert_eq((1us).ns, 1000)
+assert_eq((1ns).ns, 1)
 
--- dates
-let d = 2024-03-15
-assert_eq(type(d), "str")
-assert_eq(d, "2024-03-15")
+-- coarser accessors are floats
+assert_eq((1500ms).s, 1.5)
+assert_eq((90s).m, 1.5)
 
--- sizes
-assert_eq(10kb, 10240)
-assert_eq(1mb, 1048576)
-assert_eq(1gb, 1073741824)
+-- arithmetic
+assert_eq(2s + 500ms, 2500ms)
+assert_eq(1m - 30s, 30s)
+assert_eq((100ms) * 3, 300ms)
+assert_eq(2 * (250ms), 500ms)
+assert_eq((2s) / 4, 500ms)
+assert_eq((1s) / (250ms), 4.0)
 
--- angles
-let a = 180deg
-assert(a > 3.14 and a < 3.15)
-assert_eq(1rad, 1)
+-- compound and float forms
+assert_eq(1m30s, 90s)
+assert_eq(2.5s, 2500ms)
+assert_eq(0.5s, 500ms)
 
--- temporal (all execute immediately in interpreter)
+-- repr matches the smallest readable form
+assert_eq(str(5s), "5s")
+assert_eq(str(100ms), "100ms")
+assert_eq(str(1ns), "1ns")
+assert_eq(str(1500ns), "1.5us")
+assert_eq(str(1m30s), "1m30s")
+assert_eq(str(2500ms), "2.5s")
+assert_eq(str(0s), "0s")
+
+-- scheduling primitives accept Duration
 var ran = false
-after 100ms {
+after 1ms {
     ran = true
 }
 assert_eq(ran, true)
@@ -48,7 +58,8 @@ every 1s {
 assert_eq(count, 1)
 
 timeout 5s {
-    println("ok")
+    -- body returns; nothing to assert here, just exercise the parse + run
+    let _ = 1
 }
 
 println("all literal tests passed")

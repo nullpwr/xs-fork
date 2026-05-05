@@ -230,6 +230,7 @@ static Value *builtin_type(Interp *i, Value **args, int argc) {
     case XS_INT:    return xs_str("int");
     case XS_BIGINT: return xs_str("int");
     case XS_FLOAT:  return xs_str("float");
+    case XS_DURATION: return xs_str("duration");
     case XS_STR:    return xs_str("str");
     case XS_CHAR:   return xs_str("char");
     case XS_ARRAY:  return xs_str("array");
@@ -270,6 +271,7 @@ static Value *builtin_type_of(Interp *i, Value **args, int argc) {
     case XS_INT:    return xs_str("Int");
     case XS_BIGINT: return xs_str("Int");
     case XS_FLOAT:  return xs_str("Float");
+    case XS_DURATION: return xs_str("Duration");
     case XS_STR:    return xs_str("Str");
     case XS_CHAR:   return xs_str("Char");
     case XS_ARRAY:  return xs_str("Array");

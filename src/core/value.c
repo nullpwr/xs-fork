@@ -107,6 +107,12 @@ Value *xs_float(double f) {
     return v;
 }
 
+Value *xs_duration(int64_t ns) {
+    Value *v = val_alloc(XS_DURATION);
+    v->i = ns;
+    return v;
+}
+
 Value *xs_str(const char *s) {
     Value *v = val_alloc(XS_STR);
     v->s = xs_strdup(s ? s : "");
@@ -367,6 +373,7 @@ int value_truthy(Value *v) {
         case XS_INT:    return VAL_INT(v) != 0;
         case XS_BIGINT: return !bigint_is_zero(v->bigint);
         case XS_FLOAT:  return v->f != 0.0;
+        case XS_DURATION: return v->i != 0;
         case XS_STR:    return v->s && v->s[0] != '\0';
         case XS_CHAR:   return v->s && v->s[0] != '\0';
         case XS_ARRAY:
@@ -374,6 +381,78 @@ int value_truthy(Value *v) {
         case XS_MAP:    return v->map && v->map->len > 0;
         default:        return 1;
     }
+}
+
+/* Format an int64 nanosecond duration in a compact, readable form.
+   Sub-second values render in the largest unit that fits cleanly
+   (Nns, X.Yus, X.Yms). One second and over compose `[Nd][Hh][Mm][Ss]`,
+   omitting zero segments and trimming trailing zeros from the seconds
+   fraction so e.g. 1500ms prints as "1.5s" rather than "1.500s". */
+static char *duration_repr(int64_t ns) {
+    if (ns == 0) return xs_strdup("0s");
+    int neg = ns < 0;
+    int64_t a = neg ? -ns : ns;
+    char buf[128];
+    int pos = 0;
+    if (neg) buf[pos++] = '-';
+
+    if (a < 1000LL) {
+        snprintf(buf + pos, sizeof(buf) - pos, "%lldns", (long long)a);
+        return xs_strdup(buf);
+    }
+    if (a < 1000000LL) {
+        int64_t us = a / 1000, rem = a % 1000;
+        if (rem == 0) snprintf(buf + pos, sizeof(buf) - pos, "%lldus", (long long)us);
+        else {
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), "%lld.%03lld", (long long)us, (long long)rem);
+            int len = (int)strlen(tmp);
+            while (len > 0 && tmp[len-1] == '0') tmp[--len] = '\0';
+            if (len > 0 && tmp[len-1] == '.') tmp[--len] = '\0';
+            snprintf(buf + pos, sizeof(buf) - pos, "%sus", tmp);
+        }
+        return xs_strdup(buf);
+    }
+    if (a < 1000000000LL) {
+        int64_t ms = a / 1000000, rem = a % 1000000;
+        if (rem == 0) snprintf(buf + pos, sizeof(buf) - pos, "%lldms", (long long)ms);
+        else {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%lld.%06lld", (long long)ms, (long long)rem);
+            int len = (int)strlen(tmp);
+            while (len > 0 && tmp[len-1] == '0') tmp[--len] = '\0';
+            if (len > 0 && tmp[len-1] == '.') tmp[--len] = '\0';
+            snprintf(buf + pos, sizeof(buf) - pos, "%sms", tmp);
+        }
+        return xs_strdup(buf);
+    }
+
+    const int64_t SEC = 1000000000LL;
+    const int64_t MIN = 60LL * SEC;
+    const int64_t HOUR = 60LL * MIN;
+    const int64_t DAY = 24LL * HOUR;
+
+    int64_t days = a / DAY;             a %= DAY;
+    int64_t hours = a / HOUR;           a %= HOUR;
+    int64_t mins = a / MIN;             a %= MIN;
+    int64_t secs = a / SEC;             int64_t sub = a % SEC;
+
+    if (days) pos += snprintf(buf + pos, sizeof(buf) - pos, "%lldd", (long long)days);
+    if (hours) pos += snprintf(buf + pos, sizeof(buf) - pos, "%lldh", (long long)hours);
+    if (mins) pos += snprintf(buf + pos, sizeof(buf) - pos, "%lldm", (long long)mins);
+    if (secs || sub) {
+        if (sub == 0) {
+            snprintf(buf + pos, sizeof(buf) - pos, "%llds", (long long)secs);
+        } else {
+            char tmp[64];
+            snprintf(tmp, sizeof(tmp), "%lld.%09lld", (long long)secs, (long long)sub);
+            int len = (int)strlen(tmp);
+            while (len > 0 && tmp[len-1] == '0') tmp[--len] = '\0';
+            if (len > 0 && tmp[len-1] == '.') tmp[--len] = '\0';
+            snprintf(buf + pos, sizeof(buf) - pos, "%ss", tmp);
+        }
+    }
+    return xs_strdup(buf);
 }
 
 /* repr */
@@ -390,6 +469,7 @@ char *value_repr(Value *v) {
             char *s = bigint_to_str(v->bigint, 10);
             return s;  /* already heap-allocated */
         }
+        case XS_DURATION: return duration_repr(v->i);
         case XS_FLOAT: {
             double f = v->f;
             if (f != f) return xs_strdup("NaN");
@@ -661,6 +741,7 @@ int value_equal(Value *a, Value *b) {
     if (VAL_TAG(a) == XS_NULL && VAL_TAG(b) == XS_NULL) return 1;
     if (VAL_TAG(a) == XS_BOOL && VAL_TAG(b) == XS_BOOL) return VAL_INT(a) == VAL_INT(b);
     if (VAL_TAG(a) == XS_INT  && VAL_TAG(b) == XS_INT)  return VAL_INT(a) == VAL_INT(b);
+    if (VAL_TAG(a) == XS_DURATION && VAL_TAG(b) == XS_DURATION) return a->i == b->i;
     if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_FLOAT) return a->f == b->f;
     if (VAL_TAG(a) == XS_INT  && VAL_TAG(b) == XS_FLOAT) return (double)VAL_INT(a) == b->f;
     if (VAL_TAG(a) == XS_FLOAT && VAL_TAG(b) == XS_INT)  return a->f == (double)VAL_INT(b);
@@ -741,6 +822,11 @@ int value_cmp(Value *a, Value *b) {
     if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
         if (VAL_INT(a) < VAL_INT(b)) return -1;
         if (VAL_INT(a) > VAL_INT(b)) return  1;
+        return 0;
+    }
+    if (VAL_TAG(a) == XS_DURATION && VAL_TAG(b) == XS_DURATION) {
+        if (a->i < b->i) return -1;
+        if (a->i > b->i) return  1;
         return 0;
     }
     if (VAL_TAG(a) == XS_BIGINT && VAL_TAG(b) == XS_BIGINT) return bigint_cmp(a->bigint, b->bigint);

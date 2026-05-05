@@ -147,17 +147,16 @@ result = data |> normalise |> validate |> save
 let name = user.name ?? "anonymous"
 ```
 
-## Universal literals
+## Duration
 
 ```xs
-let dur = 500ms                            -- duration
-let col = #ff6600                          -- colour
-let when = 2025-12-31                      -- date
-let size = 10MB                            -- byte size
-let ang = 45deg                            -- angle
+let dur = 500ms                            -- 500 ms
+let frame = 100us                          -- microseconds
+let tick  = 1ns                            -- nanoseconds
+let warmup = 2m30s                         -- compound
 ```
 
-These aren't strings; each has a typed runtime value.
+Numbers with `ns` / `us` / `ms` / `s` / `m` / `h` / `d` suffixes are first-class `Duration` values backed by an int64 nanosecond count. Arithmetic, comparisons, and the `.ns` / `.s` / `.ms` accessors all work; `println(2s + 500ms)` prints `2.5s`.
 
 ## Modules
 

@@ -214,6 +214,7 @@ static Value *vm_type(Interp *interp, Value **args, int argc) {
         "array","map","tuple","fn","native",
         "struct","enum","class","inst","range","signal","actor","re","module",
         "fn", /* overload */
+        "duration",
         "fn", /* closure */
     };
     int tag = (int)VAL_TAG(args[0]);
@@ -1474,6 +1475,57 @@ static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc) {
     return POP();
 }
 
+/* Duration arithmetic: returns a fresh Value or NULL when the op can't
+   apply. Mirrors the interp's eval_binop duration branch. */
+static Value *vm_try_duration_op(Value *a, const char *op, Value *b) {
+    int ad = VAL_TAG(a) == XS_DURATION;
+    int bd = VAL_TAG(b) == XS_DURATION;
+    if (!ad && !bd) return NULL;
+    int as = VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT;
+    int bs = VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT;
+    int64_t lns = ad ? a->i : 0;
+    int64_t rns = bd ? b->i : 0;
+    double ascale = as ? (VAL_TAG(a) == XS_FLOAT ? a->f : (double)VAL_INT(a)) : 0.0;
+    double bscale = bs ? (VAL_TAG(b) == XS_FLOAT ? b->f : (double)VAL_INT(b)) : 0.0;
+    if (op[0]=='=' && op[1]=='=') return value_incref(ad && bd && lns == rns ? XS_TRUE_VAL : XS_FALSE_VAL);
+    if (op[0]=='!' && op[1]=='=') return value_incref(!(ad && bd && lns == rns) ? XS_TRUE_VAL : XS_FALSE_VAL);
+    if (ad && bd) {
+        if (op[0]=='<' && op[1]=='\0') return value_incref(lns <  rns ? XS_TRUE_VAL : XS_FALSE_VAL);
+        if (op[0]=='>' && op[1]=='\0') return value_incref(lns >  rns ? XS_TRUE_VAL : XS_FALSE_VAL);
+        if (op[0]=='<' && op[1]=='=') return value_incref(lns <= rns ? XS_TRUE_VAL : XS_FALSE_VAL);
+        if (op[0]=='>' && op[1]=='=') return value_incref(lns >= rns ? XS_TRUE_VAL : XS_FALSE_VAL);
+        if (op[0]=='+' && op[1]=='\0') return xs_duration(lns + rns);
+        if (op[0]=='-' && op[1]=='\0') return xs_duration(lns - rns);
+        if (op[0]=='/' && op[1]=='\0') {
+            if (rns == 0) {
+                Span s = {0};
+                xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
+                return value_incref(XS_NULL_VAL);
+            }
+            return xs_float((double)lns / (double)rns);
+        }
+        if (op[0]=='%' && op[1]=='\0') {
+            if (rns == 0) {
+                Span s = {0};
+                xs_runtime_error(s, "modulo by zero", NULL, "cannot take modulo with zero divisor");
+                return value_incref(XS_NULL_VAL);
+            }
+            return xs_duration(lns % rns);
+        }
+    }
+    if (ad && bs && op[0]=='*' && op[1]=='\0') return xs_duration((int64_t)((double)lns * bscale));
+    if (as && bd && op[0]=='*' && op[1]=='\0') return xs_duration((int64_t)(ascale * (double)rns));
+    if (ad && bs && op[0]=='/' && op[1]=='\0') {
+        if (bscale == 0.0) {
+            Span s = {0};
+            xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
+            return value_incref(XS_NULL_VAL);
+        }
+        return xs_duration((int64_t)((double)lns / bscale));
+    }
+    return NULL;
+}
+
 static Value *vm_try_struct_op(VM *vm, Value *a, const char *op, Value *b) {
     if (VAL_TAG(a) != XS_STRUCT_VAL || !a->st || !a->st->type_name) return NULL;
     /* look up the operator method from globals: stored by impl under the op name */
@@ -1498,6 +1550,7 @@ static int vm_orderable_pair(Value *a, Value *b) {
     if (ta == XS_CHAR  && tb == XS_CHAR)  return 1;
     if (ta == XS_ARRAY && tb == XS_ARRAY) return 1;
     if (ta == XS_TUPLE && tb == XS_TUPLE) return 1;
+    if (ta == XS_DURATION && tb == XS_DURATION) return 1;
     return 0;
 }
 
@@ -1793,7 +1846,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_ADD: {
             Value *b = POP(), *a = POP(); Value *r;
-            if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
+            if ((VAL_TAG(a) == XS_DURATION || VAL_TAG(b) == XS_DURATION)
+                && (r = vm_try_duration_op(a, "+", b)) != NULL) {
+                /* duration handled */
+            } else if (VAL_TAG(a) == XS_INT && VAL_TAG(b) == XS_INT) {
                 r = xs_safe_add(VAL_INT(a), VAL_INT(b));
             } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_BIGINT) &&
                        (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_BIGINT)) {
@@ -1833,7 +1889,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_SUB: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+            if ((VAL_TAG(a) == XS_DURATION || VAL_TAG(b) == XS_DURATION)
+                && (r = vm_try_duration_op(a, "-", b)) != NULL) {
+                /* duration handled */
+            } else if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
                 r = xs_safe_sub(VAL_INT(a), VAL_INT(b));
             } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 r = xs_numeric_sub(a, b);
@@ -1858,7 +1917,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_MUL: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+            if ((VAL_TAG(a) == XS_DURATION || VAL_TAG(b) == XS_DURATION)
+                && (r = vm_try_duration_op(a, "*", b)) != NULL) {
+                /* duration handled */
+            } else if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
                 r = xs_safe_mul(VAL_INT(a), VAL_INT(b));
             } else if ((VAL_TAG(a)==XS_INT||VAL_TAG(a)==XS_BIGINT) && (VAL_TAG(b)==XS_INT||VAL_TAG(b)==XS_BIGINT)) {
                 r = xs_numeric_mul(a, b);
@@ -1899,7 +1961,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_DIV: {
             Value *b=POP(), *a=POP(); Value *r;
-            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+            if ((VAL_TAG(a) == XS_DURATION || VAL_TAG(b) == XS_DURATION)
+                && (r = vm_try_duration_op(a, "/", b)) != NULL) {
+                /* duration handled */
+            } else if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
                 if (VAL_INT(b) == 0) {
                     Span s = {0};
                     xs_runtime_error(s, "division by zero", NULL, "cannot divide by zero");
@@ -1923,7 +1988,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_MOD: {
             Value *b=POP(), *a=POP();
             Value *r;
-            if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
+            if ((VAL_TAG(a) == XS_DURATION || VAL_TAG(b) == XS_DURATION)
+                && (r = vm_try_duration_op(a, "%", b)) != NULL) {
+                /* duration handled */
+            } else if (VAL_TAG(a)==XS_INT && VAL_TAG(b)==XS_INT) {
                 if (VAL_INT(b) == 0) {
                     Span s = {0};
                     xs_runtime_error(s, "modulo by zero", NULL, "cannot take modulo with zero divisor");
@@ -2269,6 +2337,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(obj) == XS_INST && obj->inst && obj->inst->fields) {
                 Value *v = map_get(obj->inst->fields, name);
                 if (v) r = value_incref(v);
+            } else if (VAL_TAG(obj) == XS_DURATION) {
+                int64_t ns = obj->i;
+                if      (strcmp(name, "ns") == 0) r = xs_int(ns);
+                else if (strcmp(name, "us") == 0) r = xs_float((double)ns / 1e3);
+                else if (strcmp(name, "ms") == 0) r = xs_float((double)ns / 1e6);
+                else if (strcmp(name, "s")  == 0) r = xs_float((double)ns / 1e9);
+                else if (strcmp(name, "m")  == 0) r = xs_float((double)ns / 60e9);
+                else if (strcmp(name, "h")  == 0) r = xs_float((double)ns / 3600e9);
+                else if (strcmp(name, "d")  == 0) r = xs_float((double)ns / 86400e9);
             }
             if (!r) r = value_incref(XS_NULL_VAL);
             value_decref(obj); PUSH(r); break;

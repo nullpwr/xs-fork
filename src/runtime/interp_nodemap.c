@@ -58,10 +58,6 @@ const char *node_tag_to_string(NodeTag tag) {
     case NODE_BIND:       return "bind";
     case NODE_ADAPT_FN:   return "adapt_fn";
     case NODE_LIT_DURATION: return "duration";
-    case NODE_LIT_COLOR:  return "color";
-    case NODE_LIT_DATE:   return "date";
-    case NODE_LIT_SIZE:   return "size";
-    case NODE_LIT_ANGLE:  return "angle";
     case NODE_EVERY:      return "every";
     case NODE_AFTER:      return "after";
     case NODE_TIMEOUT:    return "timeout";
@@ -117,10 +113,6 @@ int node_tag_from_string(const char *s) {
     if (strcmp(s, "bind") == 0) return NODE_BIND;
     if (strcmp(s, "adapt_fn") == 0) return NODE_ADAPT_FN;
     if (strcmp(s, "duration") == 0) return NODE_LIT_DURATION;
-    if (strcmp(s, "color") == 0) return NODE_LIT_COLOR;
-    if (strcmp(s, "date") == 0) return NODE_LIT_DATE;
-    if (strcmp(s, "size") == 0) return NODE_LIT_SIZE;
-    if (strcmp(s, "angle") == 0) return NODE_LIT_ANGLE;
     if (strcmp(s, "every") == 0) return NODE_EVERY;
     if (strcmp(s, "after") == 0) return NODE_AFTER;
     if (strcmp(s, "timeout") == 0) return NODE_TIMEOUT;
@@ -230,22 +222,7 @@ Value *node_to_xs_map(Node *n) {
         break;
     }
     case NODE_LIT_DURATION:
-        map_set(m->map, "ms", xs_float(n->lit_duration.ms));
-        break;
-    case NODE_LIT_COLOR:
-        map_take(m->map, "r", xs_int(n->lit_color.r));
-        map_take(m->map, "g", xs_int(n->lit_color.g));
-        map_take(m->map, "b", xs_int(n->lit_color.b));
-        map_take(m->map, "a", xs_int(n->lit_color.a));
-        break;
-    case NODE_LIT_DATE:
-        map_set(m->map, "value", xs_str(n->lit_date.value ? n->lit_date.value : ""));
-        break;
-    case NODE_LIT_SIZE:
-        map_set(m->map, "bytes", xs_float(n->lit_size.bytes));
-        break;
-    case NODE_LIT_ANGLE:
-        map_set(m->map, "radians", xs_float(n->lit_angle.radians));
+        map_take(m->map, "ns", xs_int(n->lit_duration.ns));
         break;
     case NODE_EVERY:
         map_set(m->map, "interval", node_to_xs_map(n->every_.interval));
@@ -543,41 +520,8 @@ Node *node_from_xs_map(Value *map) {
     }
     if (tag_i == NODE_LIT_DURATION) {
         Node *n = node_new(NODE_LIT_DURATION, sp);
-        Value *v = map_get(map->map, "ms");
-        n->lit_duration.ms = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
-                             (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
-        return n;
-    }
-    if (tag_i == NODE_LIT_COLOR) {
-        Node *n = node_new(NODE_LIT_COLOR, sp);
-        Value *r = map_get(map->map, "r");
-        Value *g = map_get(map->map, "g");
-        Value *b = map_get(map->map, "b");
-        Value *a = map_get(map->map, "a");
-        n->lit_color.r = (r && VAL_TAG(r) == XS_INT) ? VAL_INT(r) : 0;
-        n->lit_color.g = (g && VAL_TAG(g) == XS_INT) ? VAL_INT(g) : 0;
-        n->lit_color.b = (b && VAL_TAG(b) == XS_INT) ? VAL_INT(b) : 0;
-        n->lit_color.a = (a && VAL_TAG(a) == XS_INT) ? VAL_INT(a) : 255;
-        return n;
-    }
-    if (tag_i == NODE_LIT_DATE) {
-        Node *n = node_new(NODE_LIT_DATE, sp);
-        Value *v = map_get(map->map, "value");
-        n->lit_date.value = xs_strdup((v && VAL_TAG(v) == XS_STR) ? v->s : "");
-        return n;
-    }
-    if (tag_i == NODE_LIT_SIZE) {
-        Node *n = node_new(NODE_LIT_SIZE, sp);
-        Value *v = map_get(map->map, "bytes");
-        n->lit_size.bytes = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
-                            (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
-        return n;
-    }
-    if (tag_i == NODE_LIT_ANGLE) {
-        Node *n = node_new(NODE_LIT_ANGLE, sp);
-        Value *v = map_get(map->map, "radians");
-        n->lit_angle.radians = (v && VAL_TAG(v) == XS_FLOAT) ? v->f :
-                               (v && VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
+        Value *v = map_get(map->map, "ns");
+        n->lit_duration.ns = (v && VAL_TAG(v) == XS_INT) ? VAL_INT(v) : 0;
         return n;
     }
     if (tag_i == NODE_EVERY) {
