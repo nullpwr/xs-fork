@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.1.1
+
+Stdlib modules (`math`, `os`, `fs`, `time`, `string`, `path`, `json`,
+`http`, `re`, `crypto`, `db`, `random`, `process`, `net`, `async`,
+...) now require an explicit `import name` instead of being
+auto-bound on every interp / VM init. Constants (`PI`, `E`, `INF`,
+`NAN`), Result / Option constructors (`Ok`, `Err`, `Some`, `None`),
+the bare math fns (`sqrt`, `floor`, `sin`, ...), and the collection
+helpers (`map`, `filter`, `sorted`, ...) stay top-level.
+
+- `pause <duration>` and `del <name>` now run under the VM compiler
+  (they used to print "unhandled node tag" to stderr and silently
+  no-op).
+- LSP `textDocument/documentSymbol` no longer trips the "selectionRange
+  must be contained in fullRange" assertion that VS Code surfaced on
+  incomplete source.
+- Diagnostic colourizer learned the rest of the keyword set
+  (`pause`, `del`, `every`, `after`, `timeout`, `debounce`, `do`,
+  `with`, `use`, `plugin`, `actor`, `pure`, `inline`, `unsafe`,
+  `tag`), highlights `@decorators` distinctly, and recolours
+  `<number><unit>` sequences (`100ms`, `2m30s`, `5d`) as durations
+  instead of "number followed by an identifier".
+- Editor highlighters (vscode tmLanguage, tree-sitter grammar,
+  helix / neovim / zed queries) get a dedicated capture for
+  duration literals; the lingering `universal_literal` rule got
+  trimmed down to the unit set the lexer actually accepts.
+- `@on_panic fn report(err) { ... }` now parses (the parser used to
+  reject the parameter even though the runtime calls the handler
+  with the exception) and the unhandled-exception value is parked
+  separately from `cf.value` so the handler actually sees it.
+- Parser bug fix: `import math` followed by `import time` was
+  being eaten as one import where the second `import` keyword
+  looked like the bracketed-items continuation. Now we only
+  consume the second token if a `{` actually follows.
+- `examples/` removed; will be rebuilt separately.
+
 ## 1.1.0
 
 Decorators land. A function declaration can now carry one trigger, an
