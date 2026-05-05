@@ -27,8 +27,8 @@
 #include <ws2tcpip.h>
 #include <io.h>
 #include <direct.h>
+#include "net/sock_compat.h"  /* shared ssize_t typedef so LTO sees one type */
 #define close closesocket
-#define ssize_t int
 #define read(fd, buf, len)  recv(fd, buf, len, 0)
 #define write(fd, buf, len) send(fd, buf, len, 0)
 #ifdef _MSC_VER

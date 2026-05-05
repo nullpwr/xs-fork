@@ -354,7 +354,9 @@ static void watch_snapshot(const char *path, long long *mtime_ns, long long *sz)
         *sz = -1;
         return;
     }
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__)
+    *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL + (long long)st.st_mtimespec.tv_nsec;
+#elif defined(__linux__) || defined(_POSIX_VERSION)
     *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL + (long long)st.st_mtim.tv_nsec;
 #else
     *mtime_ns = (long long)st.st_mtime * 1000000000LL;
