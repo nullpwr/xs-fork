@@ -1,5 +1,7 @@
 -- test embedded database module
 
+import db
+
 -- open in-memory db
 let conn = db.open("test_mem")
 assert(conn != null, "db.open should return a connection")

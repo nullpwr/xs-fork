@@ -3,6 +3,8 @@
 -- matched on positional cN names and CREATE TABLE column names were
 -- silently dropped.
 
+import db
+
 let conn = db.open("test_where")
 db.exec(conn, "CREATE TABLE users (id, name, age)")
 db.exec(conn, "INSERT INTO users VALUES (1, 'alice', 30)")

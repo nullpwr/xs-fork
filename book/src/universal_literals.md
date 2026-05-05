@@ -1,70 +1,83 @@
-# Universal literals
+# Duration literals
 
-Five typed literal shapes are recognised by the lexer; each compiles
-to a typed runtime value, not a string.
+A number followed by a time unit is a real `Duration` value, not
+sugar for a float. Always on, no pragma needed.
 
-| literal             | type      | example                |
-|---------------------|-----------|------------------------|
-| duration            | `Duration`| `500ms`, `30s`, `2h`   |
-| color               | `Color`   | `#ff6600`, `#abc`      |
-| date / datetime     | `Date`    | `2025-12-31`, `2025-12-31T10:00` |
-| size                | `Size`    | `10MB`, `4.5GiB`       |
-| angle               | `Angle`   | `45deg`, `1.57rad`     |
+| literal       | type        | example                  |
+|---------------|-------------|--------------------------|
+| duration      | `Duration`  | `1ns`, `500ms`, `2m30s`  |
+
+Suffixes are `ns`, `us`, `ms`, `s`, `m`, `h`, `d`. Storage is an
+int64 nanosecond count, so a duration round-trips losslessly through
+`.ns`.
 
 ## Why
 
 `time.sleep(500)` is ambiguous: 500 ms, 500 s, 500 ns? The function
 signature has to pick one and the call site loses information.
+Durations push the unit into the value:
 
 ```xs
-time.sleep(500ms)          -- typed; the function takes Duration
+import time
+
+time.sleep(500ms)
 time.sleep(2.5s)
+time.sleep(1m30s)
 ```
+
+The same value flows through scheduling primitives (`after`,
+`every`, `timeout`), the time-based decorators (`@every`,
+`@delayed`), `time.sleep`, and channel `recv_timeout`.
+
+## Arithmetic
+
+Durations add and subtract with each other, multiply and divide by
+numbers, and divide by another duration to get a ratio. Ordering
+works as you would expect.
 
 ```xs
-let bg: Color = #1a1a2e
-let layout = #{padding: 10MB / file_size, angle: 45deg}
+2s + 500ms        -- 2.5s
+1m - 30s          -- 30s
+100ms * 3         -- 300ms
+2s / 4            -- 500ms
+1s / 250ms        -- 4
+
+500ms < 1s        -- true
+2h > 90m          -- true
 ```
 
-## What you can do
+## Field access
+
+The integer `.ns` accessor is the canonical unit. Coarser fields
+like `.s` and `.m` return floats so partial units don't silently
+truncate.
 
 ```xs
-500ms + 250ms              -- 750ms
-500ms.to_seconds()         -- 0.5
-500ms.to_ns()              -- 500_000_000
-2h.minutes                 -- 120
-
-#ff6600.rgb()              -- (255, 102, 0)
-#ff6600.lighten(0.2)       -- a Color, brighter
-
-2025-12-31.weekday()       -- "Wed"
-2025-12-31 - 2025-12-25    -- 6.days
-
-10MB.to_bytes()            -- 10485760
-10MB + 512KB               -- 10.5 MB
-
-45deg.to_radians()         -- 0.785398
-45deg.sin()                -- 0.707
+(1500ms).s        -- 1.5
+(90s).m           -- 1.5
+(5s).ns           -- 5_000_000_000
 ```
 
-The arithmetic respects units; adding `10MB + 30s` is a type error.
+## Compound and float forms
 
-## Why this works
+Adjacent units stack into a single duration. Floats work too with
+the obvious meaning.
 
-Each shape has a tag the lexer recognises. The parser produces a
-typed AST node. The interpreter constructs a `Duration{ns: ...}`
-struct (or equivalent), same memory layout as a regular struct,
-just with a literal-friendly constructor.
+```xs
+let warmup = 2m30s
+let half   = 0.5s
+let nps    = 1500ns
 
-You can implement your own through plugins; the lexer hooks let you
-register a new suffix and the parser hook produces the matching
-constructor call.
+println(warmup)   -- 2m30s
+println(half)     -- 500ms
+println(nps)      -- 1.5us
+```
 
 ## Strings still work
 
 If you really want a string, quote it:
 
 ```xs
-"500ms"                    -- string
-500ms                      -- Duration
+"500ms"           -- string
+500ms             -- Duration
 ```

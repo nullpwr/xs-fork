@@ -22,7 +22,7 @@
 - [Concurrency](./concurrency.md)
 - [Algebraic effects](./effects.md)
 - [Plugin system](./plugins.md)
-- [Universal literals](./universal_literals.md)
+- [Duration literals](./universal_literals.md)
 
 # Working with code
 

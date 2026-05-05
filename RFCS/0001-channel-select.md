@@ -20,6 +20,8 @@ The migrating-from-Go chapter already calls this out as the only thing
 Go has that we don't:
 
 ```xs
+import time
+
 loop {
     if let Some(x) = ch_a.try_recv() { handle_a(x); break }
     if let Some(x) = ch_b.try_recv() { handle_b(x); break }

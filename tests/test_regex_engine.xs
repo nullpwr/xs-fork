@@ -1,5 +1,7 @@
 -- test regex engine via the re module
 
+import re
+
 -- basic match
 assert_eq(re.test("hello", "hello world"), true)
 assert_eq(re.test("xyz", "hello world"), false)

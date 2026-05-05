@@ -33,6 +33,9 @@ for structs: use a thin C wrapper that takes/returns by-value.
 ## Platform paths
 
 ```xs
+import ffi
+import os
+
 let lib = ffi.load(
     if os.name == "Darwin"  { "libfoo.dylib" }
     elif os.name == "Windows" { "foo.dll" }
@@ -43,6 +46,8 @@ let lib = ffi.load(
 ## Lifecycle
 
 ```xs
+import ffi
+
 ffi.close(lib)              -- explicit unload
 ```
 

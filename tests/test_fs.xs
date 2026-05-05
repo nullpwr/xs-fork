@@ -1,6 +1,8 @@
 -- filesystem module tests
 import fs
 import os
+import time
+
 let is_windows = os.platform == "windows"
 
 -- write and read

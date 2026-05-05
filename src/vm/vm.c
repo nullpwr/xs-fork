@@ -1100,89 +1100,11 @@ static void vm_register_stdlib(VM *vm) {
     REG("signal",      vm_signal_fn);
     REG("derived",     vm_derived);
 #undef REG
-    {
-        extern Value *make_math_module(void);
-        extern Value *make_time_module(void);
-        extern Value *make_string_module(void);
-        extern Value *make_path_module(void);
-        extern Value *make_base64_module(void);
-        extern Value *make_hash_module(void);
-        extern Value *make_uuid_module(void);
-        extern Value *make_collections_module(void);
-        extern Value *make_random_module(void);
-        extern Value *make_json_module(void);
-        extern Value *make_log_module(void);
-        extern Value *make_fmt_module(void);
-        extern Value *make_csv_module(void);
-        extern Value *make_url_module(void);
-        extern Value *make_re_module(void);
-        extern Value *make_process_module(void);
-        extern Value *make_io_module(void);
-        extern Value *make_async_module(void);
-        extern Value *make_net_module(void);
-        extern Value *make_crypto_module(void);
-        extern Value *make_thread_module(void);
-        extern Value *make_buf_module(void);
-        extern Value *make_encode_module(void);
-        extern Value *make_db_module(void);
-        extern Value *make_cli_module(void);
-        extern Value *make_ffi_module(void);
-        extern Value *make_reflect_module(void);
-        extern Value *make_gc_module(void);
-        extern Value *make_reactive_module(void);
-        extern Value *make_os_module(Interp *ig);
-        extern Value *make_test_module(void);
-        extern Value *make_http_module(void);
-        extern Value *make_fs_module(void);
-        extern Value *make_toml_module(void);
-        extern Value *make_msgpack_module(void);
-        extern Value *make_promise_module(void);
-#define REG_MOD(name, fn) do { Value *_m = fn(); map_set(vm->globals, name, _m); value_decref(_m); } while(0)
-        REG_MOD("math",        make_math_module);
-        REG_MOD("time",        make_time_module);
-        REG_MOD("string",      make_string_module);
-        REG_MOD("path",        make_path_module);
-        REG_MOD("base64",      make_base64_module);
-        REG_MOD("hash",        make_hash_module);
-        REG_MOD("uuid",        make_uuid_module);
-        REG_MOD("collections", make_collections_module);
-        REG_MOD("random",      make_random_module);
-        REG_MOD("json",        make_json_module);
-        REG_MOD("log",         make_log_module);
-        REG_MOD("fmt",         make_fmt_module);
-        REG_MOD("csv",         make_csv_module);
-        REG_MOD("url",         make_url_module);
-        REG_MOD("re",          make_re_module);
-        REG_MOD("process",     make_process_module);
-        { Value *_m = make_io_module();
-          extern Value *native_io_read_json(Interp*,Value**,int);
-          extern Value *native_io_write_json(Interp*,Value**,int);
-          map_take(_m->map, "read_json", xs_native(native_io_read_json));
-          map_take(_m->map, "write_json", xs_native(native_io_write_json));
-          map_set(vm->globals, "io", _m); value_decref(_m); }
-        REG_MOD("async",       make_async_module);
-        REG_MOD("net",         make_net_module);
-        REG_MOD("crypto",      make_crypto_module);
-        REG_MOD("thread",      make_thread_module);
-        REG_MOD("buf",         make_buf_module);
-        REG_MOD("encode",      make_encode_module);
-        REG_MOD("db",          make_db_module);
-        REG_MOD("cli",         make_cli_module);
-        REG_MOD("ffi",         make_ffi_module);
-        REG_MOD("reflect",     make_reflect_module);
-        REG_MOD("gc",          make_gc_module);
-        REG_MOD("reactive",    make_reactive_module);
-        REG_MOD("test",        make_test_module);
-        REG_MOD("http",        make_http_module);
-        REG_MOD("fs",          make_fs_module);
-        REG_MOD("toml",        make_toml_module);
-        REG_MOD("msgpack",     make_msgpack_module);
-        REG_MOD("Promise",     make_promise_module);
-#undef REG_MOD
-        { Value *_m = make_os_module(NULL); map_set(vm->globals, "os", _m); value_decref(_m); }
-        { Value *cv = xs_float(3.14159265358979323846); map_set(vm->globals, "PI", cv); value_decref(cv); }
-        { Value *cv = xs_float(2.71828182845904523536); map_set(vm->globals, "E",  cv); value_decref(cv); }
-    }
+    /* Math constants stay auto-bound -- they're constants, not the
+       module they live in. The modules themselves (math, os, fs, etc.)
+       come in lazily via OP_IMPORT now. */
+    { Value *cv = xs_float(3.14159265358979323846); map_set(vm->globals, "PI", cv); value_decref(cv); }
+    { Value *cv = xs_float(2.71828182845904523536); map_set(vm->globals, "E",  cv); value_decref(cv); }
 }
 
 VM *vm_new(void) {
@@ -5889,6 +5811,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_IMPORT: {
             const char *mod_name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *mod = map_get(vm->globals, mod_name);
+            if (!mod) {
+                /* First-time import of a stdlib module: build it,
+                   bind it under its name in globals so subsequent
+                   imports / qualified accesses see the same value. */
+                Value *built = stdlib_load_module(NULL, mod_name);
+                if (built) {
+                    map_set(vm->globals, mod_name, built);
+                    mod = map_get(vm->globals, mod_name);
+                    value_decref(built);
+                }
+            }
             if (mod) {
                 PUSH(value_incref(mod));
             } else {
@@ -5901,6 +5834,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             const char *item_name = PROTO->chunk.consts[INSTR_A(instr)]->s;
             const char *mod_name  = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *mod = map_get(vm->globals, mod_name);
+            if (!mod) {
+                Value *built = stdlib_load_module(NULL, mod_name);
+                if (built) {
+                    map_set(vm->globals, mod_name, built);
+                    mod = map_get(vm->globals, mod_name);
+                    value_decref(built);
+                }
+            }
             if (mod && (VAL_TAG(mod) == XS_MAP || VAL_TAG(mod) == XS_MODULE)) {
                 Value *item = map_get(mod->map, item_name);
                 PUSH(item ? value_incref(item) : value_incref(XS_NULL_VAL));

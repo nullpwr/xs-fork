@@ -7,6 +7,11 @@ struct Interp;
 
 void stdlib_register(struct Interp *i);
 
+/* Lazy stdlib lookup. Returns a fresh module Value (caller owns the
+   ref), or NULL if the name isn't a stdlib module. Called by
+   NODE_IMPORT and OP_IMPORT after env / globals lookup misses. */
+Value *stdlib_load_module(struct Interp *i, const char *name);
+
 Value *call_value(struct Interp *i, Value *callee, Value **args, int argc,
                   const char *call_site);
 

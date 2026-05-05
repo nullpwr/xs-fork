@@ -90,6 +90,8 @@ handle job() {
 ## Async via effects
 
 ```xs
+import http
+
 effect Net {
     fn fetch(url: str) -> str
 }

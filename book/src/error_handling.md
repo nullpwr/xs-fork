@@ -11,6 +11,9 @@ Pick per call site. They compose cleanly.
 ## Try / catch
 
 ```xs
+import http
+import json
+
 try {
     let body = http.get("https://api.example.com").body
     println(json.parse(body))

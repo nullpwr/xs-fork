@@ -1,5 +1,7 @@
 -- msgpack encode/decode round-trip tests
 
+import msgpack
+
 -- null round-trip
 let encoded = msgpack.encode(null)
 assert(len(encoded) > 0, "encoded null should have bytes")

@@ -1347,101 +1347,13 @@ extern Value *builtin_derived(Interp *, Value **, int);
     interp_define_native(i, "Some", builtin_some);
     interp_define_native(i, "None", builtin_none_fn);
 
-    /* Modules */
-    Value *math_mod = make_math_module();
-    env_define(i->globals, "math", math_mod, 1);
-    value_decref(math_mod);
-
-    Value *time_mod = make_time_module();
-    env_define(i->globals, "time", time_mod, 1);
-    value_decref(time_mod);
-
-    Value *io_mod = make_io_module();
-    /* read_json / write_json live in builtins_json.c so they can reuse the
-       json helpers; patched onto the io module here. */
-    extern Value *native_io_read_json(Interp *, Value **, int);
-    extern Value *native_io_write_json(Interp *, Value **, int);
-    map_take(io_mod->map, "read_json", xs_native(native_io_read_json));
-    map_take(io_mod->map, "write_json", xs_native(native_io_write_json));
-    env_define(i->globals, "io", io_mod, 1);
-    value_decref(io_mod);
-
-    Value *string_mod = make_string_module();
-    env_define(i->globals, "string", string_mod, 1);
-    value_decref(string_mod);
-
-    Value *path_mod = make_path_module();
-    env_define(i->globals, "path", path_mod, 1);
-    value_decref(path_mod);
-
-    Value *base64_mod = make_base64_module();
-    env_define(i->globals, "base64", base64_mod, 1);
-    value_decref(base64_mod);
-
-    Value *hash_mod = make_hash_module();
-    env_define(i->globals, "hash", hash_mod, 1);
-    value_decref(hash_mod);
-
-    Value *uuid_mod = make_uuid_module();
-    env_define(i->globals, "uuid", uuid_mod, 1);
-    value_decref(uuid_mod);
-
-    Value *collections_mod = make_collections_module();
-    env_define(i->globals, "collections", collections_mod, 1);
-    value_decref(collections_mod);
-
-    Value *process_mod = make_process_module();
-    env_define(i->globals, "process", process_mod, 1);
-    value_decref(process_mod);
-
-    Value *random_mod = make_random_module();
-    env_define(i->globals, "random", random_mod, 1);
-    value_decref(random_mod);
+    /* Stdlib modules used to be auto-bound on every Interp init; now
+       they require an explicit `import math` / `import os` / etc. The
+       lookup table for lazy materialisation lives in stdlib_load_module
+       at the bottom of this file. The one bit of init that still has
+       to happen at startup is the random seed, since that's
+       process-wide rather than per-module. */
     srand((unsigned)time(NULL));
-
-    Value *os_mod = make_os_module(i);
-    env_define(i->globals, "os", os_mod, 1);
-    value_decref(os_mod);
-
-    Value *json_mod = make_json_module();
-    env_define(i->globals, "json", json_mod, 1);
-    value_decref(json_mod);
-
-    Value *log_mod = make_log_module();
-    env_define(i->globals, "log", log_mod, 1);
-    value_decref(log_mod);
-
-    Value *fmt_mod = make_fmt_module();
-    env_define(i->globals, "fmt", fmt_mod, 1);
-    value_decref(fmt_mod);
-
-    Value *test_mod = make_test_module();
-    env_define(i->globals, "test", test_mod, 1);
-    value_decref(test_mod);
-
-    Value *tracing_mod = make_tracing_module();
-    env_define(i->globals, "tracing", tracing_mod, 1);
-    value_decref(tracing_mod);
-
-    Value *csv_mod = make_csv_module();
-    env_define(i->globals, "csv", csv_mod, 1);
-    value_decref(csv_mod);
-
-    Value *url_mod = make_url_module();
-    env_define(i->globals, "url", url_mod, 1);
-    value_decref(url_mod);
-
-    Value *re_mod = make_re_module();
-    env_define(i->globals, "re", re_mod, 1);
-    value_decref(re_mod);
-
-    Value *msgpack_mod = make_msgpack_module();
-    env_define(i->globals, "msgpack", msgpack_mod, 1);
-    value_decref(msgpack_mod);
-
-    Value *promise_mod = make_promise_module();
-    env_define(i->globals, "Promise", promise_mod, 1);
-    value_decref(promise_mod);
 
     /* Constants */
     {
@@ -1468,65 +1380,77 @@ extern Value *builtin_derived(Interp *, Value **, int);
     interp_define_native(i, "round",builtin_round);
 
     /* new stdlib modules (12) */
-    Value *async_mod = make_async_module();
-    env_define(i->globals, "async", async_mod, 1);
-    value_decref(async_mod);
+    /* Modules also gated on import; see stdlib_load_module below. */
+}
 
-    Value *net_mod = make_net_module();
-    env_define(i->globals, "net", net_mod, 1);
-    value_decref(net_mod);
+/* Lazy stdlib materialisation. The import statement (NODE_IMPORT in
+   the interp, OP_IMPORT in the VM) calls in here when env_get
+   doesn't find the name -- we either build the module fresh and
+   hand it back, or return null so the caller can fall through to
+   plugin / file-based modules. */
+Value *stdlib_load_module(Interp *i, const char *name) {
+    if (!name) return NULL;
 
-    Value *crypto_mod = make_crypto_module();
-    env_define(i->globals, "crypto", crypto_mod, 1);
-    value_decref(crypto_mod);
+    /* The io module patches read_json / write_json onto its map
+       after construction so it can borrow json's parser. */
+    if (strcmp(name, "io") == 0) {
+        Value *m = make_io_module();
+        extern Value *native_io_read_json(Interp *, Value **, int);
+        extern Value *native_io_write_json(Interp *, Value **, int);
+        map_take(m->map, "read_json",  xs_native(native_io_read_json));
+        map_take(m->map, "write_json", xs_native(native_io_write_json));
+        return m;
+    }
+    /* os reads g_xs_argc / g_xs_argv but doesn't actually need the
+       interp pointer passed in; we forward it so the existing
+       signature stays untouched. */
+    if (strcmp(name, "os") == 0) return make_os_module(i);
 
-    Value *thread_mod = make_thread_module();
-    env_define(i->globals, "thread", thread_mod, 1);
-    value_decref(thread_mod);
-
-    Value *buf_mod = make_buf_module();
-    env_define(i->globals, "buf", buf_mod, 1);
-    value_decref(buf_mod);
-
-    Value *encode_mod = make_encode_module();
-    env_define(i->globals, "encode", encode_mod, 1);
-    value_decref(encode_mod);
-
-    Value *db_mod = make_db_module();
-    env_define(i->globals, "db", db_mod, 1);
-    value_decref(db_mod);
-
-    Value *cli_mod = make_cli_module();
-    env_define(i->globals, "cli", cli_mod, 1);
-    value_decref(cli_mod);
-
-    Value *ffi_mod = make_ffi_module();
-    env_define(i->globals, "ffi", ffi_mod, 1);
-    value_decref(ffi_mod);
-
-    Value *reflect_mod = make_reflect_module();
-    env_define(i->globals, "reflect", reflect_mod, 1);
-    value_decref(reflect_mod);
-
-    Value *gc_mod = make_gc_module();
-    env_define(i->globals, "gc", gc_mod, 1);
-    value_decref(gc_mod);
-
-    Value *reactive_mod = make_reactive_module();
-    env_define(i->globals, "reactive", reactive_mod, 1);
-    value_decref(reactive_mod);
-
-    Value *toml_mod = make_toml_module();
-    env_define(i->globals, "toml", toml_mod, 1);
-    value_decref(toml_mod);
-
-    Value *http_mod = make_http_module();
-    env_define(i->globals, "http", http_mod, 1);
-    value_decref(http_mod);
-
-    Value *fs_mod = make_fs_module();
-    env_define(i->globals, "fs", fs_mod, 1);
-    value_decref(fs_mod);
+    /* Plain factories: name -> constructor. The list mirrors the
+       module set that stdlib_register / vm globals used to seed. */
+    struct StdMod { const char *n; Value *(*make)(void); };
+    static const struct StdMod stdmods[] = {
+        { "math",        make_math_module },
+        { "time",        make_time_module },
+        { "string",      make_string_module },
+        { "path",        make_path_module },
+        { "base64",      make_base64_module },
+        { "hash",        make_hash_module },
+        { "uuid",        make_uuid_module },
+        { "collections", make_collections_module },
+        { "process",     make_process_module },
+        { "random",      make_random_module },
+        { "json",        make_json_module },
+        { "log",         make_log_module },
+        { "fmt",         make_fmt_module },
+        { "test",        make_test_module },
+        { "tracing",     make_tracing_module },
+        { "csv",         make_csv_module },
+        { "url",         make_url_module },
+        { "re",          make_re_module },
+        { "msgpack",     make_msgpack_module },
+        { "Promise",     make_promise_module },
+        { "async",       make_async_module },
+        { "net",         make_net_module },
+        { "crypto",      make_crypto_module },
+        { "thread",      make_thread_module },
+        { "buf",         make_buf_module },
+        { "encode",      make_encode_module },
+        { "db",          make_db_module },
+        { "cli",         make_cli_module },
+        { "ffi",         make_ffi_module },
+        { "reflect",     make_reflect_module },
+        { "gc",          make_gc_module },
+        { "reactive",    make_reactive_module },
+        { "toml",        make_toml_module },
+        { "http",        make_http_module },
+        { "fs",          make_fs_module },
+        { NULL,          NULL }
+    };
+    for (const struct StdMod *m = stdmods; m->n; m++) {
+        if (strcmp(m->n, name) == 0) return m->make();
+    }
+    return NULL;
 }
 
 /* ═══════════════════════════════════════════════════════════════

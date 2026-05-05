@@ -192,25 +192,29 @@ for f in tests/test_*.xs; do run_one "$f"; done
 for f in tests/adversarial/test_*.xs; do run_one "$f"; done
 
 # 2. examples (sanity: run each with default backend, no diff)
-ex_pass=0
-ex_fail=0
-for f in examples/*.xs; do
-    name=$(basename "$f")
-    [ "$name" = "check_demo.xs" ] && continue
-    out=$(./xs "$f" 2>&1)
-    if [ $? -ne 0 ]; then
-        ex_fail=$((ex_fail + 1))
-        fails="$fails\n  FAIL: examples/$name"
-        echo "  FAIL  examples/$name"
-        echo "$out" | grep -E "assert|error" | head -2 | sed 's/^/        /'
+# The examples/ dir is being rebuilt; skip the loop when it doesn't
+# exist so the language tests above still run cleanly.
+if [ -d examples ] && ls examples/*.xs >/dev/null 2>&1; then
+    ex_pass=0
+    ex_fail=0
+    for f in examples/*.xs; do
+        name=$(basename "$f")
+        [ "$name" = "check_demo.xs" ] && continue
+        out=$(./xs "$f" 2>&1)
+        if [ $? -ne 0 ]; then
+            ex_fail=$((ex_fail + 1))
+            fails="$fails\n  FAIL: examples/$name"
+            echo "  FAIL  examples/$name"
+            echo "$out" | grep -E "assert|error" | head -2 | sed 's/^/        /'
+        else
+            ex_pass=$((ex_pass + 1))
+        fi
+    done
+    if [ $ex_fail -eq 0 ]; then
+        pass=$((pass + 1)); echo "  ok    examples ($ex_pass files)"
     else
-        ex_pass=$((ex_pass + 1))
+        fail=$((fail + ex_fail))
     fi
-done
-if [ $ex_fail -eq 0 ]; then
-    pass=$((pass + 1)); echo "  ok    examples ($ex_pass files)"
-else
-    fail=$((fail + ex_fail))
 fi
 
 # 3. CLI flag tests

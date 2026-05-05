@@ -51,6 +51,8 @@ backends. Setting `LAYERS="2 R"` runs only specified layers.
 ## Property tests
 
 ```xs
+import test
+
 test.property("addition is commutative",
     test.gen.int(),
     test.gen.int(),
@@ -63,6 +65,8 @@ smallest failing case and prints the seed for reproducibility.
 ## Golden / snapshot tests
 
 ```xs
+import test
+
 test.snapshot("query plan", explain(query))
 ```
 

@@ -9,6 +9,8 @@
 -- connect failure, TLS failure, and bad URL. Try/catch recovers
 -- cleanly; uncaught errors print the message and exit non-zero.
 
+import http
+
 -- bad URL throws
 var caught = false
 try {

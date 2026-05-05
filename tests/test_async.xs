@@ -1,5 +1,7 @@
 -- async runtime / promise tests
 
+import Promise
+
 -- resolved promise
 let p = Promise.resolve(42)
 assert_eq(Promise.state(p), "resolved")

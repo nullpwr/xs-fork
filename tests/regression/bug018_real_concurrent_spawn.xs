@@ -3,6 +3,9 @@
 -- not block. Fix: pthread-backed spawn with a recursive GIL, plus a
 -- channel implementation backed by mutex+condvar. recv blocks until
 -- a sender wakes it; sleep releases the GIL so peer threads run.
+
+import time
+
 let ch = channel()
 let producer = spawn {
     var i = 0

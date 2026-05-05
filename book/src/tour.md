@@ -110,6 +110,9 @@ impl Area for Shape {
 XS supports both `try`/`catch` *and* algebraic effects:
 
 ```xs
+import http
+import json
+
 try {
     let body = http.get("https://example.com").body
     println(json.parse(body))

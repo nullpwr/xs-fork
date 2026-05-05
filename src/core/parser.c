@@ -3728,7 +3728,14 @@ static Node *parse_import(Parser *p) {
     char **items = NULL;
     int    nitems = 0;
 
-    if (from_style || pp_check(p, TK_IMPORT)) {
+    /* `from x import { ... }` is one form; the other historical form
+       was `import x import { y, z }` (two-keyword), which we still
+       accept but only when an `{` actually follows. Without the
+       LBRACE check we'd swallow the next statement's `import`
+       keyword (e.g. `import math\nimport time` was being parsed as
+       one import with `time` left as a stray expression statement). */
+    if (from_style ||
+        (pp_check(p, TK_IMPORT) && pp_peek(p, 1)->kind == TK_LBRACE)) {
         if (from_style) pp_match(p, TK_IMPORT);
         else            pp_advance(p); /* consume 'import' */
         if (pp_check(p, TK_LBRACE)) {

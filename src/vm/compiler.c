@@ -2180,9 +2180,15 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             return;
         }
         char *modname = n->import.path[0];
+        /* Use OP_IMPORT (rather than the plain global-load it used to
+           be) so the runtime can lazily materialise stdlib modules.
+           The VM falls back to the globals map for names that aren't
+           in the stdlib registry, which is what user-defined and
+           plugin-injected modules rely on. */
+        int name_k = emit_global_name(c, modname);
 
         if (n->import.nitems > 0) {
-            compile_name_load(c, modname);
+            emit_a(c, OP_IMPORT, name_k);
             int mod_slot = local_add_hidden(c);
             emit_a(c, OP_STORE_LOCAL, mod_slot);
             for (int ii = 0; ii < n->import.nitems; ii++) {
@@ -2192,10 +2198,10 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
                 compile_name_store(c, n->import.items[ii]);
             }
         } else if (n->import.alias) {
-            compile_name_load(c, modname);
+            emit_a(c, OP_IMPORT, name_k);
             compile_name_store(c, n->import.alias);
         } else {
-            compile_name_load(c, modname);
+            emit_a(c, OP_IMPORT, name_k);
             int slot = local_add(c->current, modname);
             emit_a(c, OP_STORE_LOCAL, slot);
         }

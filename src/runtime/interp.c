@@ -3,6 +3,7 @@
 #include "core/xs_compat.h"
 #include "runtime/interp.h"
 #include "runtime/error.h"
+#include "runtime/builtins.h"
 #include "core/lexer.h"
 #include "core/parser.h"
 #include "core/xs_bigint.h"
@@ -9237,6 +9238,14 @@ void interp_exec(Interp *i, Node *stmt) {
             }
         }
 
+        if (!mod) {
+            mod = stdlib_load_module(i, modname);
+            if (mod) {
+                env_define(i->globals, modname, mod, 1);
+                value_decref(mod);
+                mod = env_get(i->env, modname);
+            }
+        }
         if (!mod) {
             mod = try_load_xs_module(i, modname);
             if (mod) {

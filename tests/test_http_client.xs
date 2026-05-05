@@ -2,6 +2,8 @@
 -- routing/middleware/static-file support but no XS bindings yet, so this
 -- only checks the client methods are reachable)
 
+import http
+
 assert(http != null, "http module should exist")
 
 assert(http.get != null, "http.get should exist")

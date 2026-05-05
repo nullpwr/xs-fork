@@ -54,6 +54,8 @@ Sinks receive these maps and decide what to do.
 ## Spans nest automatically
 
 ```xs
+import tracing
+
 tracing.with_span("outer", || {
     tracing.with_span("inner", || {
         tracing.info("deep")
@@ -68,6 +70,10 @@ preserves the parent-child relationship for trace UIs.
 ## Custom sinks
 
 ```xs
+import fs
+import json
+import tracing
+
 tracing.add_sink(|rec| {
     if rec.get("level") == "error" {
         send_to_pagerduty(rec)

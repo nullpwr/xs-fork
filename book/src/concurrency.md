@@ -34,6 +34,9 @@ hot loops contend on the GIL today.
 ## Async / await
 
 ```xs
+import http
+import json
+
 async fn fetch_user(id) {
     let resp = await http.get("/users/{id}")
     return json.parse(resp.body)

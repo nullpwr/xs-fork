@@ -1270,6 +1270,9 @@ Tags are useful for wrapping common patterns like retry logic, timing, error sup
 
 ```xs
 -- retry a block up to n times
+
+import http
+
 tag retry(n) {
     var attempts = 0
     loop {
