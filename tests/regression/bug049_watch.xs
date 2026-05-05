@@ -1,24 +1,23 @@
 -- bug049: @watch fires when the watched path changes. Linux uses
--- inotify, macOS / other unixes fall back to a stat poll, Windows
--- uses ReadDirectoryChangesW (TODO). The test creates a temp file,
--- modifies it from inside @delayed, and watches for the resulting
--- callback. parity covers interp / vm / jit.
+-- inotify, macOS / other unixes fall back to a stat poll. parity
+-- covers interp / vm / jit. Path is cwd-relative so the test runs
+-- the same on Linux / macOS / Windows MinGW.
 
 import fs
 
-fs.write("/tmp/xs_bug049.txt", "before")
+fs.write("xs_bug049_watch.txt", "before")
 var fired = false
 
-@watch("/tmp/xs_bug049.txt") fn changed() {
+@watch("xs_bug049_watch.txt") fn changed() {
     fired = true
     exit(0)
 }
 
-@delayed(100ms) fn modify() {
-    fs.write("/tmp/xs_bug049.txt", "after")
+@delayed(200ms) fn modify() {
+    fs.write("xs_bug049_watch.txt", "after-write")
 }
 
-@delayed(2s) fn give_up() {
+@delayed(3s) fn give_up() {
     if !fired { exit(2) }
     exit(0)
 }

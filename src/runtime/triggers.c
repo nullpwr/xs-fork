@@ -354,13 +354,12 @@ static void watch_snapshot(const char *path, long long *mtime_ns, long long *sz)
         *sz = -1;
         return;
     }
-#if defined(__APPLE__)
-    *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL + (long long)st.st_mtimespec.tv_nsec;
-#elif defined(__linux__) || defined(_POSIX_VERSION)
-    *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL + (long long)st.st_mtim.tv_nsec;
-#else
+    /* Use st_mtime (second resolution) for portability. POSIX 2008's
+       st_mtim is hidden behind _POSIX_C_SOURCE on darwin, and the
+       non-standard st_mtimespec / st_mtim variants disagree across
+       libc / SDK / build flag combinations. The watcher only needs
+       to notice that a file moved, so second resolution is enough. */
     *mtime_ns = (long long)st.st_mtime * 1000000000LL;
-#endif
     *sz = (long long)st.st_size;
 }
 
