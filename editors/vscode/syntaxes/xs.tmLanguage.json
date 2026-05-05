@@ -4,6 +4,7 @@
   "scopeName": "source.xs",
   "patterns": [
     { "include": "#comments" },
+    { "include": "#decorators" },
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#keywords" },
@@ -15,6 +16,18 @@
     { "include": "#operators" }
   ],
   "repository": {
+    "decorators": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.xs",
+          "match": "@\\[\\s*macro\\s*\\]"
+        },
+        {
+          "name": "entity.name.tag.xs",
+          "match": "@(on_start|on_exit|on_signal|on_panic|every|cron|delayed|watch|bench|example|export|once|pure|test|deprecated|scoped)\\b"
+        }
+      ]
+    },
     "comments": {
       "patterns": [
         {

@@ -137,6 +137,7 @@ module.exports = grammar({
     // ---- functions -------------------------------------------------------
 
     function_declaration: $ => seq(
+      repeat($.decorator),
       choice('fn', 'fn*'),
       field('name', $.identifier),
       optional($.generic_params),
@@ -144,6 +145,19 @@ module.exports = grammar({
       optional(seq('->', field('return_type', $._type))),
       optional($.where_clause),
       field('body', choice($.block, seq('=', $._expression))),
+    ),
+
+    decorator: $ => choice(
+      seq('@', '[', 'macro', ']'),
+      seq(
+        '@',
+        field('name', $.identifier),
+        optional(seq(
+          '(',
+          optional(commaSep1($._expression)),
+          ')',
+        )),
+      ),
     ),
 
     parameter_list: $ => seq(

@@ -29,6 +29,10 @@
 (line_comment)  @comment
 (block_comment) @comment
 
+; decorators
+(decorator) @attribute
+(decorator name: (identifier) @attribute)
+
 ; types
 (primitive_type)  @type.builtin
 (type_identifier) @type

@@ -131,6 +131,7 @@ for the backend matrix.
 - Tagged blocks (`tag`) for user-defined control structures
 - Inline C blocks for performance-critical code (`inline c { ... }`)
 - First-class `Duration` type with native suffixes (`5s`, `200ms`, `1ns`, `2m30s`)
+- Decorators on fn declarations: `@on_start`, `@on_exit`, `@on_signal`, `@on_panic`, `@every(d)`, `@cron(...)`, `@delayed(d)`, `@watch(path)`, `@bench`, `@example`, `@export(name)`, `@once`
 - Temporal primitives: `every`, `after`, `timeout`, `debounce` for scheduling
 - Algebraic effects (`effect`/`perform`/`handle`/`resume`)
 - All the concurrency: spawn, async/await, actors, channels, nurseries

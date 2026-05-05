@@ -158,6 +158,24 @@ let warmup = 2m30s                         -- compound
 
 Numbers with `ns` / `us` / `ms` / `s` / `m` / `h` / `d` suffixes are first-class `Duration` values backed by an int64 nanosecond count. Arithmetic, comparisons, and the `.ns` / `.s` / `.ms` accessors all work; `println(2s + 500ms)` prints `2.5s`.
 
+## Decorators
+
+```xs
+@on_start fn boot()        { ... }
+@every(1s) fn tick()       { ... }
+@cron("0 * * * *") fn hourly() { ... }
+@delayed(500ms) fn warmup() { ... }
+@watch("./config") fn reload() { ... }
+@on_signal("INT") fn graceful() { ... }
+@export("publicName") fn local_name() { ... }
+@once @every(5s) fn one_shot() { ... }
+```
+
+Decorators answer "what triggers this function?" The runtime keeps
+the process alive while any persistent trigger (`@every`, `@cron`,
+`@watch`, `@on_signal`) is registered. `@once` collapses repeating
+triggers to a single fire.
+
 ## Modules
 
 ```xs

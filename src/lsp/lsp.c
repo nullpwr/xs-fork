@@ -56,6 +56,19 @@ static const char *xs_stdlib_modules[] = {
     NULL
 };
 
+/* Function-level decorators recognised by the parser. Surface them
+   in completion so the IDE can offer @on_start / @every / etc. with
+   the same affordances as keywords. */
+static const char *xs_decorators[] = {
+    "on_start", "on_exit", "on_signal", "on_panic",
+    "every", "cron", "delayed",
+    "watch",
+    "bench", "example",
+    "export", "once",
+    "pure", "test", "deprecated", "scoped",
+    NULL
+};
+
 
 static const char *xs_string_methods[] = {
     "len", "upper", "lower", "trim", "contains", "starts_with",
@@ -1280,6 +1293,14 @@ static void lsp_handle_completions(int id, const char *json) {
             first = 0;
             off += snprintf(buf + off, bufsz - (size_t)off,
                 "{\"label\":\"%s\",\"kind\":9,\"detail\":\"module\"}", xs_stdlib_modules[i]);
+        }
+
+        /* Decorators surfaced as @-prefixed labels (kind 14 = Keyword). */
+        for (int i = 0; xs_decorators[i]; i++) {
+            if (!first) off += snprintf(buf + off, bufsz - (size_t)off, ",");
+            first = 0;
+            off += snprintf(buf + off, bufsz - (size_t)off,
+                "{\"label\":\"@%s\",\"kind\":14,\"detail\":\"decorator\"}", xs_decorators[i]);
         }
 
         /* Document identifiers (kind 6 = Variable) */

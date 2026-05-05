@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.1.0
+
+Decorators land. A function declaration can now carry one trigger, an
+optional @once, and any number of metadata markers, and the runtime
+walks the resulting registry from a single event loop.
+
+- `@on_start` / `@on_exit` / `@on_signal(name)` / `@on_panic` for
+  lifecycle. on_start fires once after the top-level settles;
+  on_exit and on_panic fire on the way out; on_signal supports
+  `"INT"` and `"TERM"` portably plus `"HUP"` / `"USR1"` / `"USR2"` on
+  unix.
+- `@every(d)` / `@cron(spec)` / `@delayed(d)` for scheduling.
+  Drift-free CLOCK_MONOTONIC ticks. The cron spec is the standard
+  five-field POSIX form with `*` / `*/N` / `a-b` / comma lists.
+- `@watch(path)` for filesystem changes. Linux uses inotify; other
+  unixes fall back to a stat-poll against a cached snapshot.
+- `@bench` / `@example` for discovery. They appear in the runtime
+  registry so `xs bench` / `xs doc` can find them.
+- `@export("name")` aliases the fn under a public name; sema sees
+  the alias too so callers don't trip the undefined-name check.
+- `@once` collapses with any repeating trigger and quiesces it after
+  the first fire.
+
+Time literals (`5s`, `100ms`, `1ns`, `2us`, `1m`, `1h`, `1d`) are
+now native: no `use literals duration` pragma. They construct a
+first-class `Duration` type backed by an int64 nanosecond count, so
+arithmetic and comparisons work and `println` prints `2.5s` rather
+than `2500`. The other domain literal families (color, date, size,
+angle) were dropped to keep the Duration design clean.
+
+The bytecode VM compiler emits a `__register_decorator` call after
+each closure binds, so --vm and --jit see the same trigger registry
+the interpreter does. The semantic resolver picks up `@export`
+aliases as top-level symbols. Editor extensions (vscode, neovim,
+helix, zed, jetbrains via tmlanguage, plus the tree-sitter grammar)
+all carry decorator highlighting; the LSP surfaces the decorators
+in completion. ~10 new regression tests under `tests/regression/`
+cover the surface across interp / vm / jit.
+
 ## 1.0.0
 
 First production release. The Tier 1 surface from `POLICY.md` is now

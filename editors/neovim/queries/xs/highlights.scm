@@ -26,6 +26,9 @@
 (line_comment)  @comment
 (block_comment) @comment
 
+(decorator) @attribute
+(decorator name: (identifier) @attribute)
+
 (primitive_type)  @type.builtin
 (type_identifier) @type
 

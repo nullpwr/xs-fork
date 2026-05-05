@@ -3324,6 +3324,53 @@ fn on_input(text) {
 
 ---
 
+## Decorators
+
+A function declaration can carry one or more decorators that answer
+"what triggers this function?" Most functions have none, some have
+one trigger plus an optional `@once`. Five of them have an evaluated
+argument (`@every(1s)`, `@cron("* * * * *")`, `@delayed(500ms)`,
+`@on_signal("INT")`, `@watch("./config")`, `@export("name")`); the
+rest take none.
+
+```xs
+@on_start fn boot() { setup_things() }
+@on_exit  fn cleanup() { close_handles() }
+
+@every(1s) fn tick() { metrics.flush() }
+@cron("0 * * * *") fn hourly() { rotate_logs() }
+@delayed(500ms) fn warmup() { prefetch() }
+
+@watch("./config.toml") fn config_changed() { config.reload() }
+
+@on_signal("INT") fn graceful() { state = "shutting_down" }
+@on_panic        fn record() { telemetry.flush() }
+
+@bench   fn bench_sort() { ... }
+@example fn example_basic_use() { ... }
+
+@export("publicName") fn local_name() { ... }
+@once @every(5s)      fn one_shot() { ... }
+```
+
+Lifecycle (`@on_start`, `@on_exit`, `@on_panic`) and signal
+(`@on_signal`) decorators don't take parameters on the decorated fn.
+Schedule decorators (`@every`, `@cron`, `@delayed`, `@watch`) don't
+either; they fire without a caller. `@bench` and `@example` are
+allowed to take parameters since the runner passes a harness.
+
+`@once` only composes with a repeating trigger (`@every`, `@cron`,
+`@on_signal`, `@watch`); attaching it to a one-shot decorator is a
+parse error.
+
+The runtime stays alive while any persistent trigger is registered
+(`@every`, `@cron`, `@on_signal`, `@watch`). Once all of them have
+fired or been quiesced by `@once`, the process exits naturally.
+`xs.exit(n)` forces an immediate shutdown and still fires `@on_exit`
+handlers.
+
+---
+
 ## Execution Backends
 
 ```bash

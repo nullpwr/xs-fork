@@ -40,6 +40,7 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Higher-rank `forall<T>` types | works |
 | `@scoped` annotations + escape analysis | works |
 | `@[macro]` procedural-macro markers | works |
+| Decorators (`@on_start`/`@every`/`@cron`/`@watch`/`@export`/`@once`/`@bench`/...) | works |
 | Algebraic effects (effect/perform/handle/resume) | works |
 | Concurrency (spawn, async/await, channels, actors, nurseries) | works |
 | Error handling (try/catch/finally, throw, defer) | works |
