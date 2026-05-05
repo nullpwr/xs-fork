@@ -22,3 +22,5 @@
 @once @every(5s) fn once_only() { let _ = 1 }
 
 println("bug045: ok")
+-- avoid entering the event loop: this is a parse / register test only.
+exit(0)

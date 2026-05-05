@@ -1122,6 +1122,38 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
         if (local_slot >= 0) emit_a(c, OP_STORE_LOCAL, local_slot);
         else                 compile_name_store(c, fname);
+        /* Decorators: emit a runtime registration call per non-@once
+           decorator so the registry sees the closure with its evaluated
+           args. The interp registers in eval; the VM does it via these
+           emitted calls. */
+        if (!nested && fname && n->fn_decl.n_decorators > 0) {
+            int has_once = 0;
+            for (int dk = 0; dk < n->fn_decl.n_decorators; dk++)
+                if (strcmp(n->fn_decl.decorators[dk].name, "once") == 0) has_once = 1;
+            for (int dk = 0; dk < n->fn_decl.n_decorators; dk++) {
+                Decorator *d = &n->fn_decl.decorators[dk];
+                if (strcmp(d->name, "once") == 0) continue;
+                compile_name_load(c, "__register_decorator");
+                compile_name_load(c, fname);
+                emit_const(c, xs_int(has_once ? 1 : 0));
+                emit_const(c, xs_str(d->name));
+                for (int aa = 0; aa < d->n_args; aa++)
+                    compile_node(c, d->args[aa], 1);
+                int argc = 3 + d->n_args;
+                emit(c, MAKE_B(OP_CALL, 0, 0, (uint8_t)argc));
+                emit(c, MAKE_A(OP_POP, 0, 0));
+                /* @export("alias") additionally binds the fn into
+                   globals under `alias` so callers can find it by
+                   the public name without `import`. */
+                if (strcmp(d->name, "export") == 0 && d->n_args >= 1) {
+                    Node *aa = d->args[0];
+                    if (aa && VAL_TAG(aa) == NODE_LIT_STRING && aa->lit_string.sval) {
+                        compile_name_load(c, fname);
+                        compile_name_store(c, aa->lit_string.sval);
+                    }
+                }
+            }
+        }
         return;
     }
 

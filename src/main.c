@@ -23,6 +23,7 @@
 #include "runtime/interp.h"
 #include "runtime/error.h"
 #include "runtime/concurrent.h"
+#include "runtime/triggers.h"
 #include "semantic/sema.h"
 #include "semantic/cache.h"
 #include "types/inference.h"
@@ -2479,6 +2480,9 @@ run_file:;
                 if (fn) {
                     VM *vm = vm_new();
                     int jit_rc = vm_run_with(vm, proto, fn);
+                    trigger_fire_on_start(NULL);
+                    trigger_run_event_loop(NULL);
+                    trigger_fire_on_exit(NULL);
                     vm_drain_tasks();
                     vm_free(vm);
                     jit_free(jit);
@@ -2499,6 +2503,9 @@ run_file:;
 #endif
         VM *vm = vm_new();
         int rc = vm_run(vm, proto);
+        trigger_fire_on_start(NULL);
+        trigger_run_event_loop(NULL);
+        trigger_fire_on_exit(NULL);
         /* Drain unjoined spawn workers before freeing the parent VM,
            otherwise their borrowed globals pointer becomes dangling. */
         vm_drain_tasks();

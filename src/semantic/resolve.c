@@ -142,6 +142,18 @@ static void collect_toplevel(Node *prog, SymTab *st) {
             case NODE_FN_DECL:
                 sym_define(st, s->fn_decl.name ? s->fn_decl.name : "",
                            SYM_FN, NULL, s, 0);
+                /* @export("alias") binds the fn under `alias` too;
+                   register the alias so callers don't trip T0002. */
+                for (int dk = 0; dk < s->fn_decl.n_decorators; dk++) {
+                    Decorator *d = &s->fn_decl.decorators[dk];
+                    if (d->name && strcmp(d->name, "export") == 0 &&
+                        d->n_args >= 1 && d->args[0] &&
+                        VAL_TAG(d->args[0]) == NODE_LIT_STRING &&
+                        d->args[0]->lit_string.sval) {
+                        sym_define(st, d->args[0]->lit_string.sval,
+                                   SYM_FN, NULL, s, 0);
+                    }
+                }
                 break;
             case NODE_TAG_DECL:
                 sym_define(st, s->tag_decl.name ? s->tag_decl.name : "",

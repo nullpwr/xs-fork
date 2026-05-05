@@ -112,7 +112,8 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/stdlib.c \
                src/runtime/scheduler.c \
                src/runtime/event_loop.c \
-               src/runtime/concurrent.c
+               src/runtime/concurrent.c \
+               src/runtime/triggers.c
 
 LINT_SRCS = src/lint/lint.c
 

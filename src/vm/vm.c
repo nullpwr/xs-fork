@@ -6,6 +6,7 @@
 #include "core/limits.h"
 #include "runtime/builtins.h"
 #include "runtime/error.h"
+#include "runtime/triggers.h"
 #include "optimizer/inline_cache.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1007,6 +1008,9 @@ static void vm_register_stdlib(VM *vm) {
     REG("assert",     vm_assert);
     REG("assert_eq",  vm_assert_eq);
     REG("panic",      vm_panic);
+    REG("__trigger_registry_size", trigger_native_size);
+    REG("__trigger_registry_name", trigger_native_name);
+    REG("__register_decorator",    trigger_native_register);
     REG("exit",    vm_exit_fn);
     REG("input",   vm_input);
     REG("contains", vm_contains);

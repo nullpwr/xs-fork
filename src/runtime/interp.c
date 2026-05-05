@@ -26,6 +26,7 @@
 #include "optimizer/inline_cache.h"
 #include "runtime/async.h"
 #include "runtime/concurrent.h"
+#include "runtime/triggers.h"
 #ifdef XSC_ENABLE_VM
 #include "vm/vm.h"
 #endif
@@ -325,6 +326,32 @@ static void hoist_functions(Interp *i, NodeList *stmts);
 static Value *EVAL(Interp *i, Node *n) {
     if (!n || i->cf.signal) return value_incref(XS_NULL_VAL);
     return interp_eval(i, n);
+}
+
+/* Walk a fn_decl's decorator list, evaluate each arg in the current
+   env, and append one entry per decorator to the trigger registry.
+   @once is captured as a flag on whichever real trigger sits next to
+   it instead of becoming its own entry. @export(name) additionally
+   binds the fn into globals under the alias so other modules can
+   resolve it by the public name. */
+static void register_fn_decl_triggers(Interp *i, Node *stmt, Value *fn_v) {
+    int nd = stmt->fn_decl.n_decorators;
+    if (nd == 0) return;
+    int has_once = 0;
+    for (int k = 0; k < nd; k++)
+        if (strcmp(stmt->fn_decl.decorators[k].name, "once") == 0) has_once = 1;
+    for (int k = 0; k < nd; k++) {
+        Decorator *d = &stmt->fn_decl.decorators[k];
+        if (strcmp(d->name, "once") == 0) continue;
+        Value **args = d->n_args ? xs_calloc(d->n_args, sizeof(Value*)) : NULL;
+        for (int a = 0; a < d->n_args; a++)
+            args[a] = EVAL(i, d->args[a]);
+        trigger_registry_register(d->name, args, d->n_args, fn_v, has_once);
+        if (strcmp(d->name, "export") == 0 && d->n_args >= 1 &&
+            args[0] && VAL_TAG(args[0]) == XS_STR && args[0]->s) {
+            env_define(i->globals, args[0]->s, fn_v, 1);
+        }
+    }
 }
 
 static void push_env(Interp *i) {
@@ -8860,6 +8887,9 @@ void interp_exec(Interp *i, Node *stmt) {
                 env_define(i->env, stmt->fn_decl.name, v, 1);
             }
         }
+        /* hoist_functions already registered top-level decorators; this
+           path is for nested fn_decls and locally-bound fns where
+           hoisting doesn't run. */
         value_decref(v);
         break;
     }
@@ -10129,6 +10159,7 @@ static void hoist_functions(Interp *i, NodeList *stmts) {
             fn->ret_type_name = xs_strdup(stmt->fn_decl.ret_type->name);
         Value *v = xs_func_new(fn);
         env_define(i->env, stmt->fn_decl.name, v, 1);
+        register_fn_decl_triggers(i, stmt, v);
         value_decref(v);
     }
 }
@@ -10292,9 +10323,14 @@ void interp_run(Interp *i, Node *program) {
         }
     }
 run_done:;
+    trigger_fire_on_start(i);
     Value *main_fn = env_get(i->globals, "main");
     if (main_fn && VAL_TAG(main_fn) == XS_FUNC) {
         Value *res = call_value(i, main_fn, NULL, 0, "main");
         if (res) value_decref(res);
     }
+    trigger_run_event_loop(i);
+    if (i->had_unhandled_exception && i->cf.value)
+        trigger_fire_on_panic(i, i->cf.value);
+    trigger_fire_on_exit(i);
 }

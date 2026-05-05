@@ -11,6 +11,7 @@
 #include "core/msgpack.h"
 #include "runtime/async.h"
 #include "runtime/concurrent.h"
+#include "runtime/triggers.h"
 #if !defined(__wasi__) && !defined(XS_NO_BEARSSL)
 #include "bearssl_hash.h"
 #include "bearssl_hmac.h"
@@ -1321,6 +1322,9 @@ void stdlib_register(Interp *i) {
     interp_define_native(i, "assert",    builtin_assert);
     interp_define_native(i, "assert_eq", builtin_assert_eq);
     interp_define_native(i, "panic",     builtin_panic);
+    interp_define_native(i, "__trigger_registry_size", trigger_native_size);
+    interp_define_native(i, "__trigger_registry_name", trigger_native_name);
+    interp_define_native(i, "__register_decorator",    trigger_native_register);
     interp_define_native(i, "copy",      builtin_copy);
     interp_define_native(i, "clone",     builtin_clone);
     interp_define_native(i, "ord",       builtin_ord);
