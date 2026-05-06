@@ -1473,12 +1473,21 @@ static void emit_expr(SB *s, Node *n, int depth) {
     }
         break;
     case NODE_RESUME:
-        sb_add(s, "(fprintf(stderr, \"xs: resume not supported in C target\\n\"), exit(1), XS_NULL)");
+        sb_add(s, "xs_resume(");
+        if (n->resume_.value) emit_expr(s, n->resume_.value, depth);
+        else sb_add(s, "(xs_val){.tag=4}");
+        sb_add(s, ")");
         break;
     case NODE_PERFORM:
-        sb_printf(s, "(fprintf(stderr, \"xs: perform (%s.%s) not supported in C target\\n\"), exit(1), XS_NULL)",
+        sb_printf(s, "xs_perform(\"%s\", \"%s\", ",
                   n->perform.effect_name ? n->perform.effect_name : "?",
                   n->perform.op_name ? n->perform.op_name : "?");
+        if (n->perform.args.len > 0) {
+            emit_expr(s, n->perform.args.items[0], depth);
+        } else {
+            sb_add(s, "(xs_val){.tag=4}");
+        }
+        sb_add(s, ")");
         break;
     case NODE_THROW:
         sb_add(s, "(xs_throw(");
@@ -1666,12 +1675,110 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_EXPR_STMT:
         emit_expr(s, n->expr_stmt.expr, depth);
         break;
+    case NODE_HANDLE: {
+        /* Single-shot effect handler. The arm bodies are compiled as a
+         * GCC nested function (`auto xs_val dispatch(...)`) so they
+         * close over the enclosing C scope without explicit capture
+         * lifting. xs_perform dereferences frame->dispatch to run an
+         * arm in-place; if the arm calls xs_resume, that longjmps back
+         * to the perform site (preserved because we never unwound).
+         * Ports to compilers without nested-function support need an
+         * explicit capture-struct rewrite. */
+        static int handle_id_counter = 0;
+        int hid = handle_id_counter++;
+        const char *eff_name = NULL;
+        for (int i = 0; i < n->handle.arms.len; i++) {
+            EffectArm *a = &n->handle.arms.items[i];
+            if (a->effect_name) { eff_name = a->effect_name; break; }
+        }
+        sb_add(s, "({\n");
+        sb_indent(s, depth + 1);
+        sb_printf(s, "auto xs_val __h%d_dispatch(int aid, xs_val arg);\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "xs_val __h%d_dispatch(int aid, xs_val arg) {\n", hid);
+        sb_indent(s, depth + 2);
+        sb_add(s, "switch (aid) {\n");
+        for (int i = 0; i < n->handle.arms.len; i++) {
+            EffectArm *a = &n->handle.arms.items[i];
+            sb_indent(s, depth + 3);
+            sb_printf(s, "case %d: {\n", i);
+            if (a->params.len > 0 && a->params.items[0].name) {
+                sb_indent(s, depth + 4);
+                sb_printf(s, "xs_val %s = arg;\n", a->params.items[0].name);
+            } else {
+                sb_indent(s, depth + 4);
+                sb_add(s, "(void)arg;\n");
+            }
+            if (a->body && VAL_TAG(a->body) == NODE_BLOCK &&
+                a->body->block.stmts.len > 0) {
+                emit_block_body(s, a->body, depth + 4);
+                sb_indent(s, depth + 4);
+                sb_add(s, "return (");
+                if (a->body->block.expr)
+                    emit_expr(s, a->body->block.expr, depth + 4);
+                else sb_add(s, "(xs_val){.tag=4}");
+                sb_add(s, ");\n");
+            } else {
+                sb_indent(s, depth + 4);
+                sb_add(s, "return (");
+                if (a->body) emit_expr(s, a->body, depth + 4);
+                else sb_add(s, "(xs_val){.tag=4}");
+                sb_add(s, ");\n");
+            }
+            sb_indent(s, depth + 3);
+            sb_add(s, "}\n");
+        }
+        sb_indent(s, depth + 2);
+        sb_add(s, "}\n");
+        sb_indent(s, depth + 2);
+        sb_add(s, "return (xs_val){.tag=4};\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "}\n");
+        sb_indent(s, depth + 1);
+        sb_printf(s, "XsEffFrame __h%d;\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__h%d.eff_name = \"%s\";\n", hid, eff_name ? eff_name : "?");
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__h%d.n_arms = %d;\n", hid, n->handle.arms.len);
+        for (int i = 0; i < n->handle.arms.len; i++) {
+            EffectArm *a = &n->handle.arms.items[i];
+            sb_indent(s, depth + 1);
+            sb_printf(s, "__h%d.arm_op_names[%d] = \"%s\";\n",
+                      hid, i, a->op_name ? a->op_name : "?");
+        }
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__h%d.dispatch = __h%d_dispatch;\n", hid, hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__h%d.prev = __xs_eff_top;\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__xs_eff_top = &__h%d;\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "xs_val __h%d_result;\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "if (setjmp(__h%d.exit_jmp) == 0) {\n", hid);
+        sb_indent(s, depth + 2);
+        sb_printf(s, "__h%d_result = (", hid);
+        emit_expr(s, n->handle.expr, depth + 2);
+        sb_add(s, ");\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "} else {\n");
+        sb_indent(s, depth + 2);
+        sb_printf(s, "__h%d_result = __h%d.exit_value;\n", hid, hid);
+        sb_indent(s, depth + 1);
+        sb_add(s, "}\n");
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__xs_eff_top = __h%d.prev;\n", hid);
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__h%d_result;\n", hid);
+        sb_indent(s, depth);
+        sb_add(s, "})");
+        break;
+    }
     case NODE_WHILE:
     case NODE_FOR:
     case NODE_LOOP:
     case NODE_TRY:
     case NODE_NURSERY:
-    case NODE_HANDLE:
     case NODE_DEFER:
     case NODE_BREAK:
     case NODE_CONTINUE:
@@ -2769,16 +2876,8 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         break;
     case NODE_HANDLE:
         sb_indent(s, depth);
-        sb_add(s, "/* handle expression */\n");
-        sb_indent(s, depth);
-        sb_add(s, "{\n");
-        if (n->handle.expr) {
-            sb_indent(s, depth + 1);
-            emit_expr(s, n->handle.expr, depth + 1);
-            sb_add(s, ";\n");
-        }
-        sb_indent(s, depth);
-        sb_add(s, "}\n");
+        emit_expr(s, n, depth);
+        sb_add(s, ";\n");
         break;
     case NODE_NURSERY:
         sb_indent(s, depth);
@@ -3258,6 +3357,62 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (__xs_handler_top < XS_MAX_HANDLERS) __xs_handlers[__xs_handler_top++] = jb;\n"
         "}\n"
         "static void xs_pop_handler(void) { if (__xs_handler_top > 0) __xs_handler_top--; }\n\n"
+
+        "/* effect handler frames. Single-shot semantics. Each handle's\n"
+        " * arms are compiled into a GCC nested-function dispatcher, which\n"
+        " * gives the arm body access to enclosing locals via the trampoline\n"
+        " * GCC builds. xs_perform calls the dispatcher in place: arm calls\n"
+        " * xs_resume to return the value to the perform site, or returns\n"
+        " * normally to make the arm's value the handle expression's value.\n"
+        " * Multi-shot resume needs full continuations and is not supported. */\n"
+        "typedef xs_val (*XsArmDispatch)(int aid, xs_val arg);\n"
+        "typedef struct XsEffFrame {\n"
+        "    const char       *eff_name;\n"
+        "    int               n_arms;\n"
+        "    const char       *arm_op_names[16];\n"
+        "    XsArmDispatch     dispatch;\n"
+        "    jmp_buf           exit_jmp;\n"
+        "    jmp_buf           resume_jmp;\n"
+        "    xs_val            exit_value;\n"
+        "    xs_val            resume_value;\n"
+        "    struct XsEffFrame *prev;\n"
+        "} XsEffFrame;\n\n"
+        "static XsEffFrame *__xs_eff_top = NULL;\n"
+        "static XsEffFrame *__xs_eff_active_perform = NULL;\n\n"
+        "static xs_val xs_perform(const char *eff, const char *op, xs_val arg) {\n"
+        "    XsEffFrame *f = __xs_eff_top;\n"
+        "    while (f) {\n"
+        "        if (strcmp(f->eff_name, eff) == 0) {\n"
+        "            for (int i = 0; i < f->n_arms; i++) {\n"
+        "                if (strcmp(f->arm_op_names[i], op) == 0) {\n"
+        "                    XsEffFrame *prev_active = __xs_eff_active_perform;\n"
+        "                    __xs_eff_active_perform = f;\n"
+        "                    if (setjmp(f->resume_jmp) == 0) {\n"
+        "                        xs_val r = f->dispatch(i, arg);\n"
+        "                        __xs_eff_active_perform = prev_active;\n"
+        "                        f->exit_value = r;\n"
+        "                        longjmp(f->exit_jmp, 1);\n"
+        "                        return (xs_val){.tag=4}; /* unreachable */\n"
+        "                    } else {\n"
+        "                        __xs_eff_active_perform = prev_active;\n"
+        "                        return f->resume_value;\n"
+        "                    }\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
+        "        f = f->prev;\n"
+        "    }\n"
+        "    fprintf(stderr, \"unhandled effect: %s.%s\\n\", eff, op);\n"
+        "    exit(1);\n"
+        "}\n\n"
+        "static xs_val xs_resume(xs_val v) {\n"
+        "    if (__xs_eff_active_perform) {\n"
+        "        __xs_eff_active_perform->resume_value = v;\n"
+        "        longjmp(__xs_eff_active_perform->resume_jmp, 1);\n"
+        "    }\n"
+        "    fprintf(stderr, \"resume called outside of an effect handler\\n\");\n"
+        "    exit(1);\n"
+        "}\n\n"
 
         "/* throw / rethrow */\n"
         "static void xs_throw(xs_val v) {\n"
