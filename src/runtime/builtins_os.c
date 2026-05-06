@@ -3,6 +3,7 @@
 #include "core/xs_compat.h"
 #include "runtime/interp.h"
 #include "runtime/builtins.h"
+#include "runtime/triggers.h"
 #include "core/value.h"
 #include <stdlib.h>
 #include <string.h>
@@ -101,8 +102,8 @@ static Value *native_os_ppid(Interp *ig, Value **a, int n) {
 #endif
 }
 static Value *native_os_exit(Interp *ig, Value **a, int n) {
-    (void)ig;
     int code=(n>0&&VAL_TAG(a[0])==XS_INT)?(int)VAL_INT(a[0]):0;
+    trigger_fire_on_exit(ig);
     exit(code);
 }
 static Value *native_os_list_dir(Interp *ig, Value **a, int n) {

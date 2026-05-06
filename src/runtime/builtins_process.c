@@ -4,6 +4,7 @@
 #include "runtime/interp.h"
 #include "runtime/builtins.h"
 #include "runtime/concurrent.h"
+#include "runtime/triggers.h"
 #include "core/value.h"
 #include <stdlib.h>
 #include <string.h>
@@ -333,9 +334,9 @@ static Value *native_process_cwd(Interp *ig, Value **a, int n) {
 
 /* process.exit(code) */
 static Value *native_process_exit(Interp *ig, Value **a, int n) {
-    (void)ig;
     int code = 0;
     if (n >= 1 && VAL_TAG(a[0]) == XS_INT) code = (int)VAL_INT(a[0]);
+    trigger_fire_on_exit(ig);
     exit(code);
     return value_incref(XS_NULL_VAL);
 }

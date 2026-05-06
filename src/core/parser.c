@@ -435,6 +435,7 @@ static int is_known_decorator(const char *name) {
         "bench", "example",
         "export",
         "once",
+        "test",
         NULL
     };
     for (int i = 0; known[i]; i++)
@@ -3814,7 +3815,7 @@ static Node *parse_after(Parser *p) {
 }
 
 static Node *parse_timeout(Parser *p) {
-    Token *kw = pp_expect(p, TK_TIMEOUT, "expected 'timeout'");
+    Token *kw = pp_advance(p);
     Span span = kw->span;
     Node *duration = parse_expr(p, 0);
     Node *body = parse_block(p);
@@ -4009,6 +4010,7 @@ static Node *parse_stmt(Parser *p) {
             if      (strcmp(attr_name, "pure") == 0)       { fn_is_pure = 1;       legacy = 1; }
             else if (strcmp(attr_name, "deprecated") == 0) { is_deprecated = 1;    legacy = 1; }
             else if (strcmp(attr_name, "scoped") == 0)     { decl_is_scoped = 1;   legacy = 1; }
+            else if (strcmp(attr_name, "test") == 0)       { fn_is_test = 1;       legacy = 1; }
         }
         pp_advance(p); /* consume attribute name */
         Node **dec_args = NULL;
@@ -4270,7 +4272,22 @@ static Node *parse_stmt(Parser *p) {
     if (tok->kind == TK_LOAD) return parse_load_stmt(p);
     if (tok->kind == TK_EVERY) return parse_every(p);
     if (tok->kind == TK_AFTER) return parse_after(p);
-    if (tok->kind == TK_TIMEOUT) return parse_timeout(p);
+    if (tok->kind == TK_IDENT && tok->sval && strcmp(tok->sval, "timeout") == 0) {
+        Token *next = pp_peek(p, 1);
+        TokenKind nk = next ? next->kind : TK_EOF;
+        /* Treat as expression statement when 'timeout' is being used as an
+           identifier (assignment, postfix, operator), otherwise dispatch to
+           the timeout-stmt form. */
+        int as_ident = (nk == TK_ASSIGN || nk == TK_PLUS_ASSIGN ||
+                        nk == TK_MINUS_ASSIGN || nk == TK_STAR_ASSIGN ||
+                        nk == TK_SLASH_ASSIGN || nk == TK_PERCENT_ASSIGN ||
+                        nk == TK_LPAREN || nk == TK_DOT || nk == TK_LBRACKET ||
+                        nk == TK_COLON_COLON || nk == TK_QUESTION ||
+                        nk == TK_COLON || nk == TK_COMMA ||
+                        nk == TK_RPAREN || nk == TK_RBRACE || nk == TK_RBRACKET ||
+                        nk == TK_SEMICOLON || nk == TK_NEWLINE || nk == TK_EOF);
+        if (!as_ident) return parse_timeout(p);
+    }
     if (tok->kind == TK_DEBOUNCE) return parse_debounce(p);
     if (tok->kind == TK_PAUSE) {
         pp_advance(p);

@@ -7,7 +7,7 @@ assert_eq(big.to_str(), "9223372036854775808")
 
 -- integer promotion on mixed arithmetic
 assert_eq(1 + 1.5, 2.5)
-assert_eq((1.5 * 2).to_str(), "3")
+assert_eq(1.5 * 2, 3.0)
 
 -- negative mod semantics (truncated toward zero in XS)
 assert_eq(-7 % 3, -1)

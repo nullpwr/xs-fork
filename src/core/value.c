@@ -491,7 +491,6 @@ char *value_repr(Value *v) {
                 }
             }
             if (!found) {
-                /* Scientific fallback (or non-friendly magnitude). */
                 for (int prec = 1; prec <= 17; prec++) {
                     snprintf(short_buf, sizeof(short_buf), "%.*g", prec, f);
                     double parsed = strtod(short_buf, NULL);
@@ -499,6 +498,18 @@ char *value_repr(Value *v) {
                 }
             }
             if (!found) snprintf(short_buf, sizeof(short_buf), "%.17g", f);
+            int has_dot = 0;
+            for (size_t i = 0; short_buf[i]; i++) {
+                if (short_buf[i] == '.' || short_buf[i] == 'e' || short_buf[i] == 'E') {
+                    has_dot = 1; break;
+                }
+            }
+            if (!has_dot) {
+                size_t len = strlen(short_buf);
+                if (len + 2 < sizeof(short_buf)) {
+                    short_buf[len] = '.'; short_buf[len+1] = '0'; short_buf[len+2] = '\0';
+                }
+            }
             strncpy(buf, short_buf, sizeof(buf) - 1);
             buf[sizeof(buf) - 1] = '\0';
             return xs_strdup(buf);

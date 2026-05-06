@@ -53,7 +53,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
     if (!n) { sb_add(s, "undefined"); return; }
     switch (VAL_TAG(n)) {
     case NODE_LIT_INT:
-        sb_printf(s, "%" PRId64, n->lit_int.ival);
+        /* JS Number can't represent integers above 2^53 exactly, so
+           emit anything outside Number.MAX_SAFE_INTEGER as a BigInt
+           literal. The runtime helpers (`__xs_add`, `__xs_div`,
+           `__xs_eq`) already handle the bigint+number mix. */
+        if (n->lit_int.ival > 9007199254740991LL ||
+            n->lit_int.ival < -9007199254740991LL) {
+            sb_printf(s, "%" PRId64 "n", n->lit_int.ival);
+        } else {
+            sb_printf(s, "%" PRId64, n->lit_int.ival);
+        }
         break;
     case NODE_LIT_BIGINT:
         sb_printf(s, "%sn", n->lit_bigint.bigint_str);
@@ -167,9 +176,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
         } else if (strcmp(op, "**") == 0) {
-            sb_addc(s, '(');
+            /* Route through __xs_pow so big-integer results don't
+               silently fall to Number and lose precision. */
+            sb_add(s, "__xs_pow(");
             emit_expr(s, n->binop.left, depth);
-            sb_add(s, " ** ");
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_addc(s, ')');
+        } else if (strcmp(op, "*") == 0 || strcmp(op, "-") == 0 ||
+                   strcmp(op, "%") == 0) {
+            /* Promote bigint when either operand is one. JS won't mix
+               bigint and number under * / - / %. */
+            sb_printf(s, "__xs_arith(\"%s\", ", op);
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
         } else if (strcmp(op, "??") == 0) {
@@ -193,11 +213,25 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
         } else if (strcmp(op, "/") == 0) {
-            sb_add(s, "__xs_div(");
-            emit_expr(s, n->binop.left, depth);
-            sb_add(s, ", ");
-            emit_expr(s, n->binop.right, depth);
-            sb_addc(s, ')');
+            /* Float-typed divide produces NaN on /0; XS's interp matches.
+               If either operand is a float literal, skip the runtime
+               helper's int-throw path and use plain JS divide. */
+            int either_float =
+                (n->binop.left  && VAL_TAG(n->binop.left)  == NODE_LIT_FLOAT) ||
+                (n->binop.right && VAL_TAG(n->binop.right) == NODE_LIT_FLOAT);
+            if (either_float) {
+                sb_addc(s, '(');
+                emit_expr(s, n->binop.left, depth);
+                sb_add(s, " / ");
+                emit_expr(s, n->binop.right, depth);
+                sb_addc(s, ')');
+            } else {
+                sb_add(s, "__xs_div(");
+                emit_expr(s, n->binop.left, depth);
+                sb_add(s, ", ");
+                emit_expr(s, n->binop.right, depth);
+                sb_addc(s, ')');
+            }
         } else if (strcmp(op, "==") == 0) {
             sb_add(s, "__xs_eq(");
             emit_expr(s, n->binop.left, depth);
@@ -328,6 +362,28 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_addc(s, '(');
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, ").length");
+            break;
+        }
+        /* `.to_str()` is the XS spelling; JS uses .toString(), which
+           also covers bigints, numbers, and arrays correctly. */
+        if (m && strcmp(m, "to_str") == 0 && n->method_call.args.len == 0) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        /* `.to_int()` -> Number(...) | 0 truncation */
+        if (m && strcmp(m, "to_int") == 0 && n->method_call.args.len == 0) {
+            sb_add(s, "Math.trunc(Number(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "))");
+            break;
+        }
+        /* `.to_float()` -> Number(...) */
+        if (m && strcmp(m, "to_float") == 0 && n->method_call.args.len == 0) {
+            sb_add(s, "Number(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
             break;
         }
         emit_expr(s, n->method_call.obj, depth);
@@ -895,9 +951,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "undefined");
         break;
     case NODE_TRY:
-        /* try as expression -> IIFE */
+        /* try as expression -> IIFE. The body's trailing expression
+           needs an explicit `return` since emit_block_body only emits
+           statements, and a try-expression like `try { 1 } catch ...`
+           must return that 1 for the IIFE to produce it. */
         sb_add(s, "(() => { try {\n");
-        if (n->try_.body) emit_block_body(s, n->try_.body, depth + 1);
+        if (n->try_.body) {
+            emit_block_body(s, n->try_.body, depth + 1);
+            if (VAL_TAG(n->try_.body) == NODE_BLOCK && n->try_.body->block.expr) {
+                sb_indent(s, depth + 1);
+                sb_add(s, "return ");
+                emit_expr(s, n->try_.body->block.expr, depth + 1);
+                sb_add(s, ";\n");
+            }
+        }
         sb_indent(s, depth);
         sb_addc(s, '}');
         if (n->try_.catch_arms.len > 0) {
@@ -2229,11 +2296,63 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_add = (a, b) => {\n");
     sb_add(&s, "    if (typeof a === \"string\" || typeof b === \"string\") return __xs_repr(a) + __xs_repr(b);\n");
+    sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
+    sb_add(&s, "        return BigInt(typeof a === \"bigint\" ? a : Math.trunc(a)) +\n");
+    sb_add(&s, "               BigInt(typeof b === \"bigint\" ? b : Math.trunc(b));\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    return a + b;\n");
     sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_arith = (op, a, b) => {\n");
+    sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
+    sb_add(&s, "        const ba = typeof a === \"bigint\" ? a : BigInt(Math.trunc(a));\n");
+    sb_add(&s, "        const bb = typeof b === \"bigint\" ? b : BigInt(Math.trunc(b));\n");
+    sb_add(&s, "        switch (op) {\n");
+    sb_add(&s, "            case '*': return ba * bb;\n");
+    sb_add(&s, "            case '-': return ba - bb;\n");
+    sb_add(&s, "            case '%': return ba % bb;\n");
+    sb_add(&s, "        }\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (op === '*') {\n");
+    sb_add(&s, "        if (Number.isInteger(a) && Number.isInteger(b)) {\n");
+    sb_add(&s, "            const r = a * b;\n");
+    sb_add(&s, "            if (r > Number.MAX_SAFE_INTEGER || r < -Number.MAX_SAFE_INTEGER)\n");
+    sb_add(&s, "                return BigInt(a) * BigInt(b);\n");
+    sb_add(&s, "            return r;\n");
+    sb_add(&s, "        }\n");
+    sb_add(&s, "        return a * b;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (op === '-') return a - b;\n");
+    sb_add(&s, "    if (op === '%') return a % b;\n");
+    sb_add(&s, "    return a + b;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_pow = (a, b) => {\n");
+    sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
+    sb_add(&s, "        return (typeof a === \"bigint\" ? a : BigInt(Math.trunc(a))) **\n");
+    sb_add(&s, "               (typeof b === \"bigint\" ? b : BigInt(Math.trunc(b)));\n");
+    sb_add(&s, "    }\n");
+    /* Promote to BigInt when both ints and the result overflows
+       Number.MAX_SAFE_INTEGER. Tests `huge = 10 ** 30` and
+       `prod = huge * huge`. */
+    sb_add(&s, "    if (Number.isInteger(a) && Number.isInteger(b) && b >= 0) {\n");
+    sb_add(&s, "        const r = Math.pow(a, b);\n");
+    sb_add(&s, "        if (r > Number.MAX_SAFE_INTEGER || !Number.isFinite(r))\n");
+    sb_add(&s, "            return BigInt(a) ** BigInt(b);\n");
+    sb_add(&s, "        return r;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return a ** b;\n");
+    sb_add(&s, "};\n");
     sb_add(&s, "const __xs_div = (a, b) => {\n");
-    sb_add(&s, "    if (b === 0 || b === 0n) throw new Error(\"division by zero\");\n");
-    sb_add(&s, "    if (typeof a === \"bigint\" && typeof b === \"bigint\") return a / b;\n");
+    /* int / 0 is a runtime error; float / 0.0 is NaN. We detect
+       float by !Number.isInteger; bigint 0n is int. */
+    sb_add(&s, "    if (typeof b === 'bigint') {\n");
+    sb_add(&s, "        if (b === 0n) throw new Error(\"division by zero\");\n");
+    sb_add(&s, "        const ba = typeof a === 'bigint' ? a : BigInt(Math.trunc(a));\n");
+    sb_add(&s, "        return ba / b;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (b === 0) {\n");
+    sb_add(&s, "        if (Number.isInteger(a) && Number.isInteger(b)) throw new Error(\"division by zero\");\n");
+    sb_add(&s, "        return a / b;\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    if (Number.isInteger(a) && Number.isInteger(b)) return Math.trunc(a / b);\n");
     sb_add(&s, "    return a / b;\n");
     sb_add(&s, "};\n");

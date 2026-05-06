@@ -376,14 +376,18 @@ static void walk(SemaCtx *ctx, Node *n) {
                     first_pat = first_pat->pat_capture.pattern;
                 } else break;
             }
-            if (first_pat && VAL_TAG(first_pat) == NODE_PAT_ENUM && first_pat->pat_enum.path) {
-                const char *path = first_pat->pat_enum.path;
-                const char *sep = strstr(path, "::");
+            const char *vpath = NULL;
+            if (first_pat && VAL_TAG(first_pat) == NODE_PAT_ENUM)
+                vpath = first_pat->pat_enum.path;
+            else if (first_pat && VAL_TAG(first_pat) == NODE_PAT_STRUCT)
+                vpath = first_pat->pat_struct.path;
+            if (vpath) {
+                const char *sep = strstr(vpath, "::");
                 if (sep) {
-                    size_t elen = sep - path;
+                    size_t elen = sep - vpath;
                     char ename[256];
                     if (elen < sizeof ename) {
-                        memcpy(ename, path, elen);
+                        memcpy(ename, vpath, elen);
                         ename[elen] = '\0';
                         Symbol *enum_sym = sym_lookup(ctx->st, ename);
                         if (enum_sym && enum_sym->decl &&

@@ -42,6 +42,19 @@ static int pat_matches_variant(Node *pat, const char *variant) {
                 return 1;
             return 0;
         }
+        case NODE_PAT_STRUCT: {
+            const char *path = pat->pat_struct.path;
+            if (!path) return 0;
+            if (strcmp(path, variant) == 0) return 1;
+            size_t plen = strlen(path);
+            size_t vlen = strlen(variant);
+            if (plen > vlen + 2 &&
+                path[plen - vlen - 2] == ':' &&
+                path[plen - vlen - 1] == ':' &&
+                strcmp(path + plen - vlen, variant) == 0)
+                return 1;
+            return 0;
+        }
         default: return 0;
     }
 }

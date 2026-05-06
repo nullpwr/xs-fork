@@ -302,6 +302,8 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
                 size_t nlen = (size_t)(colon - p);
                 char name[256]; if (nlen >= sizeof name) nlen = sizeof name - 1;
                 memcpy(name, p, nlen); name[nlen] = 0;
+                for (size_t k = 0; k < nlen; k++)
+                    if (name[k] >= 'A' && name[k] <= 'Z') name[k] = (char)(name[k] + 32);
                 char *v = colon + 1;
                 while (v < eol && (*v == ' ' || *v == '\t')) v++;
                 size_t vlen = (size_t)(eol - v);

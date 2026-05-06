@@ -82,6 +82,13 @@ void strbuf_append_int(XSBuf *b, int64_t val) {
 void strbuf_append_float(XSBuf *b, double val) {
     char tmp[64];
     int n = snprintf(tmp, sizeof tmp, "%g", val);
+    int has_dot = 0;
+    for (int i = 0; i < n; i++) {
+        if (tmp[i] == '.' || tmp[i] == 'e' || tmp[i] == 'n' || tmp[i] == 'i') { has_dot = 1; break; }
+    }
+    if (!has_dot && n + 2 < (int)sizeof tmp) {
+        tmp[n++] = '.'; tmp[n++] = '0'; tmp[n] = '\0';
+    }
     strbuf_grow(b, n);
     memcpy(b->data + b->len, tmp, (size_t)n);
     b->len += n;

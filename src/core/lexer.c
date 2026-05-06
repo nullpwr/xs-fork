@@ -93,7 +93,6 @@ static const KWEntry KEYWORDS[] = {
     {"bind",     TK_BIND},
     {"every",    TK_EVERY},
     {"after",    TK_AFTER},
-    {"timeout",  TK_TIMEOUT},
     {"debounce", TK_DEBOUNCE},
     {"pause",    TK_PAUSE},
     {"del",      TK_DEL},

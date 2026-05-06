@@ -2006,6 +2006,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_CONCAT: {
             Value *b=POP(), *a=POP();
+            if (VAL_TAG(a) == XS_ARRAY && VAL_TAG(b) == XS_ARRAY) {
+                Value *r = xs_array_new();
+                int alen = a->arr ? a->arr->len : 0;
+                int blen = b->arr ? b->arr->len : 0;
+                for (int k = 0; k < alen; k++)
+                    array_push(r->arr, value_incref(a->arr->items[k]));
+                for (int k = 0; k < blen; k++)
+                    array_push(r->arr, value_incref(b->arr->items[k]));
+                value_decref(a); value_decref(b);
+                PUSH(r); break;
+            }
             char *as=value_str(a), *bs=value_str(b);
             size_t n=strlen(as)+strlen(bs)+1;
             char *buf=xs_malloc(n); strcpy(buf,as); strcat(buf,bs);
@@ -3088,11 +3099,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     map_set(mc_obj->map,mc_args[0]->s,mc_args[1]);
                     mc_result=value_incref(XS_NULL_VAL);
-                } else if (strcmp(mc_name,"delete")==0||strcmp(mc_name,"remove")==0) {
+                } else if ((strcmp(mc_name,"delete")==0||strcmp(mc_name,"remove")==0) &&
+                           !map_get(mc_obj->map, "__type") &&
+                           !map_get(mc_obj->map, "__methods")) {
                     if(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
-                        Value *nv = value_incref(XS_NULL_VAL);
-                        map_set(mc_obj->map,mc_args[0]->s,nv);
-                        value_decref(nv);
+                        map_del(mc_obj->map,mc_args[0]->s);
                     }
                     mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"send")==0 && mc_argc>=1) {
