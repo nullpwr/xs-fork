@@ -96,10 +96,10 @@ Needs gcc or clang and GNU make. No other build or runtime dependencies. HTTPS i
 ## Run
 
 ```bash
-xs file.xs              # run a script (tree-walk interpreter, default)
+xs file.xs              # run a script (bytecode VM, default)
 xs                      # interactive REPL
 xs -e 'println(42)'     # eval one-liner
-xs --vm file.xs         # bytecode VM backend (faster for compute, recommended)
+xs --interp file.xs     # tree-walk interpreter (REPL/plugin debugging)
 xs --jit file.xs        # JIT backend (x86-64 and aarch64; see STATUS.md)
 xs --emit js file.xs    # transpile to JavaScript
 xs --emit c file.xs     # transpile to C
@@ -107,8 +107,10 @@ xs --check file.xs      # static type check without running
 xs --strict file.xs     # require type annotations everywhere
 ```
 
-The tree-walk interpreter is the default for fast startup. Pass
-`--vm` for compute-heavy or long-running code. See [STATUS.md](STATUS.md)
+The bytecode VM is the default. Use `--jit` for hot loops; the
+JIT compiles opcodes that fit its supported set and falls back to
+the VM for the rest. Use `--interp` for plugin debugging or
+anything that hooks AST-level evaluation. See [STATUS.md](STATUS.md)
 for the backend matrix.
 
 ## What's in the box
@@ -122,7 +124,6 @@ for the backend matrix.
 - Closures, generators (`fn*`/`yield`), arrow lambdas
 - Function overloading (dispatch by argument count)
 - Tagged blocks (`tag`) for user-defined control structures
-- Inline C blocks for performance-critical code (`inline c { ... }`)
 - First-class `Duration` type with native suffixes (`5s`, `200ms`, `1ns`, `2m30s`)
 - Decorators on fn declarations: `@on_start`, `@on_exit`, `@on_signal`, `@on_panic`, `@every(d)`, `@cron(...)`, `@delayed(d)`, `@watch(path)`, `@bench`, `@example`, `@export(name)`, `@once`
 - Temporal primitives: `every`, `after`, `timeout`, `debounce` for scheduling
@@ -133,9 +134,9 @@ for the backend matrix.
 - try/catch/finally, defer, throw
 
 **Backends:**
-- Tree-walk interpreter (default)
-- Bytecode VM (`--vm`, full feature parity, faster for compute-heavy code)
-- JIT compiler (`--jit`, x86-64 and aarch64): register-allocating specialiser; protos outside the supported opcode set drop back to the VM
+- Bytecode VM (default; `--vm` for explicit)
+- Tree-walk interpreter (`--interp`, REPL / plugin debugging)
+- JIT compiler (`--jit`, x86-64 and aarch64): register-allocating specialiser; opcodes outside the supported set drop to the VM step path
 - Transpilers: JavaScript, C, WebAssembly
 
 **Tooling:**

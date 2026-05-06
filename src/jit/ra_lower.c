@@ -193,6 +193,20 @@ static int op_supported(Opcode op) {
         case OP_INHERIT:
         case OP_IMPL_METHOD:
         case OP_TRAIT_APPLY:
+        /* Module / actor / enum ops were on the bail list because they
+         * were rare enough to defer; v1.2 wants the JIT to actually
+         * stay in tier-2 across an actor.method() call. They all run
+         * fine through vm_step_jit, so route them like OP_MAKE_CLASS:
+         * pop the right number of operands, emit IR_VM_STEP, push the
+         * result. Per-op accounting lives in the lowering switch. */
+        case OP_MAKE_ENUM:
+        case OP_MAKE_MODULE:
+        case OP_END_MODULE:
+        case OP_MAKE_ACTOR:
+        case OP_SEND:
+        case OP_CALL_KW:
+        case OP_IMPORT:
+        case OP_IMPORT_ITEM:
             return 1;
         default:
             return 0;
@@ -313,33 +327,13 @@ IRFunc *ralow_lower(XSProto *proto) {
      * data layouts the JIT-emitted prologue is unaware of. */
     g_bail_kind = RALOW_BAIL_NONE;
     g_bail_op   = -1;
-    if (proto->is_actor_method)
-        return bail(NULL, RALOW_BAIL_ACTOR_METHOD, -1);
-    /* transitively bail any proto that builds an actor anywhere
-     * downstream. spawning + dispatching an actor with an
-     * upvalue-bearing method confuses the JIT prologue. */
-    {
-        int worklist_cap = proto->n_inner > 16 ? proto->n_inner : 16;
-        XSProto **worklist = malloc((size_t)worklist_cap * sizeof(XSProto *));
-        int worklist_len = 0;
-        for (int i = 0; i < proto->n_inner; i++)
-            if (proto->inner[i]) worklist[worklist_len++] = proto->inner[i];
-        int has_actor = 0;
-        while (worklist_len > 0) {
-            XSProto *p = worklist[--worklist_len];
-            if (!p) continue;
-            if (p->is_actor_method) { has_actor = 1; break; }
-            for (int j = 0; j < p->n_inner; j++) {
-                if (worklist_len >= worklist_cap) {
-                    worklist_cap *= 2;
-                    worklist = realloc(worklist, (size_t)worklist_cap * sizeof(XSProto *));
-                }
-                if (p->inner[j]) worklist[worklist_len++] = p->inner[j];
-            }
-        }
-        free(worklist);
-        if (has_actor) return bail(NULL, RALOW_BAIL_INNER_ACTOR, -1);
-    }
+    /* v1.2: actor protos used to bail unconditionally because the
+     * JIT prologue laid out the frame differently than the
+     * dispatcher does. With OP_SEND / OP_MAKE_ACTOR routed through
+     * IR_VM_STEP_DRAIN above, the actor methods drive the JIT
+     * tier-2 path the same way the rest of the runtime does --
+     * the prologue layout difference is moot because the actor
+     * dispatch lives in vm_step_jit, not in JIT-native code. */
     for (int i = 0; i < proto->chunk.len; i++) {
         Opcode op = INSTR_OPCODE(proto->chunk.code[i]);
         if (!op_supported(op))
@@ -906,6 +900,87 @@ IRFunc *ralow_lower(XSProto *proto) {
                 /* Both alter frame->ip -- DEFER_PUSH jumps past the
                  * deferred block, DEFER_RUN jumps back into it. */
                 ir_emit(f, IR_VM_STEP_CF, -1, -1, -1, 0, pc);
+                break;
+            }
+            /* --- v1.2 fillins: ops that used to bail the JIT and
+             * force the proto onto the VM. They all step cleanly
+             * through vm_step_jit; the operand counts come from
+             * INSTR_A on each. */
+            case OP_MAKE_ENUM: {
+                /* stack: [k0,v0,...,kN-1,vN-1] -> [enum] */
+                int n = (int)INSTR_A(ins) * 2;
+                IRVReg items[IR_MAX_CALL_ARGS];
+                for (int i = n - 1; i >= 0; i--) items[i] = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_VM_STEP, d, -1, -1, 0, pc);
+                for (int i = 0; i < n; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_MAKE_MODULE: {
+                /* stack: [k0,v0,...,kN-1,vN-1] -> [module] */
+                int n = (int)INSTR_A(ins) * 2;
+                IRVReg items[IR_MAX_CALL_ARGS];
+                for (int i = n - 1; i >= 0; i--) items[i] = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_VM_STEP, d, -1, -1, 0, pc);
+                for (int i = 0; i < n; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_END_MODULE: {
+                /* zero-operand, no result; just drives module
+                 * registration in vm_step_jit. */
+                ir_emit(f, IR_VM_STEP, -1, -1, -1, 0, pc);
+                break;
+            }
+            case OP_MAKE_ACTOR: {
+                /* stack: [k0,v0,...,kN-1,vN-1, methods] -> [actor] */
+                int nstate = (int)INSTR_A(ins);
+                int total = nstate * 2 + 1; /* +1 for methods map */
+                IRVReg items[IR_MAX_CALL_ARGS];
+                for (int i = total - 1; i >= 0; i--) items[i] = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_VM_STEP, d, -1, -1, 0, pc);
+                for (int i = 0; i < total; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_SEND: {
+                /* stack: [actor, msg] -> [result]. The handler may
+                 * push a new frame, so route through DRAIN like
+                 * OP_MAKE_INST does for the closure-init branch. */
+                IRVReg msg   = vstack_pop(&vs);
+                IRVReg actor = vstack_pop(&vs);
+                IRVReg d     = new_vreg(f);
+                ir_emit(f, IR_VM_STEP_DRAIN, d, actor, msg, 0, pc);
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_CALL_KW: {
+                /* stack: [callee, ...positional, ...key-value-pairs] -> [result].
+                 * INSTR_A is positional argc, INSTR_C is kwarg count,
+                 * each kwarg uses 2 stack slots (key, value). */
+                int argc = (int)INSTR_A(ins);
+                int nkw  = (int)c;
+                int total = argc + nkw * 2;
+                IRVReg items[IR_MAX_CALL_ARGS];
+                for (int i = total - 1; i >= 0; i--) items[i] = vstack_pop(&vs);
+                IRVReg callee = vstack_pop(&vs);
+                IRVReg d = new_vreg(f);
+                int idx = ir_emit(f, IR_VM_STEP_DRAIN, d, callee, -1, total, pc);
+                for (int i = 0; i < total; i++) f->insts[idx].call_args[i] = items[i];
+                vstack_push(&vs, d);
+                break;
+            }
+            case OP_IMPORT:
+            case OP_IMPORT_ITEM: {
+                /* zero stack inputs, one pushed result; the const
+                 * index in Bx tells vm_step_jit which name to
+                 * materialise from globals or the lazy stdlib. */
+                IRVReg d = new_vreg(f);
+                ir_emit(f, IR_VM_STEP, d, -1, -1, 0, pc);
+                vstack_push(&vs, d);
                 break;
             }
             default:

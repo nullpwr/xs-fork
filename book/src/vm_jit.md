@@ -12,13 +12,13 @@ the hood for the bytecode VM and the tier-2 JIT.
   lexer  ──tokens──▶  parser  ──AST──▶  semantic analysis
                                               │
                                               ▼
-                                          tree-walking interpreter (default with --interp)
+                                          tree-walking interpreter (--interp)
                                               │
                                               ▼
                                         bytecode compiler
                                               │
                                               ▼
-                                          bytecode VM (default; --vm)
+                                          bytecode VM (default)
                                               │
                                               ▼
                                           tier-2 IR lowerer (--jit, hot protos only)
@@ -67,12 +67,16 @@ What's lowered:
 - Loads / stores (locals, upvalues, globals)
 - Closure construction
 - Inline caches preserved
+- Module / actor / enum construction (via vm_step_jit fallthrough)
+- Effect machinery (perform / handle / resume) routed through
+  vm_step_cf so the JIT stays in tier-2 across an effect call
+- Actor protos that used to bail unconditionally now compile;
+  OP_SEND drives the dispatcher through vm_step_jit and returns
 
 What isn't (yet):
 
-- Effect machinery (`perform`, `handle`, `resume`): falls back to
-  the VM
-- Some method dispatch paths
+- Closure-callback inlining (e.g. arr.sort(|a,b| ...) bounces
+  through interp dispatch per comparison)
 - Code-buffer overflow: proto stays bytecode; flagged `jit_tried`
   so we don't retry the whole pipeline next call
 
