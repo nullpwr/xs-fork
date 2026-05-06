@@ -342,8 +342,9 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
     case NODE_IDENT: {
         const char *name = n->ident.name;
         if (!name) break;
-        if (!is_builtin_name(name) && !(name[0] == '_' && name[1] == '_')) {
+        if (!(name[0] == '_' && name[1] == '_')) {
             Symbol *sym = sym_lookup(st, name);
+            if (!sym && is_builtin_name(name)) break;
             if (!sym) {
                 /* If the program loads any plugins, the name might be
                    injected at plugin init, which sema can't see. Downgrade

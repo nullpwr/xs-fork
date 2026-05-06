@@ -1,5 +1,7 @@
-/* Copy-patch JIT for x86-64 (System V ABI).
- * Guarded by XSC_ENABLE_JIT; falls back if mmap fails. */
+/* Tier-2 register-allocating IR JIT for x86-64 + arm64. Threshold-driven
+ * per-proto compile; opcodes outside the supported subset bail back to the
+ * VM via vm_step_jit. Guarded by XSC_ENABLE_JIT; falls back if the code-page
+ * allocation fails. */
 #ifndef XS_JIT_H
 #define XS_JIT_H
 
@@ -31,6 +33,13 @@ void  *jit_compile(XSJIT *j, XSProto *proto);
 void  *jit_maybe_compile(XSJIT *j, int proto_index, XSProto *proto);
 JitFn  jit_get_compiled(XSJIT *j, int proto_index);
 int    jit_available(void);
+
+/* Lower the proto (and every inner proto recursively) through the
+ * tier-2 lowerer and print the resulting IR to stdout. Used by
+ * `xs --emit jit-ir` to surface what the JIT actually compiles --
+ * a proto that bails to the VM emits a one-line "# proto X: lower
+ * bailed (kind=N, op=M)" instead of an IR listing. */
+void   jit_dump_ir(XSProto *proto);
 
 struct VM;
 /* Shared between the x86-64 and arm64 codegens: drive any frames an

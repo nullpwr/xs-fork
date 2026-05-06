@@ -593,12 +593,12 @@ static void usage(void) {
         "Flags (can appear before or after the filename):\n"
         "  --record <file.xst>  Record execution trace\n"
         "  --vm                 Use bytecode VM backend\n"
-        "  --jit                Use JIT backend (x86-64 and aarch64)\n"
+        "  --jit                Tier-2 native JIT (x86-64, arm64; bails to VM)\n"
         "  --check              Type-check only, don't run\n"
         "  --strict             Require all type annotations\n"
         "  --lenient            Downgrade errors to warnings\n"
         "  --optimize           Run AST optimizer\n"
-        "  --emit <target>      Dump IR: ast, bytecode, ir, js, c, wasm\n"
+        "  --emit <target>      Dump IR: ast, bytecode, ir, jit-ir, js, c, wasm\n"
         "  --trace              Auto-load provenance tracking\n"
         "  --watch              Re-run on file change\n"
         "  --profile            Enable sampling profiler\n"
@@ -837,6 +837,7 @@ int main(int argc, char **argv) {
        the tree-walk path explicitly via do_vm=0. */
     int do_vm         = 1;
     int emit_bytecode = 0;
+    int emit_jit_ir = 0;
 #endif
 #ifdef XSC_ENABLE_JIT
     int do_jit = 0;
@@ -1019,19 +1020,22 @@ int main(int argc, char **argv) {
                                 "Alias for: --backend vm\n\n"
                                 "Example: xs --vm script.xs\n")
                 H("--jit",      "Flag: --jit\n\n"
-                                "Use JIT compilation backend.\n"
+                                "Tier-2 register-allocating native JIT (x86-64, arm64).\n"
+                                "Compiles hot protos past a threshold; ops outside the\n"
+                                "supported subset bail back to the VM transparently.\n"
                                 "Alias for: --backend jit\n\n"
                                 "Example: xs --jit script.xs\n")
                 H("--backend",  "Flag: --backend <interp|vm|jit>\n\n"
                                 "Select the execution backend.\n"
-                                "  interp  Tree-walking interpreter (default)\n"
-                                "  vm      Bytecode virtual machine\n"
-                                "  jit     JIT compilation\n")
+                                "  interp  Tree-walking interpreter (REPL / debugging)\n"
+                                "  vm      Bytecode virtual machine (default)\n"
+                                "  jit     Tier-2 register-allocating native JIT\n")
                 H("--emit",     "Flag: --emit <format>\n\n"
                                 "Dump internal representation instead of running.\n"
                                 "  ast        Abstract syntax tree\n"
                                 "  ir         SSA intermediate representation\n"
                                 "  bytecode   VM bytecode listing\n"
+                                "  jit-ir     Tier-2 JIT IR per proto (post-lowering)\n"
                                 "  js         Transpiled JavaScript\n"
                                 "  c          Transpiled C\n"
                                 "  wasm       WebAssembly binary\n")
@@ -2149,6 +2153,7 @@ test_again: ;
             else if (strcmp(what, "ast")       == 0) emit_ast = 1;
             else if (strcmp(what, "ir")        == 0) emit_ir_ssa = 1;
             else if (strcmp(what, "bytecode-ir") == 0) emit_bytecode = 1;
+            else if (strcmp(what, "jit-ir")    == 0) emit_jit_ir = 1;
             else if (strcmp(what, "llvm")      == 0) { fprintf(stderr, "xs --emit llvm: requires XSC_ENABLE_JIT\n"); return 1; }
 #ifdef XSC_ENABLE_TRANSPILER
             else if (strcmp(what, "js")        == 0) emit_js   = 1;
@@ -2469,6 +2474,23 @@ run_file:;
             free(src_for_cache);
             cache_free(g_sema_cache);
             return 0;
+        }
+        if (emit_jit_ir) {
+#ifdef XSC_ENABLE_JIT
+            jit_dump_ir(proto);
+            proto_free(proto);
+            node_free(program);
+            free(src_for_cache);
+            cache_free(g_sema_cache);
+            return 0;
+#else
+            fprintf(stderr, "xs --emit jit-ir: requires XSC_ENABLE_JIT\n");
+            proto_free(proto);
+            node_free(program);
+            free(src_for_cache);
+            cache_free(g_sema_cache);
+            return 1;
+#endif
         }
 #ifdef XSC_ENABLE_JIT
         if (do_jit) {

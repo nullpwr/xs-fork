@@ -320,4 +320,102 @@ int jit_available(void) {
 #endif
 }
 
+static const char *jit_ir_op_name(IROp op) {
+    switch (op) {
+        case IR_CONST:        return "CONST";
+        case IR_LOAD_LOCAL:   return "LOAD_LOCAL";
+        case IR_LOAD_GLOBAL:  return "LOAD_GLOBAL";
+        case IR_LOAD_UP:      return "LOAD_UP";
+        case IR_PUSH_NULL:    return "PUSH_NULL";
+        case IR_PUSH_TRUE:    return "PUSH_TRUE";
+        case IR_PUSH_FALSE:   return "PUSH_FALSE";
+        case IR_MAKE_CLOSURE: return "MAKE_CLOSURE";
+        case IR_INDEX_GET:    return "INDEX_GET";
+        case IR_INDEX_SET:    return "INDEX_SET";
+        case IR_LOAD_FIELD:   return "LOAD_FIELD";
+        case IR_STORE_FIELD:  return "STORE_FIELD";
+        case IR_MAKE_RANGE:   return "MAKE_RANGE";
+        case IR_MAKE_ARRAY:   return "MAKE_ARRAY";
+        case IR_MAKE_TUPLE:   return "MAKE_TUPLE";
+        case IR_MAKE_MAP:     return "MAKE_MAP";
+        case IR_METHOD_CALL:  return "METHOD_CALL";
+        case IR_CONCAT:       return "CONCAT";
+        case IR_ITER_GET:     return "ITER_GET";
+        case IR_VM_STEP:      return "VM_STEP";
+        case IR_VM_STEP_CF:   return "VM_STEP_CF";
+        case IR_VM_STEP_DRAIN:return "VM_STEP_DRAIN";
+        case IR_STORE_LOCAL:  return "STORE_LOCAL";
+        case IR_STORE_UP:     return "STORE_UP";
+        case IR_POP:          return "POP";
+        case IR_ADD:          return "ADD";
+        case IR_SUB:          return "SUB";
+        case IR_MUL:          return "MUL";
+        case IR_DIV:          return "DIV";
+        case IR_MOD:          return "MOD";
+        case IR_BAND:         return "BAND";
+        case IR_BOR:          return "BOR";
+        case IR_BXOR:         return "BXOR";
+        case IR_SHL:          return "SHL";
+        case IR_SHR:          return "SHR";
+        case IR_LT:           return "LT";
+        case IR_GT:           return "GT";
+        case IR_LE:           return "LE";
+        case IR_GE:           return "GE";
+        case IR_EQ:           return "EQ";
+        case IR_NE:           return "NE";
+        case IR_NEG:          return "NEG";
+        case IR_NOT:          return "NOT";
+        case IR_BNOT:         return "BNOT";
+        case IR_JUMP:         return "JUMP";
+        case IR_JIF_FALSE:    return "JIF_FALSE";
+        case IR_JIF_TRUE:     return "JIF_TRUE";
+        case IR_CMP_BR:       return "CMP_BR";
+        case IR_NOP:          return "NOP";
+        case IR_CALL:         return "CALL";
+        case IR_RETURN:       return "RETURN";
+        case IR_DUP:          return "DUP";
+        case IR_MOVE:         return "MOVE";
+        default:              return "?";
+    }
+}
+
+void jit_dump_ir(XSProto *proto) {
+    if (!proto) return;
+    IRFunc *f = ralow_lower(proto);
+    if (f) {
+        printf("# proto %s  (%d vregs, %d blocks, %d insts)\n",
+               proto->name ? proto->name : "<top>",
+               f->n_vregs, f->n_blocks, f->n_insts);
+        for (int b = 0; b < f->n_blocks; b++) {
+            IRBlock *blk = &f->blocks[b];
+            printf("  block %d:\n", b);
+            for (int i = blk->start; i < blk->end; i++) {
+                IRInst *in = &f->insts[i];
+                printf("    %4d  %-15s", i, jit_ir_op_name(in->op));
+                if (in->dst >= 0)  printf(" v%d =", in->dst);
+                if (in->src1 >= 0) printf(" v%d", in->src1);
+                if (in->src2 >= 0) printf(", v%d", in->src2);
+                if (in->op == IR_CONST || in->op == IR_LOAD_LOCAL ||
+                    in->op == IR_STORE_LOCAL || in->op == IR_LOAD_GLOBAL ||
+                    in->op == IR_LOAD_UP || in->op == IR_STORE_UP ||
+                    in->op == IR_JUMP || in->op == IR_JIF_FALSE ||
+                    in->op == IR_JIF_TRUE || in->op == IR_LOAD_FIELD ||
+                    in->op == IR_STORE_FIELD || in->op == IR_MAKE_RANGE ||
+                    in->op == IR_MAKE_ARRAY || in->op == IR_MAKE_TUPLE ||
+                    in->op == IR_MAKE_MAP)
+                    printf(" #%d", in->imm);
+                printf("\n");
+            }
+        }
+        printf("\n");
+        irfunc_free(f);
+    } else {
+        printf("# proto %s: lower bailed (kind=%d, op=%d)\n",
+               proto->name ? proto->name : "<top>",
+               ralow_last_bail_kind(), ralow_last_bail_op());
+    }
+    for (int i = 0; i < proto->n_inner; i++)
+        jit_dump_ir(proto->inner[i]);
+}
+
 #endif /* XSC_ENABLE_JIT */
