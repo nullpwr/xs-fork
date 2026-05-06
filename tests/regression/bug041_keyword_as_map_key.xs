@@ -7,7 +7,7 @@
 -- contextual effect keywords (TK_EFFECT, TK_PERFORM, TK_HANDLE,
 -- TK_RESUME) and a few other keywords.
 --
--- Real users hit this immediately — wrapping a framework whose
+-- Real users hit this immediately; wrapping a framework whose
 -- handler method happens to be named `handle` is common (http
 -- servers, signal subscribers, command dispatchers).
 --

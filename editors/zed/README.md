@@ -18,8 +18,8 @@ mode:
 - `extension.toml` declares the language, the grammar, and the LSP.
 - `languages/xs/config.toml` declares filetypes, comment markers, etc.
 - `languages/xs/highlights.scm`, `injections.scm`, `outline.scm`,
-  `indents.scm`, `brackets.scm` — tree-sitter queries.
-- `src/lib.rs` — minimal extension entry point that runs `xs lsp`.
+  `indents.scm`, `brackets.scm`: tree-sitter queries.
+- `src/lib.rs`: minimal extension entry point that runs `xs lsp`.
 
 ## Requires
 

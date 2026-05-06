@@ -123,7 +123,7 @@ library.
 
 The C target uses `setjmp` / `longjmp` and emits the arm body as a
 GCC nested function so it can close over the enclosing scope. That's
-single-shot only — multi-shot resume needs full delimited
+single-shot only; multi-shot resume needs full delimited
 continuations and is tracked for a later release. WASM still needs
 either WASM exception-handling or a CPS rewrite of the runtime; on
 the WASM target `perform` is a runtime trap.

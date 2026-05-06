@@ -792,7 +792,7 @@ static void xs_shutdown(void) {
        spawn { ... } actually completes before the process exits.
        (Only VM-backend tasks are drained here. The interp backend
        shares its Interp with worker threads, so by the time atexit
-       runs the Interp may be partially torn down — joining there
+       runs the Interp may be partially torn down; joining there
        would dereference freed state.) */
     vm_drain_tasks();
     /* Release process-lifetime allocations so leak checkers don't

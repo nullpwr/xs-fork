@@ -1,7 +1,7 @@
 -- bug042: http.get on a failed connect / TLS handshake / URL parse
 -- silently returned null (or worse, an object with null fields when
 -- the bytes-coming-back-after-half-failed-handshake parser produced
--- a partial response). Either way callers had no clean signal — they
+-- a partial response). Either way callers had no clean signal; they
 -- couldn't distinguish "site returned 200 with empty body" from
 -- "TLS handshake failed."
 --

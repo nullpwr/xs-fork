@@ -5697,7 +5697,7 @@ static void emit_rt_f64_to_str(WasmBuf *body) {
     emit_local_set(body, local_tmp);
     /* "." */
     emit_inline_str(body, ".", local_dot_str);
-    /* dot_str is now on top — reorder: int_str + "." + frac_str */
+    /* dot_str is now on top; reorder: int_str + "." + frac_str */
     emit_local_set(body, local_dot_str);
 
     emit_local_get(body, local_neg);

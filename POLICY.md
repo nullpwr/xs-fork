@@ -8,7 +8,7 @@ features.
 
 Every public surface in XS belongs to exactly one tier.
 
-### Tier 1 — stable
+### Tier 1: stable
 Language syntax and semantics as documented in `LANGUAGE.md`. Every
 stdlib module imported without the `@unstable` annotation.
 
@@ -21,7 +21,7 @@ stdlib module imported without the `@unstable` annotation.
 - CLI flags and output formats (stack trace layout, diagnostic
   shape, `xs doc` output) are Tier 1.
 
-### Tier 2 — unstable (opt-in)
+### Tier 2: unstable (opt-in)
 Marked with `@unstable` on the module, type, or function. Requires
 `--allow-unstable` to compile against, or `xs.toml [unstable]`
 declaration per feature.
@@ -30,7 +30,7 @@ declaration per feature.
 - Will either promote to Tier 1 (after at least one minor cycle of
   real use) or be removed entirely.
 
-### Tier 3 — experimental
+### Tier 3: experimental
 Not in `stdlib/`. Must live behind `import experimental.<name>` and
 only available under `XS_EXPERIMENTAL=1`.
 
@@ -43,7 +43,7 @@ only available under `XS_EXPERIMENTAL=1`.
 - `xs --emit bytecode` output format (versioned separately; an older
   xsc can refuse a newer `.xsc` file).
 - Internal symbols prefixed with `_` or `__`.
-- Plugin-injected names — those are the plugin author's contract, not
+- Plugin-injected names; those are the plugin author's contract, not
   the language's.
 
 ## Versioning
@@ -86,8 +86,8 @@ Deprecations never remove in a MINOR release.
 
 ## RFC process
 
-All non-trivial changes — new language features, new stdlib modules,
-backwards-incompatible changes, governance changes — go through an
+All non-trivial changes (new language features, new stdlib modules,
+backwards-incompatible changes, governance changes) go through an
 RFC before any code lands.
 
 Trivial means:

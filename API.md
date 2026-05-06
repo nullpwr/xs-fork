@@ -89,7 +89,7 @@ Hooks documented in `PLUGINS.md`:
 - Tag filtering via `with_tags(...)` / `without_tags(...)`
 
 Internals not in `PLUGINS.md` (AST node layout, value tag values,
-GC trigger heuristics) stay un-frozen — see `POLICY.md` "What isn't
+GC trigger heuristics) stay un-frozen; see `POLICY.md` "What isn't
 covered."
 
 ## Not frozen

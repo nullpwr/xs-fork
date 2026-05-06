@@ -252,7 +252,7 @@ static void a_cmp_imm(Emitter *e, int rn, int imm) {
 /* TST xn, #imm (via AND xzr, xn, #imm). Only used here for #1 (the SMI
  * tag bit), so we hand-encode that specific case. */
 static void a_tst_bit0(Emitter *e, int rn) {
-    /* ANDS xzr, xn, #1 — immediate encoding N=1, immr=0, imms=0 -> #1. */
+    /* ANDS xzr, xn, #1; immediate encoding N=1, immr=0, imms=0 -> #1. */
     emit_u32(e, 0xF240001Fu | ((uint32_t)(rn & 31) << 5));
 }
 /* CSET xd, cond  (conditional set: xd = cond ? 1 : 0). Implemented via
@@ -343,7 +343,7 @@ static void emit_inline_incref_x0(Emitter *e) {
     size_t j_smi = a_bcond_ph(e, CC_NE);
     /* CBZ x0, +3 instrs */
     size_t cbz_pc = e->pos;
-    emit_u32(e, 0xB4000000u | (uint32_t)(0u & 31));  /* CBZ x0, #imm — patched */
+    emit_u32(e, 0xB4000000u | (uint32_t)(0u & 31));  /* CBZ x0, #imm (patched) */
     /* LDR w1, [x0, #VAL_OFF_REFCOUNT] */
     a_ldr_w_off(e, 1, 0, VAL_OFF_REFCOUNT);
     /* ADD w1, w1, #1 */
@@ -837,7 +837,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
                 break;
             }
 
-            /* Closure construction / container ops / generic dispatch —
+            /* Closure construction / container ops / generic dispatch
              * all take the flush-and-step path. No frame is pushed by
              * these ops, so popping a result after vm_step_jit returns
              * is safe. */

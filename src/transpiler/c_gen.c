@@ -1154,7 +1154,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_INDEX:
-        /* a[start..end] becomes a slice op rather than a real index — we
+        /* a[start..end] becomes a slice op rather than a real index; we
          * can't go through xs_range here because that would materialise
          * the bounds as an array (and lose the open-end sentinel). */
         if (n->index.index && VAL_TAG(n->index.index) == NODE_RANGE) {
@@ -2898,7 +2898,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_add(s, "{\n");
             if (n->assign.value && VAL_TAG(n->assign.value) == NODE_LIT_TUPLE &&
                 n->assign.value->lit_array.elems.len == nelems) {
-                /* element-wise lowering — handles parallel swaps without
+                /* element-wise lowering; handles parallel swaps without
                  * materialising an array */
                 for (int i = 0; i < nelems; i++) {
                     sb_indent(s, depth + 1);
@@ -3121,7 +3121,7 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static xs_val xs_add(xs_val a, xs_val b) {\n"
         "    if (a.tag == 0 && b.tag == 0) return XS_INT(a.i + b.i);\n"
-        "    /* string concat must run before the float branch — otherwise\n"
+        "    /* string concat must run before the float branch; otherwise\n"
         "       \"pi: \" + 3.14 hits the float path and reinterprets the\n"
         "       string pointer as a double. */\n"
         "    if (a.tag == 2 || b.tag == 2) {\n"
@@ -3168,7 +3168,7 @@ char *transpile_c(Node *program, const char *filename) {
         "static void xs_throw_arith(const char *kind, const char *msg);\n"
         "static xs_val xs_div(xs_val a, xs_val b) {\n"
         "    if (a.tag == 1 || b.tag == 1) {\n"
-        "        /* IEEE float division — 1.0/0.0 == inf, 0.0/0.0 == NaN.\n"
+        "        /* IEEE float division: 1.0/0.0 == inf, 0.0/0.0 == NaN.\n"
         "           the interp matches this; only int divide-by-zero throws. */\n"
         "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
         "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
@@ -3225,7 +3225,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    memcpy(r, sa, la); memcpy(r + la, sb, lb); r[la + lb] = 0;\n"
         "    return XS_STR(r);\n"
         "}\n\n"
-        "/* shortest round-tripping float repr — matches the interp.\n"
+        "/* shortest round-tripping float repr; matches the interp.\n"
         "   prefer fixed-point so 1e10 becomes \"10000000000\" rather\n"
         "   than %g's \"1e+10\"; only fall back to scientific when the\n"
         "   magnitude is outside a friendly range. */\n"
@@ -3492,7 +3492,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    return XS_NULL;\n"
         "}\n\n"
-        "/* arr[start..end] / arr[start..=end] — null bounds mean open. */\n"
+        "/* arr[start..end] / arr[start..=end]; null bounds mean open. */\n"
         "static xs_val xs_slice(xs_val v, xs_val start, xs_val end, int inclusive) {\n"
         "    int len = 0;\n"
         "    if (v.tag == 5 && v.p) len = ((xs_arr*)v.p)->len;\n"

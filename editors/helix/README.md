@@ -41,6 +41,6 @@ once we ship a packaged release).
 
 ## Files
 
-- `languages.toml.snippet` — copy-paste source for your config.
+- `languages.toml.snippet`: copy-paste source for your config.
 - `queries/xs/highlights.scm`, `injections.scm`, `indents.scm`,
-  `textobjects.scm` — Helix runtime queries.
+  `textobjects.scm`: Helix runtime queries.
