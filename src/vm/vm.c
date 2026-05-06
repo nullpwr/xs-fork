@@ -4000,26 +4000,42 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     mc_result=arr;
                 } else if (strcmp(mc_name,"sort")==0) {
-                    /* Sort in place; matches interp behavior. */
+                    /* Bottom-up merge sort, same shape as the interp.
+                     * Falls back to value_cmp without a comparator. */
                     Value *cmp_fn = (mc_argc >= 1 && mc_args[0] &&
                                      (VAL_TAG(mc_args[0])==XS_NATIVE ||
                                       VAL_TAG(mc_args[0])==XS_CLOSURE))
                                     ? mc_args[0] : NULL;
                     XSArray *sa = mc_obj->arr;
-                    for(int j=0;j<sa->len-1;j++) for(int k=0;k<sa->len-1-j;k++){
-                        int worse;
-                        if (cmp_fn) {
-                            Value *pair[2] = { sa->items[k], sa->items[k+1] };
-                            Value *r = vm_invoke(vm, cmp_fn, pair, 2);
-                            frame = FRAME;
-                            worse = (r && VAL_IS_INT(r)) ? (VAL_INT(r) > 0) : 0;
-                            if (r) value_decref(r);
-                        } else {
-                            worse = (value_cmp(sa->items[k],sa->items[k+1]) > 0);
+                    int n = sa->len;
+                    if (n > 1) {
+                        Value **buf = xs_malloc((size_t)n * sizeof(Value*));
+                        for (int width = 1; width < n; width *= 2) {
+                            for (int s = 0; s < n; s += 2 * width) {
+                                int lo = s;
+                                int mid = (s + width < n) ? s + width : n;
+                                int hi  = (s + 2 * width < n) ? s + 2 * width : n;
+                                int p = lo, q = mid, k = lo;
+                                while (p < mid && q < hi) {
+                                    int cmp;
+                                    if (cmp_fn) {
+                                        Value *pair[2] = { sa->items[p], sa->items[q] };
+                                        Value *r = vm_invoke(vm, cmp_fn, pair, 2);
+                                        frame = FRAME;
+                                        cmp = (r && VAL_TAG(r) == XS_INT) ? (int)VAL_INT(r) : 0;
+                                        if (r) value_decref(r);
+                                    } else {
+                                        cmp = value_cmp(sa->items[p], sa->items[q]);
+                                    }
+                                    if (cmp <= 0) buf[k++] = sa->items[p++];
+                                    else          buf[k++] = sa->items[q++];
+                                }
+                                while (p < mid) buf[k++] = sa->items[p++];
+                                while (q < hi)  buf[k++] = sa->items[q++];
+                                for (int j = lo; j < hi; j++) sa->items[j] = buf[j];
+                            }
                         }
-                        if (worse) {
-                            Value *tmp=sa->items[k]; sa->items[k]=sa->items[k+1]; sa->items[k+1]=tmp;
-                        }
+                        free(buf);
                     }
                     mc_result=value_incref(mc_obj);
                 } else if (strcmp(mc_name,"filter")==0&&mc_argc>=1) {
@@ -6233,6 +6249,15 @@ int vm_str_eq_branch(Value *a, Value *b, int take_when_equal) {
    dispatch) is skipped on every concat. Hot on json/string-heavy
    workloads where it eats 30-40% of vm_step dispatches. */
 Value *vm_concat_fast(Value *a, Value *b) {
+    if (VAL_TAG(a) == XS_ARRAY && VAL_TAG(b) == XS_ARRAY) {
+        Value *r = xs_array_new();
+        int alen = a->arr ? a->arr->len : 0;
+        int blen = b->arr ? b->arr->len : 0;
+        for (int k = 0; k < alen; k++) array_push(r->arr, value_incref(a->arr->items[k]));
+        for (int k = 0; k < blen; k++) array_push(r->arr, value_incref(b->arr->items[k]));
+        value_decref(a); value_decref(b);
+        return r;
+    }
     char *as = value_str(a), *bs = value_str(b);
     size_t n = strlen(as) + strlen(bs) + 1;
     char *buf = xs_malloc(n); strcpy(buf, as); strcat(buf, bs);
