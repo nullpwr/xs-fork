@@ -47,9 +47,22 @@ gcc -O2 calc.c -o calc
 ./calc
 ```
 
-Limitations: no closures over local variables (yet), no GC
-integration, generators not supported. For full XS semantics, embed
-the interpreter via `xs_embed.h` instead.
+What works: structs / enums / classes, pattern matching, closures
+that don't capture mutable upvalues, try / catch / throw / defer,
+arithmetic, the bytecode-VM-equivalent surface for non-effecting
+code.
+
+What doesn't:
+
+- Effects (`perform` / `resume`): emits a runtime error. Implementing
+  proper resume requires delimited continuations on top of longjmp;
+  tracked for v1.3.
+- Closures that capture mutable locals: the C target boxes immutable
+  upvalues but doesn't track mutation through a captured `var` yet.
+- Generators (`fn*`): not lowered. Use the interp / VM / JS targets.
+
+For programs that need the full XS surface, embed the interpreter
+via `xs_embed.h` instead of going through `--emit c`.
 
 ## WASM
 
@@ -61,6 +74,21 @@ slower than native but portable.
 xs --emit wasm hello.xs        # out.wasm
 wasmtime out.wasm
 ```
+
+What works: arithmetic and direct calls, full match expressions
+(including guards), try / catch, struct field access with proper
+nominal typing, large-float printing, tuple swap, divide-by-zero,
+the format methods.
+
+Known gaps in the AOT path:
+
+- Effects: single-shot resume only (multi-shot bails to the
+  interp's eff_stack semantics, which the AOT can't model).
+- Spawn / channels / nurseries: lower to single-thread sequencing
+  (WASI doesn't grant real threads to a freestanding module).
+- IEEE 754 display precision: no full grisu / dragon4 in the
+  generated module, so a handful of float prints differ from interp
+  by the last digit.
 
 For full XS semantics in the browser, ship `xs.wasm` (the
 interpreter compiled to WASI) and run XS source through it via the

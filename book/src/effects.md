@@ -110,6 +110,21 @@ The same `page()` function works in tests with a stubbed `Net.fetch`
 that returns canned data; no separate test scaffolding, no mocking
 library.
 
+## Backend support
+
+| target              | status                                |
+|---------------------|---------------------------------------|
+| `--interp`          | full, multi-shot resume               |
+| `--vm`              | full, multi-shot resume               |
+| `--jit`             | full (lowered through vm_step_cf)     |
+| `--emit js`         | full single-shot; multi-shot wraps the handler in a generator |
+| `--emit wasm`       | single-shot only                      |
+| `--emit c`          | not implemented in v1.2               |
+
+`--emit c` falls back to a runtime error on `perform`. Implementing
+it properly needs delimited continuations on top of longjmp; tracked
+for v1.3.
+
 ## Cost
 
 Each `perform` is a stack walk to find the nearest matching handler,
