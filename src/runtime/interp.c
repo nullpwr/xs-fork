@@ -391,9 +391,13 @@ Interp *interp_new(const char *filename) {
     i->env       = env_incref(i->globals);
     /* Lowered from 1000: at ~700 C frames the default 8 MB stack starts to be
        cramped by try/catch + diagnostic paths, which could segfault before this
-       guard fired. 5000 is safe on the 8 MB default thread stack with
-       ASan headroom; bump XS_MAX_DEPTH if your program needs more. */
-    i->max_depth = 5000;
+       guard fired. The interp recurses on the C stack, so the
+       absolute ceiling is the OS thread stack (default 8 MB on
+       Linux, ASan inflates it heavily). 500 is the sanitiser-safe
+       number; release builds tolerate higher but not by enough to
+       advertise. Bump XS_MAX_DEPTH if you need more on a non-ASan
+       build. */
+    i->max_depth = 500;
     const char *md = getenv("XS_MAX_DEPTH");
     if (md) {
         int v = atoi(md);

@@ -198,15 +198,24 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
+        } else if (strcmp(op, "==") == 0) {
+            sb_add(s, "__xs_eq(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_addc(s, ')');
+        } else if (strcmp(op, "!=") == 0) {
+            sb_add(s, "(!__xs_eq(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_add(s, "))");
         } else {
-            /* default: -, *, %, ==, !=, <, >, <=, >=, &, |, ^, <<, >> */
+            /* default: -, *, %, <, >, <=, >=, &, |, ^, <<, >> */
             sb_addc(s, '(');
             emit_expr(s, n->binop.left, depth);
             sb_addc(s, ' ');
-            /* map == to === and != to !== for JS */
-            if (strcmp(op, "==") == 0) sb_add(s, "===");
-            else if (strcmp(op, "!=") == 0) sb_add(s, "!==");
-            else sb_add(s, op);
+            sb_add(s, op);
             sb_addc(s, ' ');
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
@@ -254,13 +263,13 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ")) throw new Error(\"assertion failed\"); })()");
             break;
         } else if (is_callee_name(n->call.callee, "assert_eq")) {
-            sb_add(s, "(function(){ if ((");
+            sb_add(s, "(function(){ if (!__xs_eq(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
-            sb_add(s, ") !== (");
+            sb_add(s, ", ");
             if (n->call.args.len > 1) emit_expr(s, n->call.args.items[1], depth);
-            sb_add(s, ")) throw new Error(\"assertion failed: \" + (");
+            sb_add(s, ")) throw new Error(\"assertion failed: \" + __xs_repr(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
-            sb_add(s, ") + \" !== \" + (");
+            sb_add(s, ") + \" !== \" + __xs_repr(");
             if (n->call.args.len > 1) emit_expr(s, n->call.args.items[1], depth);
             sb_add(s, ")); })()");
             break;
@@ -1458,7 +1467,23 @@ static int node_has_perform(Node *n) {
 static void emit_stmt(SB *s, Node *n, int depth) {
     if (!n) return;
     switch (VAL_TAG(n)) {
-    case NODE_LET:
+    case NODE_LET: {
+        /* `let _ = expr` -- discard binding. JS would otherwise reject
+           multiple `const _ = ...` declarations in the same block.
+           Detection: name is "_", or pattern is a wildcard, or both
+           are absent. Anything else is a real binding. */
+        int is_wild = 0;
+        if (n->let.name && strcmp(n->let.name, "_") == 0) is_wild = 1;
+        if (!n->let.name && n->let.pattern &&
+            VAL_TAG(n->let.pattern) == NODE_PAT_WILD) is_wild = 1;
+        if (!n->let.name && !n->let.pattern) is_wild = 1;
+        if (is_wild) {
+            sb_indent(s, depth);
+            if (n->let.value) emit_expr(s, n->let.value, depth);
+            sb_add(s, ";\n");
+            break;
+        }
+    }
         sb_indent(s, depth);
         sb_add(s, "const ");
         if (n->let.name) sb_add(s, n->let.name);
@@ -2224,6 +2249,35 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    return v;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_resume = (v) => v;\n");
+    /* Structural equality. JS '===' is reference-equal for arrays /
+       maps / objects; XS callers expect deep comparison the same way
+       the interp / VM compute it. */
+    sb_add(&s, "const __xs_eq = (a, b) => {\n");
+    sb_add(&s, "    if (a === b) return true;\n");
+    sb_add(&s, "    if (a === null || b === null || a === undefined || b === undefined) return false;\n");
+    sb_add(&s, "    if (typeof a !== typeof b) {\n");
+    sb_add(&s, "        if ((typeof a === 'number' && typeof b === 'bigint') ||\n");
+    sb_add(&s, "            (typeof a === 'bigint' && typeof b === 'number')) return Number(a) === Number(b);\n");
+    sb_add(&s, "        return false;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (Array.isArray(a)) {\n");
+    sb_add(&s, "        if (!Array.isArray(b) || a.length !== b.length) return false;\n");
+    sb_add(&s, "        for (let i = 0; i < a.length; i++) if (!__xs_eq(a[i], b[i])) return false;\n");
+    sb_add(&s, "        return true;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (a instanceof Map) {\n");
+    sb_add(&s, "        if (!(b instanceof Map) || a.size !== b.size) return false;\n");
+    sb_add(&s, "        for (const [k, v] of a) if (!__xs_eq(v, b.get(k))) return false;\n");
+    sb_add(&s, "        return true;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (typeof a === 'object') {\n");
+    sb_add(&s, "        const ak = Object.keys(a), bk = Object.keys(b);\n");
+    sb_add(&s, "        if (ak.length !== bk.length) return false;\n");
+    sb_add(&s, "        for (const k of ak) if (!__xs_eq(a[k], b[k])) return false;\n");
+    sb_add(&s, "        return true;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return false;\n");
+    sb_add(&s, "};\n");
     /* channel runtime */
     sb_add(&s, "function __xs_channel() {\n");
     sb_add(&s, "    const buf = [];\n");
