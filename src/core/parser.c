@@ -367,7 +367,7 @@ static int at_sync_point(TokenKind k) {
     return k == TK_LET || k == TK_VAR || k == TK_CONST || k == TK_FN ||
            k == TK_STRUCT || k == TK_ENUM || k == TK_CLASS || k == TK_IF ||
            k == TK_FOR || k == TK_WHILE || k == TK_RETURN || k == TK_IMPORT ||
-           k == TK_BIND || k == TK_ADAPT ||
+           k == TK_BIND ||
            k == TK_SEMICOLON || k == TK_NEWLINE || k == TK_RBRACE || k == TK_EOF;
 }
 
@@ -4575,100 +4575,6 @@ static Node *parse_stmt(Parser *p) {
         }
         Node *n = node_new(NODE_DEFER, span);
         n->defer_.body = body;
-        return n;
-    }
-
-    /* inline c { raw_code } */
-    if (tok->kind == TK_INLINE) {
-        pp_advance(p); /* consume 'inline' */
-        Token *lang = pp_peek(p, 0);
-        if (lang->kind != TK_IDENT || !lang->sval || strcmp(lang->sval, "c") != 0) {
-            parse_error_at(p, lang->span, "P0001", "expected 'c' after 'inline'");
-            return node_new(NODE_LIT_NULL, span);
-        }
-        pp_advance(p); /* consume 'c' */
-        Token *ob = pp_expect(p, TK_LBRACE, "expected '{' after 'inline c'");
-        (void)ob;
-        /* Capture raw text between braces by scanning tokens and reconstructing from source */
-        int brace_depth = 1;
-        int start_offset = pp_peek(p, 0)->span.offset;
-        int end_offset = start_offset;
-        while (!pp_at_end(p) && brace_depth > 0) {
-            Token *t = pp_peek(p, 0);
-            if (t->kind == TK_LBRACE) brace_depth++;
-            else if (t->kind == TK_RBRACE) {
-                brace_depth--;
-                if (brace_depth == 0) {
-                    end_offset = t->span.offset;
-                    pp_advance(p); /* consume closing } */
-                    break;
-                }
-            }
-            pp_advance(p);
-        }
-        /* Extract raw source text */
-        int code_len = end_offset - start_offset;
-        char *code = NULL;
-        if (code_len > 0 && p->source) {
-            code = xs_strndup(p->source + start_offset, code_len);
-        } else {
-            code = xs_strdup("");
-        }
-        Node *n = node_new(NODE_INLINE_C, span);
-        n->inline_c.code = code;
-        return n;
-    }
-
-    /* adapt fn name(params) -> ret { when target { body } ... } */
-    if (tok->kind == TK_ADAPT) {
-        pp_advance(p); /* consume 'adapt' */
-        pp_expect(p, TK_FN, "expected 'fn' after 'adapt'");
-        Token *name_tok2 = pp_expect(p, TK_IDENT, "expected function name after 'adapt fn'");
-        char *aname = xs_strdup(name_tok2->sval ? name_tok2->sval : "");
-
-        /* parse params */
-        pp_expect(p, TK_LPAREN, "expected '(' after adapt fn name");
-        ParamList aparams = parse_params(p);
-        pp_expect(p, TK_RPAREN, "expected ')'");
-
-        /* optional return type */
-        TypeExpr *aret_type = NULL;
-        if (pp_match(p, TK_ARROW)) aret_type = parse_type_expr(p);
-
-        /* parse when branches */
-        pp_expect(p, TK_LBRACE, "expected '{' to open adapt block");
-
-        char **targets = NULL;
-        Node **bodies = NULL;
-        int nbranches = 0;
-
-        while (!pp_check2(p, TK_RBRACE, TK_EOF)) {
-            /* skip newlines */
-            while (pp_match(p, TK_NEWLINE)) {}
-            if (pp_check2(p, TK_RBRACE, TK_EOF)) break;
-
-            pp_expect(p, TK_WHEN, "expected 'when' in adapt block");
-            Token *tgt_tok = pp_expect(p, TK_IDENT, "expected target name after 'when'");
-            char *tgt = xs_strdup(tgt_tok->sval ? tgt_tok->sval : "");
-
-            Node *body = parse_block(p);
-
-            targets = xs_realloc(targets, (nbranches + 1) * sizeof(char*));
-            bodies = xs_realloc(bodies, (nbranches + 1) * sizeof(Node*));
-            targets[nbranches] = tgt;
-            bodies[nbranches] = body;
-            nbranches++;
-        }
-        pp_expect(p, TK_RBRACE, "expected '}' to close adapt block");
-
-        Node *n = node_new(NODE_ADAPT_FN, span);
-        n->adapt_fn.name      = aname;
-        n->adapt_fn.params    = aparams;
-        n->adapt_fn.ret_type  = aret_type;
-        n->adapt_fn.is_pub    = is_pub;
-        n->adapt_fn.targets   = targets;
-        n->adapt_fn.bodies    = bodies;
-        n->adapt_fn.nbranches = nbranches;
         return n;
     }
 

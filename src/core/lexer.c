@@ -89,10 +89,8 @@ static const KWEntry KEYWORDS[] = {
     {"perform",  TK_PERFORM},
     {"handle",   TK_HANDLE},
     {"resume",   TK_RESUME},
-    {"inline",   TK_INLINE},
     {"tag",      TK_TAG},
     {"bind",     TK_BIND},
-    {"adapt",    TK_ADAPT},
     {"every",    TK_EVERY},
     {"after",    TK_AFTER},
     {"timeout",  TK_TIMEOUT},
@@ -1397,10 +1395,8 @@ const char *token_kind_name(TokenKind k) {
     case TK_REGEX: return "REGEX";
     case TK_UNSAFE: return "unsafe";
     case TK_USE: return "use";
-    case TK_INLINE: return "inline";
     case TK_TAG: return "tag";
     case TK_BIND: return "bind";
-    case TK_ADAPT: return "adapt";
     case TK_EVERY: return "every";
     case TK_AFTER: return "after";
     case TK_TIMEOUT: return "timeout";

@@ -476,9 +476,6 @@ void node_free(Node *n) {
         free(n->pat_map.keys);
         free(n->pat_map.sub);
         break;
-    case NODE_INLINE_C:
-        free(n->inline_c.code);
-        break;
     case NODE_TAG_DECL:
         free(n->tag_decl.name);
         paramlist_free(&n->tag_decl.params);
@@ -487,17 +484,6 @@ void node_free(Node *n) {
     case NODE_BIND:
         free(n->bind_decl.name);
         node_free(n->bind_decl.expr);
-        break;
-    case NODE_ADAPT_FN:
-        free(n->adapt_fn.name);
-        paramlist_free(&n->adapt_fn.params);
-        typeexpr_free(n->adapt_fn.ret_type);
-        for (int i = 0; i < n->adapt_fn.nbranches; i++) {
-            free(n->adapt_fn.targets[i]);
-            node_free(n->adapt_fn.bodies[i]);
-        }
-        free(n->adapt_fn.targets);
-        free(n->adapt_fn.bodies);
         break;
     case NODE_LIT_DURATION: break;
     case NODE_EVERY:

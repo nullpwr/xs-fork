@@ -105,7 +105,6 @@ RUNTIME_SRCS = src/runtime/interp.c \
                src/runtime/builtins_ffi.c \
                src/runtime/builtins_reflect.c \
                src/runtime/builtins_gc.c \
-               src/runtime/builtins_reactive.c \
                src/runtime/builtins_http.c \
                src/runtime/builtins_fs.c \
                src/runtime/error.c \
@@ -668,7 +667,6 @@ ESP32_DROP = $(wildcard src/jit/*.c) \
              src/runtime/builtins_async.c \
              src/runtime/builtins_thread.c \
              src/runtime/builtins_net.c \
-             src/runtime/builtins_reactive.c \
              src/net/http_server.c src/net/http_tls.c \
              src/db/xsdb.c \
              src/doc/docgen.c src/lint/lint.c src/pkg/pkg.c \

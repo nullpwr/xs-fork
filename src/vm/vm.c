@@ -1010,39 +1010,6 @@ static Value *vm_clear(Interp *interp, Value **args, int argc) {
     fflush(stdout);
     return xs_null();
 }
-static Value *vm_signal_fn(Interp *interp, Value **args, int argc) {
-    (void)interp;
-    XSSignal *sig = xs_calloc(1, sizeof(XSSignal));
-    sig->value = (argc >= 1) ? value_incref(args[0]) : xs_null();
-    sig->subscribers = NULL;
-    sig->nsubs = 0;
-    sig->subcap = 0;
-    sig->compute = NULL;
-    sig->notifying = 0;
-    sig->refcount = 1;
-    Value *v = xs_calloc(1, sizeof(Value));
-    v->tag = XS_SIGNAL;
-    v->refcount = 1;
-    v->signal = sig;
-    return v;
-}
-static Value *vm_derived(Interp *interp, Value **args, int argc) {
-    (void)interp;
-    XSSignal *sig = xs_calloc(1, sizeof(XSSignal));
-    sig->value = xs_null();
-    sig->subscribers = NULL;
-    sig->nsubs = 0;
-    sig->subcap = 0;
-    sig->compute = (argc >= 1) ? value_incref(args[0]) : NULL;
-    sig->notifying = 0;
-    sig->refcount = 1;
-    Value *v = xs_calloc(1, sizeof(Value));
-    v->tag = XS_SIGNAL;
-    v->refcount = 1;
-    v->signal = sig;
-    return v;
-}
-
 static void vm_register_stdlib(VM *vm) {
     Value *v;
 #define REG(name, fn) v = xs_native(fn); map_set(vm->globals, name, v); value_decref(v)
@@ -1131,8 +1098,6 @@ static void vm_register_stdlib(VM *vm) {
     REG("print_no_nl", vm_print_no_nl);
     REG("pprint",      vm_pprint);
     REG("clear",       vm_clear);
-    REG("signal",      vm_signal_fn);
-    REG("derived",     vm_derived);
 #undef REG
     /* Math constants stay auto-bound -- they're constants, not the
        module they live in. The modules themselves (math, os, fs, etc.)

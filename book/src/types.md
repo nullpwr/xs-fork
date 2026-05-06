@@ -22,7 +22,6 @@ system as follows.
 | struct value   | `XS_STRUCT_VAL` | name        | `Point { x: 1, y: 2 }` |
 | enum value     | `XS_ENUM_VAL`   | enum name   | `Result.Ok(42)`        |
 | class instance | `XS_INST`       | class name  | `Counter()`            |
-| signal         | `XS_SIGNAL`     | `Signal<T>` | `signal(0)`            |
 | regex          | `XS_REGEX`      | `re`        | `re("foo.*")`          |
 
 ## Numbers

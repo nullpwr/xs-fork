@@ -391,8 +391,9 @@ Interp *interp_new(const char *filename) {
     i->env       = env_incref(i->globals);
     /* Lowered from 1000: at ~700 C frames the default 8 MB stack starts to be
        cramped by try/catch + diagnostic paths, which could segfault before this
-       guard fired. 500 leaves headroom for the diagnostic to render safely. */
-    i->max_depth = 500;
+       guard fired. 5000 is safe on the 8 MB default thread stack with
+       ASan headroom; bump XS_MAX_DEPTH if your program needs more. */
+    i->max_depth = 5000;
     const char *md = getenv("XS_MAX_DEPTH");
     if (md) {
         int v = atoi(md);
@@ -1750,6 +1751,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0 ||
             strcmp(method, "size") == 0)
             return xs_int(utf8_strlen(s, slen));
+        if (strcmp(method, "byte_len") == 0 || strcmp(method, "bytes_len") == 0)
+            return xs_int(slen);
         if (strcmp(method, "upper") == 0 || strcmp(method, "to_upper") == 0) {
             int olen;
             char *r = utf8_str_upper(s, slen, &olen);
@@ -10035,12 +10038,6 @@ void interp_exec(Interp *i, Node *stmt) {
         break;
     }
 
-    case NODE_INLINE_C: {
-        fprintf(stderr, "xs: error: inline C blocks cannot be interpreted\n");
-        fprintf(stderr, "  hint: use 'xs transpile --target c' to compile inline C code\n");
-        break;
-    }
-
     case NODE_BIND: {
         /* reactive binding: bind name = expr */
         /* start tracking deps */
@@ -10110,58 +10107,6 @@ void interp_exec(Interp *i, Node *stmt) {
         Value *v = xs_func_new(fn);
         if (stmt->tag_decl.name)
             env_define(i->env, stmt->tag_decl.name, v, 1);
-        value_decref(v);
-        break;
-    }
-
-    case NODE_ADAPT_FN: {
-        /* Select the "native" branch, or first branch as fallback */
-        int sel = 0;
-        for (int j = 0; j < stmt->adapt_fn.nbranches; j++) {
-            if (strcmp(stmt->adapt_fn.targets[j], "native") == 0) { sel = j; break; }
-        }
-        if (stmt->adapt_fn.nbranches == 0) break;
-        Node *body = stmt->adapt_fn.bodies[sel];
-        int nparams = stmt->adapt_fn.params.len;
-        Node **params = nparams ? xs_malloc(nparams * sizeof(Node*)) : NULL;
-        Node **defaults = nparams ? xs_calloc(nparams, sizeof(Node*)) : NULL;
-        int *varflags = nparams ? xs_calloc(nparams, sizeof(int)) : NULL;
-        for (int j = 0; j < nparams; j++) {
-            Param *pm = &stmt->adapt_fn.params.items[j];
-            if (pm->pattern) {
-                params[j] = pm->pattern;
-            } else {
-                Node *pn = node_new(NODE_PAT_IDENT, pm->span);
-                pn->pat_ident.name = xs_strdup(pm->name ? pm->name : "_");
-                pn->pat_ident.mutable = 0;
-                params[j] = pn;
-            }
-            defaults[j] = pm->default_val;
-            varflags[j] = pm->variadic;
-        }
-        XSFunc *fn = func_new_ex(stmt->adapt_fn.name, params, nparams,
-                                 body, i->env, defaults, varflags);
-        if (nparams > 0) {
-            fn->param_type_names = xs_calloc(nparams, sizeof(char*));
-            int has_contracts = 0;
-            for (int j = 0; j < nparams; j++) {
-                Param *pm = &stmt->adapt_fn.params.items[j];
-                if (pm->type_ann && pm->type_ann->name)
-                    fn->param_type_names[j] = xs_strdup(pm->type_ann->name);
-                if (pm->contract) has_contracts = 1;
-            }
-            if (has_contracts) {
-                fn->param_contracts = xs_calloc(nparams, sizeof(Node*));
-                for (int j = 0; j < nparams; j++) {
-                    fn->param_contracts[j] = stmt->adapt_fn.params.items[j].contract;
-                }
-            }
-        }
-        if (stmt->adapt_fn.ret_type && stmt->adapt_fn.ret_type->name)
-            fn->ret_type_name = xs_strdup(stmt->adapt_fn.ret_type->name);
-        Value *v = xs_func_new(fn);
-        if (stmt->adapt_fn.name)
-            env_define(i->env, stmt->adapt_fn.name, v, 1);
         value_decref(v);
         break;
     }

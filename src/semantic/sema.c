@@ -232,12 +232,6 @@ static void walk_children(SemaCtx *ctx, Node *n) {
         case NODE_BIND:
             if (n->bind_decl.expr) walk(ctx, n->bind_decl.expr);
             break;
-        case NODE_ADAPT_FN:
-            for (int i = 0; i < n->adapt_fn.nbranches; i++)
-                if (n->adapt_fn.bodies[i]) walk(ctx, n->adapt_fn.bodies[i]);
-            break;
-        case NODE_INLINE_C:
-            break;
         default: break;
     }
 }
@@ -278,13 +272,6 @@ static void walk(SemaCtx *ctx, Node *n) {
         /* treat bind like a mutable var for sema purposes */
         if (n->bind_decl.name) bind_push(n->bind_decl.name, 1);
         if (n->bind_decl.expr) walk(ctx, n->bind_decl.expr);
-        break;
-
-    case NODE_ADAPT_FN:
-        /* treat adapt fn like a fn_decl for sema purposes */
-        if (n->adapt_fn.name) bind_push(n->adapt_fn.name, 0);
-        for (int i = 0; i < n->adapt_fn.nbranches; i++)
-            if (n->adapt_fn.bodies[i]) walk(ctx, n->adapt_fn.bodies[i]);
         break;
 
     case NODE_ASSIGN:

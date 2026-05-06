@@ -30,7 +30,6 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Tagged blocks (user-defined control structures) | works |
 | Reactive bindings (bind) | works |
 | Gradual contracts (where clauses) | works |
-| Adapt functions (multi-target) | works |
 | Inline C blocks (for C transpiler) | works |
 | Generators (fn*/yield) | works |
 | Structs, impl, traits | works |

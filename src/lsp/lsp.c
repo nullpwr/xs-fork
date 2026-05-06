@@ -198,11 +198,6 @@ static void collect_idents(LspDocument *doc, Node *n) {
         if (n->bind_decl.name) doc_add_ident(doc, n->bind_decl.name);
         if (n->bind_decl.expr) collect_idents(doc, n->bind_decl.expr);
         break;
-    case NODE_ADAPT_FN:
-        if (n->adapt_fn.name) doc_add_ident(doc, n->adapt_fn.name);
-        for (int i = 0; i < n->adapt_fn.nbranches; i++)
-            if (n->adapt_fn.bodies[i]) collect_idents(doc, n->adapt_fn.bodies[i]);
-        break;
     case NODE_PROGRAM:
         for (int i = 0; i < n->program.stmts.len; i++)
             collect_idents(doc, n->program.stmts.items[i]);
@@ -605,7 +600,6 @@ static const char *node_tag_name(NodeTag tag) {
     case NODE_IMPL_DECL:   return "impl block";
     case NODE_TAG_DECL:    return "tag";
     case NODE_BIND:        return "bind";
-    case NODE_ADAPT_FN:    return "adapt fn";
     case NODE_LAMBDA:      return "lambda";
     default:               return NULL;
     }
@@ -646,9 +640,6 @@ static Node *find_decl_in_ast(Node *n, const char *name) {
         return find_decl_in_ast(n->tag_decl.body, name);
     case NODE_BIND:
         if (n->bind_decl.name && strcmp(n->bind_decl.name, name) == 0) return n;
-        return NULL;
-    case NODE_ADAPT_FN:
-        if (n->adapt_fn.name && strcmp(n->adapt_fn.name, name) == 0) return n;
         return NULL;
     case NODE_MODULE_DECL:
         if (n->module_decl.name && strcmp(n->module_decl.name, name) == 0) return n;
@@ -793,15 +784,6 @@ static int find_refs_in_ast(Node *n, const char *name, LspRef *refs, int max_ref
             count++;
         }
         count = find_refs_in_ast(n->bind_decl.expr, name, refs, max_refs, count);
-        break;
-    case NODE_ADAPT_FN:
-        if (n->adapt_fn.name && strcmp(n->adapt_fn.name, name) == 0) {
-            refs[count].line = n->span.line;
-            refs[count].col = n->span.col;
-            count++;
-        }
-        for (int i = 0; i < n->adapt_fn.nbranches; i++)
-            count = find_refs_in_ast(n->adapt_fn.bodies[i], name, refs, max_refs, count);
         break;
     case NODE_MODULE_DECL:
         if (n->module_decl.name && strcmp(n->module_decl.name, name) == 0) {
@@ -1035,18 +1017,6 @@ static void build_hover_text(Node *decl, const char *name, char *out, size_t out
     case NODE_BIND:
         snprintf(out, outsz, "bind %s = <expr>", name);
         break;
-    case NODE_ADAPT_FN: {
-        int off = 0;
-        off += snprintf(out + off, outsz - (size_t)off, "adapt fn %s(", name);
-        for (int i = 0; i < decl->adapt_fn.params.len; i++) {
-            if (i > 0) off += snprintf(out + off, outsz - (size_t)off, ", ");
-            Param *pm = &decl->adapt_fn.params.items[i];
-            off += snprintf(out + off, outsz - (size_t)off, "%s",
-                            pm->name ? pm->name : "_");
-        }
-        snprintf(out + off, outsz - (size_t)off, ") { %d target(s) }", decl->adapt_fn.nbranches);
-        break;
-    }
     case NODE_LET: case NODE_VAR:
         snprintf(out, outsz, "%s %s%s",
                  decl->let.mutable ? "var" : "let",
@@ -1317,7 +1287,6 @@ static void lsp_handle_completions(int id, const char *json) {
                         switch (VAL_TAG(decl)) {
                         case NODE_FN_DECL: kind = 3; break;
                         case NODE_TAG_DECL: kind = 3; break;     /* Function */
-                        case NODE_ADAPT_FN: kind = 3; break;     /* Function */
                         case NODE_BIND: kind = 6; break;         /* Variable */
                         case NODE_CLASS_DECL: kind = 7; break;  /* Class */
                         case NODE_STRUCT_DECL: kind = 22; break; /* Struct */
@@ -1657,11 +1626,6 @@ static void collect_symbols_json(Node *n, char *buf, size_t bufsz, int *off, int
         /* SymbolKind: Variable = 13 */
         if (n->bind_decl.name)
             emit_symbol(buf, bufsz, off, first, n->bind_decl.name, 13, n->span);
-        break;
-    case NODE_ADAPT_FN:
-        /* SymbolKind: Function = 12 */
-        if (n->adapt_fn.name)
-            emit_symbol(buf, bufsz, off, first, n->adapt_fn.name, 12, n->span);
         break;
     case NODE_TYPE_ALIAS:
         /* SymbolKind: TypeParameter = 26 */

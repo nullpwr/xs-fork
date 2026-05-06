@@ -135,10 +135,8 @@ typedef enum {
     NODE_ACTOR_DECL,
     NODE_SEND_EXPR,     /* actor ! message */
 
-    NODE_INLINE_C,
     NODE_TAG_DECL,
     NODE_BIND,
-    NODE_ADAPT_FN,
 
     NODE_LIT_DURATION,
     NODE_EVERY,
@@ -585,8 +583,6 @@ struct Node {
             int      rest;
         } pat_map;
 
-        struct { char *code; } inline_c;
-
         struct {
             char      *name;
             ParamList  params;
@@ -598,16 +594,6 @@ struct Node {
             char *name;
             Node *expr;
         } bind_decl;
-
-        struct {
-            char      *name;
-            ParamList  params;
-            TypeExpr  *ret_type;
-            int        is_pub;
-            char     **targets;     /* "native", "js", "wasm" */
-            Node     **bodies;      /* parallel block nodes */
-            int        nbranches;
-        } adapt_fn;
 
         struct { int64_t ns; } lit_duration;    /* stored as nanoseconds */
 

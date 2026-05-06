@@ -120,15 +120,14 @@ let big = m.filter(fn(k, v) { v > 1 })
 assert(big["a"] == null || !big.has("a"), "filter removes a")
 assert_eq(big["b"], 2)
 
--- signals
-let count = signal(0)
-assert_eq(count.get(), 0)
-count.set(5)
-assert_eq(count.get(), 5)
-let doubled_sig = derived(fn() { count.get() * 2 })
-assert_eq(doubled_sig.get(), 10)
-count.set(10)
-assert_eq(doubled_sig.get(), 20)
+-- reactive bindings (the signal/derived library was cut in v1.2;
+-- bind is the surviving reactive surface)
+var price = 100
+var qty = 2
+bind total = price * qty
+assert_eq(total, 200)
+price = 150
+assert_eq(total, 300)
 
 -- @ capture pattern
 fn describe(val) {

@@ -2922,12 +2922,6 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         emit_expr(s, n, depth);
         sb_add(s, ";\n");
         break;
-    case NODE_INLINE_C:
-        sb_indent(s, depth);
-        sb_add(s, "/* inline C */\n");
-        if (n->inline_c.code) sb_add(s, n->inline_c.code);
-        sb_addc(s, '\n');
-        break;
     case NODE_BIND:
         sb_indent(s, depth);
         sb_printf(s, "XsValue %s = ", n->bind_decl.name ? n->bind_decl.name : "_bind");
@@ -2947,26 +2941,6 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
-    case NODE_ADAPT_FN: {
-        /* Select "native" branch, fallback to first */
-        int sel = 0;
-        for (int ai = 0; ai < n->adapt_fn.nbranches; ai++) {
-            if (strcmp(n->adapt_fn.targets[ai], "native") == 0) { sel = ai; break; }
-        }
-        if (n->adapt_fn.nbranches == 0) break;
-        sb_indent(s, depth);
-        sb_printf(s, "XsValue %s(", n->adapt_fn.name ? n->adapt_fn.name : "_adapt");
-        for (int ai = 0; ai < n->adapt_fn.params.len; ai++) {
-            if (ai > 0) sb_add(s, ", ");
-            Param *pm = &n->adapt_fn.params.items[ai];
-            sb_printf(s, "XsValue %s", pm->name ? pm->name : "_");
-        }
-        sb_add(s, ") {\n");
-        if (n->adapt_fn.bodies[sel]) emit_stmt(s, n->adapt_fn.bodies[sel], depth + 1);
-        sb_indent(s, depth);
-        sb_add(s, "}\n");
-        break;
-    }
     default:
         /* emit as expression statement for any unhandled node */
         sb_indent(s, depth);

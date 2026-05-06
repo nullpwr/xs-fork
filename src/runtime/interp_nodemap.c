@@ -56,7 +56,6 @@ const char *node_tag_to_string(NodeTag tag) {
     case NODE_STRUCT_INIT:return "struct_init";
     case NODE_EXPR_STMT:  return "expr_stmt";
     case NODE_BIND:       return "bind";
-    case NODE_ADAPT_FN:   return "adapt_fn";
     case NODE_LIT_DURATION: return "duration";
     case NODE_EVERY:      return "every";
     case NODE_AFTER:      return "after";
@@ -111,7 +110,6 @@ int node_tag_from_string(const char *s) {
     if (strcmp(s, "struct_init") == 0) return NODE_STRUCT_INIT;
     if (strcmp(s, "expr_stmt") == 0) return NODE_EXPR_STMT;
     if (strcmp(s, "bind") == 0) return NODE_BIND;
-    if (strcmp(s, "adapt_fn") == 0) return NODE_ADAPT_FN;
     if (strcmp(s, "duration") == 0) return NODE_LIT_DURATION;
     if (strcmp(s, "every") == 0) return NODE_EVERY;
     if (strcmp(s, "after") == 0) return NODE_AFTER;

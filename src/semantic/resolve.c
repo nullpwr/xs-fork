@@ -161,10 +161,6 @@ static void collect_toplevel(Node *prog, SymTab *st) {
                 sym_define(st, s->bind_decl.name ? s->bind_decl.name : "",
                            SYM_LOCAL, NULL, s, 1);
                 break;
-            case NODE_ADAPT_FN:
-                sym_define(st, s->adapt_fn.name ? s->adapt_fn.name : "",
-                           SYM_FN, NULL, s, 0);
-                break;
             case NODE_STRUCT_DECL:
                 sym_define(st, s->struct_decl.name ? s->struct_decl.name : "",
                            SYM_STRUCT, NULL, s, 0);
@@ -265,22 +261,6 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
         if (n->bind_decl.expr) resolve_node(n->bind_decl.expr, st, ctx);
         if (n->bind_decl.name)
             sym_define(st, n->bind_decl.name, SYM_LOCAL, NULL, n, 1);
-        break;
-    }
-
-    case NODE_ADAPT_FN: {
-        /* Resolve each branch body like a fn body */
-        for (int ai = 0; ai < n->adapt_fn.nbranches; ai++) {
-            scope_push(st);
-            for (int pi = 0; pi < n->adapt_fn.params.len; pi++) {
-                Param *pm = &n->adapt_fn.params.items[pi];
-                if (pm->name)
-                    sym_define(st, pm->name, SYM_PARAM, NULL, NULL, 0);
-            }
-            if (n->adapt_fn.bodies[ai])
-                resolve_node(n->adapt_fn.bodies[ai], st, ctx);
-            scope_pop(st);
-        }
         break;
     }
 

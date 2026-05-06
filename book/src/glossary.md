@@ -3,10 +3,6 @@
 **Actor.** A thread-isolated object whose only inbound surface is its
 methods, serialised through a per-actor message queue.
 
-**Adapt function.** A function tagged with multiple target backends
-that XS picks at compile time. Used to provide platform-specific
-implementations.
-
 **Algebraic effect.** A named operation that a callee performs and
 the caller's `handle` block fulfils. Like exceptions, but the
 handler can resume the callee with a value.

@@ -4,162 +4,159 @@
 #include "runtime/interp.h"
 #include "runtime/builtins.h"
 #include "core/value.h"
-#include "core/xs_regex.h"
-#ifndef re_nsub
-#define re_nsub nsub
-#endif
+#include "core/regex.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-/* re (regex) module */
-/* Convert PCRE-style shorthand escapes to POSIX ERE equivalents */
-static char *re_to_posix(const char *pat) {
-    /* Allocate worst-case: each \X can expand to ~12 chars */
-    size_t plen = strlen(pat);
-    char *out = xs_malloc(plen * 12 + 1);
-    char *p = out;
-    for (size_t i = 0; i < plen; i++) {
-        if (pat[i] == '\\' && i+1 < plen) {
-            char c = pat[++i];
-            switch (c) {
-            case 'd': memcpy(p,"[0-9]",5);     p+=5; break;
-            case 'D': memcpy(p,"[^0-9]",6);    p+=6; break;
-            case 'w': memcpy(p,"[A-Za-z0-9_]",12); p+=12; break;
-            case 'W': memcpy(p,"[^A-Za-z0-9_]",13); p+=13; break;
-            case 's': memcpy(p,"[ \\t\\n\\r\\f\\v]",14); p+=14; break;
-            case 'S': memcpy(p,"[^ \\t\\n\\r\\f\\v]",15); p+=15; break;
-            default:  *p++='\\'; *p++=c; break;
-            }
-        } else {
-            *p++ = pat[i];
-        }
-    }
-    *p = '\0';
-    return out;
+/* The regex builtins now run on the in-tree Thompson NFA in
+   src/core/regex.c (full PCRE shorthand: \d, \w, \s, \b plus
+   non-greedy quantifiers, non-capturing groups, lookaheads). The
+   previous shape was a `regex.h` POSIX wrapper with a hand-rolled
+   `\d -> [0-9]` translator; that lost any feature POSIX itself
+   doesn't ship (notably `\b` and the lookarounds), so we just
+   call the real engine directly. */
+
+static int compile_or_null(const char *pat, XSRegex *re) {
+    return xs_regex_compile(re, pat, 0) == 0;
 }
 
 static Value *native_re_test(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_FALSE_VAL);
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return value_incref(XS_FALSE_VAL);
-    int r=(regexec(&re,a[1]->s,0,NULL,0)==0);
-    regfree(&re); return r?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
+        return value_incref(XS_FALSE_VAL);
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return value_incref(XS_FALSE_VAL);
+    XSMatch m;
+    int ok = xs_regex_search(&re, a[1]->s, (int)strlen(a[1]->s), 0, &m) && m.matched;
+    xs_regex_free(&re);
+    return ok ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
 }
+
 static Value *native_re_match(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return value_incref(XS_NULL_VAL);
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return value_incref(XS_NULL_VAL);
-    regmatch_t m; Value *res=value_incref(XS_NULL_VAL);
-    if (regexec(&re,a[1]->s,1,&m,0)==0) {
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
+        return value_incref(XS_NULL_VAL);
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return value_incref(XS_NULL_VAL);
+    XSMatch m;
+    Value *res = value_incref(XS_NULL_VAL);
+    int slen = (int)strlen(a[1]->s);
+    if (xs_regex_search(&re, a[1]->s, slen, 0, &m) && m.matched) {
         value_decref(res);
-        res=xs_str_n(a[1]->s+m.rm_so,(int)(m.rm_eo-m.rm_so));
+        res = xs_str_n(a[1]->s + m.start, m.end - m.start);
     }
-    regfree(&re); return res;
+    xs_regex_free(&re);
+    return res;
 }
+
 static Value *native_re_find_all(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
-    if (a[0]->s[0]=='\0') return xs_array_new();
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return xs_array_new();
-    Value *arr=xs_array_new();
-    const char *s=a[1]->s;
-    regmatch_t m;
-    while (*s&&regexec(&re,s,1,&m,0)==0) {
-        array_push(arr->arr,xs_str_n(s+m.rm_so,(int)(m.rm_eo-m.rm_so)));
-        if (m.rm_eo==m.rm_so) { s++; continue; }
-        s+=m.rm_eo;
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
+        return xs_array_new();
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return xs_array_new();
+    Value *arr = xs_array_new();
+    const char *s = a[1]->s;
+    int slen = (int)strlen(s);
+    int pos = 0;
+    XSMatch m;
+    while (pos <= slen && xs_regex_search(&re, s, slen, pos, &m) && m.matched) {
+        array_push(arr->arr, xs_str_n(s + m.start, m.end - m.start));
+        if (m.end == m.start) pos = m.end + 1;
+        else                  pos = m.end;
     }
-    regfree(&re); return arr;
+    xs_regex_free(&re);
+    return arr;
 }
+
 static Value *native_re_replace(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<3||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR||VAL_TAG(a[2])!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return value_incref(a[1]);
-    const char *s=a[1]->s; const char *rep=a[2]->s;
-    regmatch_t m;
-    if (regexec(&re,s,1,&m,0)!=0){regfree(&re);return value_incref(a[1]);}
-    int replen=(int)strlen(rep);
-    int rlen=(int)m.rm_so+replen+(int)strlen(s+m.rm_eo)+1;
-    char *r=xs_malloc(rlen);
-    memcpy(r,s,(size_t)m.rm_so);
-    memcpy(r+m.rm_so,rep,(size_t)replen);
-    strcpy(r+m.rm_so+replen,s+m.rm_eo);
-    Value *v=xs_str(r); free(r); regfree(&re); return v;
+    if (n < 3 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR ||
+        VAL_TAG(a[2]) != XS_STR)
+        return n > 1 ? value_incref(a[1]) : xs_str("");
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return value_incref(a[1]);
+    int slen = (int)strlen(a[1]->s);
+    char *out = xs_regex_replace(&re, a[1]->s, slen, a[2]->s);
+    xs_regex_free(&re);
+    if (!out) return value_incref(a[1]);
+    Value *v = xs_str(out);
+    free(out);
+    return v;
 }
+
 static Value *native_re_replace_all(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<3||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR||VAL_TAG(a[2])!=XS_STR) return n>1?value_incref(a[1]):xs_str("");
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return value_incref(a[1]);
-    const char *s=a[1]->s; const char *rep=a[2]->s; int replen=(int)strlen(rep);
-    int cap=256; char *out=xs_malloc(cap); int oi=0;
-    regmatch_t m;
-    while (*s&&regexec(&re,s,1,&m,0)==0){
-        int plen=(int)m.rm_so;
-        if (oi+plen+replen+2>cap){cap=(cap+plen+replen)*2;out=xs_realloc(out,cap);}
-        memcpy(out+oi,s,(size_t)plen); oi+=plen;
-        memcpy(out+oi,rep,(size_t)replen); oi+=replen;
-        if (m.rm_eo==m.rm_so){
-            if (oi+2>cap){cap*=2;out=xs_realloc(out,cap);}
-            out[oi++]=*s++;
-        } else s+=m.rm_eo;
-    }
-    int sl=(int)strlen(s);
-    if (oi+sl+2>cap){cap=oi+sl+2;out=xs_realloc(out,cap);}
-    memcpy(out+oi,s,(size_t)sl); oi+=sl; out[oi]='\0';
-    Value *v=xs_str(out); free(out); regfree(&re); return v;
+    if (n < 3 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR ||
+        VAL_TAG(a[2]) != XS_STR)
+        return n > 1 ? value_incref(a[1]) : xs_str("");
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return value_incref(a[1]);
+    int slen = (int)strlen(a[1]->s);
+    char *out = xs_regex_replace_all(&re, a[1]->s, slen, a[2]->s);
+    xs_regex_free(&re);
+    if (!out) return value_incref(a[1]);
+    Value *v = xs_str(out);
+    free(out);
+    return v;
 }
+
 static Value *native_re_split(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
-    char *pat=re_to_posix(a[0]->s);
-    regex_t re; int rc=regcomp(&re,pat,REG_EXTENDED); free(pat);
-    if (rc!=0) return xs_array_new();
-    Value *arr=xs_array_new();
-    const char *s=a[1]->s;
-    regmatch_t m;
-    while (*s&&regexec(&re,s,1,&m,0)==0){
-        array_push(arr->arr,xs_str_n(s,(int)m.rm_so));
-        if (m.rm_eo==m.rm_so){s++;continue;}
-        s+=m.rm_eo;
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
+        return xs_array_new();
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return xs_array_new();
+    int slen = (int)strlen(a[1]->s);
+    char **parts = NULL;
+    int nparts = 0;
+    Value *arr = xs_array_new();
+    /* xs_regex_split returns the number of parts produced, not 0/-1. */
+    xs_regex_split(&re, a[1]->s, slen, &parts, &nparts);
+    if (parts) {
+        for (int j = 0; j < nparts; j++) {
+            array_push(arr->arr, xs_str(parts[j]));
+            free(parts[j]);
+        }
+        free(parts);
     }
-    array_push(arr->arr,xs_str(s));
-    regfree(&re); return arr;
+    xs_regex_free(&re);
+    return arr;
 }
+
 static Value *native_re_groups(Interp *ig, Value **a, int n) {
     (void)ig;
-    if (n<2||VAL_TAG(a[0])!=XS_STR||VAL_TAG(a[1])!=XS_STR) return xs_array_new();
-    regex_t re; if (regcomp(&re,a[0]->s,REG_EXTENDED)!=0) return xs_array_new();
-    int ng=(int)re.re_nsub+1; if(ng<1)ng=1;
-    regmatch_t *m=xs_malloc(ng*sizeof(regmatch_t));
-    Value *arr=xs_array_new();
-    if (regexec(&re,a[1]->s,(size_t)ng,m,0)==0){
-        for(int j=1;j<ng;j++){
-            if (m[j].rm_so<0) array_push(arr->arr,value_incref(XS_NULL_VAL));
-            else array_push(arr->arr,xs_str_n(a[1]->s+m[j].rm_so,(int)(m[j].rm_eo-m[j].rm_so)));
+    if (n < 2 || VAL_TAG(a[0]) != XS_STR || VAL_TAG(a[1]) != XS_STR)
+        return xs_array_new();
+    XSRegex re;
+    if (!compile_or_null(a[0]->s, &re)) return xs_array_new();
+    int slen = (int)strlen(a[1]->s);
+    XSMatch m;
+    Value *arr = xs_array_new();
+    if (xs_regex_search(&re, a[1]->s, slen, 0, &m) && m.matched) {
+        for (int j = 1; j < m.ngroups; j++) {
+            int gs = m.group_starts[j];
+            int ge = m.group_ends[j];
+            if (gs < 0 || ge < 0)
+                array_push(arr->arr, value_incref(XS_NULL_VAL));
+            else
+                array_push(arr->arr, xs_str_n(a[1]->s + gs, ge - gs));
         }
     }
-    free(m); regfree(&re); return arr;
+    xs_regex_free(&re);
+    return arr;
 }
+
 Value *make_re_module(void) {
-    XSMap *m=map_new();
-    map_take(m,"test",        xs_native(native_re_test));
-    map_take(m,"is_match",    xs_native(native_re_test));
-    map_take(m,"match",       xs_native(native_re_match));
-    map_take(m,"find_all",    xs_native(native_re_find_all));
-    map_take(m,"replace",     xs_native(native_re_replace));
-    map_take(m,"replace_all", xs_native(native_re_replace_all));
-    map_take(m,"split",       xs_native(native_re_split));
-    map_take(m,"groups",      xs_native(native_re_groups));
+    XSMap *m = map_new();
+    map_take(m, "test",        xs_native(native_re_test));
+    map_take(m, "is_match",    xs_native(native_re_test));
+    map_take(m, "match",       xs_native(native_re_match));
+    map_take(m, "find_all",    xs_native(native_re_find_all));
+    map_take(m, "replace",     xs_native(native_re_replace));
+    map_take(m, "replace_all", xs_native(native_re_replace_all));
+    map_take(m, "split",       xs_native(native_re_split));
+    map_take(m, "groups",      xs_native(native_re_groups));
     return xs_module(m);
 }

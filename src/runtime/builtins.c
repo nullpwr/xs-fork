@@ -1256,7 +1256,6 @@ Value *make_cli_module(void);
 Value *make_ffi_module(void);
 Value *make_reflect_module(void);
 Value *make_gc_module(void);
-Value *make_reactive_module(void);
 Value *make_toml_module(void);
 Value *make_http_module(void);
 Value *make_fs_module(void);
@@ -1334,10 +1333,6 @@ void stdlib_register(Interp *i) {
     interp_define_native(i, "clone",     builtin_clone);
     interp_define_native(i, "ord",       builtin_ord);
     interp_define_native(i, "chr",       builtin_chr);
-extern Value *builtin_signal(Interp *, Value **, int);
-extern Value *builtin_derived(Interp *, Value **, int);
-    interp_define_native(i, "signal",    builtin_signal);
-    interp_define_native(i, "derived",   builtin_derived);
     interp_define_native(i, "type_of",   builtin_type_of);
     interp_define_native(i, "contains",  builtin_contains);
     interp_define_native(i, "channel",   builtin_channel);
@@ -1446,7 +1441,6 @@ Value *stdlib_load_module(Interp *i, const char *name) {
         { "ffi",         make_ffi_module },
         { "reflect",     make_reflect_module },
         { "gc",          make_gc_module },
-        { "reactive",    make_reactive_module },
         { "toml",        make_toml_module },
         { "http",        make_http_module },
         { "fs",          make_fs_module },

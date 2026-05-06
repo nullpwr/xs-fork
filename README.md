@@ -46,12 +46,6 @@ fn safe_div(a: int, b: int where b != 0) {
     return a / b
 }
 
--- adapt: multi-target functions
-adapt fn render(data: str) -> str {
-    when native { return "native:" ++ data }
-    when js     { return "js:" ++ data }
-}
-
 -- function overloading
 fn area(r) = 3.14 * r * r
 fn area(w, h) = w * h
@@ -123,7 +117,6 @@ for the backend matrix.
 - Gradual typing with `--check` and `--strict`
 - Reactive bindings (`bind`) that auto-update when dependencies change
 - Gradual contracts (`where` clauses) for runtime-checked type conditions
-- Adapt functions (`adapt fn`) with per-target implementations (native/js/wasm)
 - Structs, traits, enums, classes with inheritance
 - Pattern matching with destructuring and guards
 - Closures, generators (`fn*`/`yield`), arrow lambdas

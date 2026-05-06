@@ -2233,8 +2233,6 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     case NODE_ACTOR_DECL:
     case NODE_TAG_DECL:
     case NODE_BIND:
-    case NODE_ADAPT_FN:
-    case NODE_INLINE_C:
         emit_null(code);
         break;
 
@@ -3149,12 +3147,10 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     case NODE_ACTOR_DECL:
         break;
 
-    /* ---- Tag/Bind/Adapt ---- */
+    /* ---- Tag/Bind ---- */
 
     case NODE_TAG_DECL:
     case NODE_BIND:
-    case NODE_ADAPT_FN:
-    case NODE_INLINE_C:
         break;
 
     /* ---- Nursery ---- */

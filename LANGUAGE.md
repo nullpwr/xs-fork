@@ -1988,86 +1988,23 @@ This is useful for performance-critical inner loops, FFI glue, or leveraging C l
 
 ---
 
-## Adapt Functions
+## Reactive bindings
 
-`adapt fn` defines a function with different implementations for different compilation targets. The interpreter always picks the `native` branch. The JS transpiler picks `js`. The C transpiler picks `native`. The WASM transpiler picks `wasm`.
-
-```xs
-adapt fn greet(name: str) -> str {
-    when native {
-        return "hello from native, " ++ name
-    }
-    when js {
-        return "hello from js, " ++ name
-    }
-    when wasm {
-        return "hello from wasm, " ++ name
-    }
-}
-
-println(greet("world"))          -- hello from native, world (in interpreter)
-```
-
-If the current target doesn't have a matching branch, it falls back to `native`, then to the first branch defined.
+`bind` declares a name whose value tracks an expression: when any
+referenced var changes, the bound name re-evaluates.
 
 ```xs
--- only need native and js? that's fine
-adapt fn fast_hash(data: str) -> int {
-    when native {
-        var h = 0
-        for ch in data { h = h * 31 + type(ch) }
-        return h
-    }
-    when js {
-        return data.len() * 37
-    }
-}
+var price = 100
+var qty   = 2
+bind total = price * qty
+println(total)                  -- 200
+price = 150
+println(total)                  -- 300
 ```
 
-Adapt functions support all the same features as regular functions: type annotations, contracts, default params. The branches are just blocks, so any XS code works inside them.
-
-```xs
--- combine with contracts
-adapt fn validate(n: int where n > 0) -> int {
-    when native {
-        return n * 2
-    }
-    when js {
-        return n
-    }
-}
-```
-
-This makes multi-target code a language-level concept instead of just a build flag. Write your platform-specific code inline, and the right branch gets selected automatically.
-
----
-
-## Signals (Reactive State)
-
-Signals are observable values that automatically propagate changes. `derived()` creates computed signals that update when their dependencies change.
-
-```xs
-let count = signal(0)
-println(count.get())             -- 0
-
-count.set(5)
-println(count.get())             -- 5
-
--- derived signals auto-update
-let doubled = derived(fn() { count.get() * 2 })
-println(doubled.get())           -- 10
-
-count.set(10)
-println(doubled.get())           -- 20
-
--- subscribe to changes
-count.subscribe(fn(val) {
-    println("count changed to {val}")
-})
-count.set(42)                    -- prints: count changed to 42
-```
-
-Signals are also available via `import reactive` as `reactive.signal()` and `reactive.derived()`.
+XS used to ship a separate `signal()` / `derived()` / `subscribe()`
+library for the same job; it was cut in 1.2 because `bind` covers
+the same use cases with less surface and works on every backend.
 
 ---
 
@@ -3176,19 +3113,6 @@ Manual control of the garbage collector.
 
 ---
 
-### `reactive`
-
-Reactive state primitives.
-
-| Function | Description |
-|----------|-------------|
-| `signal(val)` | Create a reactive signal (observable value) |
-| `derived(fn)` | Create a derived signal computed from others |
-| `effect(fn, ...signals)` | Run side effect immediately, re-run when passed signals change |
-
-`signal(val)` and `derived(fn)` are also available as top-level builtins.
-
----
 
 ### `fs`
 
