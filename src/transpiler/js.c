@@ -129,18 +129,61 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         sb_addc(s, ']');
         break;
-    case NODE_LIT_MAP:
-        sb_add(s, "new Map([");
+    case NODE_LIT_MAP: {
+        /* Spreads and bareword identifier keys both need special handling.
+           An identifier key like `{ a: 1 }` is a string key "a" in the
+           interpreter and VM, not a variable lookup. A spread `...m`
+           merges the source map's entries in order. We build the Map
+           imperatively so spreads can interleave with explicit entries. */
+        int has_spread = 0;
         for (int i = 0; i < n->lit_map.keys.len; i++) {
-            if (i) sb_add(s, ", ");
-            sb_addc(s, '[');
-            emit_expr(s, n->lit_map.keys.items[i], depth);
-            sb_add(s, ", ");
-            emit_expr(s, n->lit_map.vals.items[i], depth);
-            sb_addc(s, ']');
+            Node *k = n->lit_map.keys.items[i];
+            if (k && VAL_TAG(k) == NODE_SPREAD) { has_spread = 1; break; }
         }
-        sb_add(s, "])");
+        if (!has_spread) {
+            sb_add(s, "new Map([");
+            for (int i = 0; i < n->lit_map.keys.len; i++) {
+                Node *k = n->lit_map.keys.items[i];
+                if (i) sb_add(s, ", ");
+                sb_addc(s, '[');
+                if (k && VAL_TAG(k) == NODE_IDENT) {
+                    sb_addc(s, '"');
+                    sb_add(s, k->ident.name);
+                    sb_addc(s, '"');
+                } else {
+                    emit_expr(s, k, depth);
+                }
+                sb_add(s, ", ");
+                emit_expr(s, n->lit_map.vals.items[i], depth);
+                sb_addc(s, ']');
+            }
+            sb_add(s, "])");
+        } else {
+            sb_add(s, "(() => { const __m = new Map();");
+            for (int i = 0; i < n->lit_map.keys.len; i++) {
+                Node *k = n->lit_map.keys.items[i];
+                if (k && VAL_TAG(k) == NODE_SPREAD) {
+                    sb_add(s, " { const __src = ");
+                    emit_expr(s, k->spread.expr, depth);
+                    sb_add(s, "; if (__src instanceof Map) { for (const [__k, __v] of __src) __m.set(__k, __v); } else if (__src && typeof __src === 'object') { for (const __k of Object.keys(__src)) __m.set(__k, __src[__k]); } }");
+                } else {
+                    sb_add(s, " __m.set(");
+                    if (k && VAL_TAG(k) == NODE_IDENT) {
+                        sb_addc(s, '"');
+                        sb_add(s, k->ident.name);
+                        sb_addc(s, '"');
+                    } else {
+                        emit_expr(s, k, depth);
+                    }
+                    sb_add(s, ", ");
+                    emit_expr(s, n->lit_map.vals.items[i], depth);
+                    sb_add(s, ");");
+                }
+            }
+            sb_add(s, " return __m; })()");
+        }
         break;
+    }
     case NODE_IDENT:
         if (in_class_method && n->ident.name && strcmp(n->ident.name, "self") == 0)
             sb_add(s, "this");
@@ -244,6 +287,32 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             emit_expr(s, n->binop.right, depth);
             sb_add(s, "))");
+        } else if (strcmp(op, "<=>") == 0) {
+            sb_add(s, "__xs_cmp(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.right, depth);
+            sb_addc(s, ')');
+        } else if (strcmp(op, "is") == 0) {
+            /* `value is TypeName` -> __xs_is_a(value, "TypeName"). The RHS
+               is parsed as an identifier (or a chain of identifiers); we
+               emit it as a string literal. */
+            sb_add(s, "__xs_is_a(");
+            emit_expr(s, n->binop.left, depth);
+            sb_add(s, ", \"");
+            if (n->binop.right && VAL_TAG(n->binop.right) == NODE_IDENT) {
+                sb_add(s, n->binop.right->ident.name);
+            } else if (n->binop.right && VAL_TAG(n->binop.right) == NODE_LIT_STRING) {
+                if (n->binop.right->lit_string.sval) sb_add(s, n->binop.right->lit_string.sval);
+            }
+            sb_add(s, "\")");
+        } else if (strcmp(op, "in") == 0) {
+            /* x in collection -> __xs_contains(collection, x) */
+            sb_add(s, "__xs_contains(");
+            emit_expr(s, n->binop.right, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->binop.left, depth);
+            sb_addc(s, ')');
         } else {
             /* default: -, *, %, <, >, <=, >=, &, |, ^, <<, >> */
             sb_addc(s, '(');
@@ -286,10 +355,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else if (is_callee_name(n->call.callee, "type")) {
             sb_add(s, "typeof(");
         } else if (is_callee_name(n->call.callee, "len")) {
-            /* len(x) -> (x).length - handled specially below */
-            sb_addc(s, '(');
+            sb_add(s, "__xs_len(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
-            sb_add(s, ").length");
+            sb_addc(s, ')');
             break;
         } else if (is_callee_name(n->call.callee, "assert")) {
             sb_add(s, "(function(){ if (!(");
@@ -352,50 +420,338 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_METHOD_CALL: {
-        /* Map a handful of XS method names to their JS equivalents. JS arrays
-           and strings don't have `.len()` but they do have `.length`, and
-           `.push/pop/reverse/sort` exist on Array.prototype, etc. This is a
-           shim, not a faithful XS runtime, so it covers the common homepage
-           cases and leaves the rest as-is. */
+        /* Map XS method names to their JS equivalents. The receiver type
+           often isn't statically knowable (string vs array), so polymorphic
+           ones (.contains, .reverse, .is_empty, .index_of, .len) route
+           through __xs_* runtime helpers. Type-specific ones inline. */
         const char *m = n->method_call.method;
-        if (m && strcmp(m, "len") == 0 && n->method_call.args.len == 0) {
-            sb_addc(s, '(');
+        int nargs = n->method_call.args.len;
+        if (m && strcmp(m, "len") == 0 && nargs == 0) {
+            sb_add(s, "__xs_len(");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").length");
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "is_empty") == 0 && nargs == 0) {
+            sb_add(s, "__xs_is_empty(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "contains") == 0 && nargs == 1) {
+            sb_add(s, "__xs_contains(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "index_of") == 0 && nargs == 1) {
+            sb_add(s, "__xs_index_of(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "chars") == 0 && nargs == 0) {
+            sb_add(s, "__xs_chars(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "enumerate") == 0 && nargs == 0) {
+            sb_add(s, "__xs_enumerate(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "zip") == 0 && nargs == 1) {
+            sb_add(s, "__xs_zip(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && (strcmp(m, "flat") == 0 || strcmp(m, "flatten") == 0) && nargs == 0) {
+            sb_add(s, "__xs_flatten(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "chunks") == 0 && nargs == 1) {
+            sb_add(s, "__xs_chunks(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "clamp") == 0 && nargs == 2) {
+            sb_add(s, "__xs_clamp(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[1], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "abs") == 0 && nargs == 0) {
+            sb_add(s, "Math.abs(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "floor") == 0 && nargs == 0) {
+            sb_add(s, "Math.floor(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "ceil") == 0 && nargs == 0) {
+            sb_add(s, "Math.ceil(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "round") == 0 && nargs == 0) {
+            sb_add(s, "Math.round(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "sqrt") == 0 && nargs == 0) {
+            sb_add(s, "Math.sqrt(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "upper") == 0 && nargs == 0) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").toUpperCase()");
+            break;
+        }
+        if (m && strcmp(m, "lower") == 0 && nargs == 0) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").toLowerCase()");
+            break;
+        }
+        if (m && strcmp(m, "trim") == 0 && nargs == 0) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").trim()");
+            break;
+        }
+        if (m && strcmp(m, "starts_with") == 0 && nargs == 1) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").startsWith(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "ends_with") == 0 && nargs == 1) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").endsWith(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "is_a") == 0 && nargs == 1) {
+            sb_add(s, "__xs_is_a(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        /* Misc methods that map to a single JS expression. The JS Array
+           prototype already defines .find / .map / .filter / .indexOf, etc.
+           XS .replace returns a copy with the FIRST match replaced (matching
+           Python's str.replace behaviour); JS String.prototype.replace does
+           the same when called with a string needle. */
+        if (m && strcmp(m, "split") == 0 && nargs == 1) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").split(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "replace") == 0 && nargs == 2) {
+            sb_add(s, "String(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ").split(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ").join(");
+            emit_expr(s, n->method_call.args.items[1], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "repeat") == 0 && nargs == 1) {
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; const __n = ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, "; if (typeof __o === 'string') return __o.repeat(__n < 0 ? 0 : __n); if (Array.isArray(__o)) { const r = []; for (let i = 0; i < __n; i++) for (const x of __o) r.push(x); return r; } return __o; })()");
+            break;
+        }
+        if (m && strcmp(m, "join") == 0 && nargs == 1) {
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ".join(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "reverse") == 0 && nargs == 0) {
+            /* polymorphic: array .reverse() mutates and returns,
+               string needs codepoint-aware reversal */
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; return typeof __o === 'string' ? __xs_str_reverse(__o) : [...__o].reverse(); })()");
+            break;
+        }
+        /* Method calls forwarded as-is to the JS receiver. The argument
+           list often differs (e.g. .any -> .some, .all -> .every,
+           .find on arrays needs a predicate too). */
+        if (m && strcmp(m, "any") == 0) {
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ".some(");
+            for (int i = 0; i < nargs; i++) {
+                if (i) sb_add(s, ", ");
+                emit_expr(s, n->method_call.args.items[i], depth);
+            }
+            sb_addc(s, ')');
+            break;
+        }
+        if (m && strcmp(m, "all") == 0) {
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ".every(");
+            for (int i = 0; i < nargs; i++) {
+                if (i) sb_add(s, ", ");
+                emit_expr(s, n->method_call.args.items[i], depth);
+            }
+            sb_addc(s, ')');
+            break;
+        }
+        /* XS reduce(init, fn) -> JS .reduce(fn, init) */
+        if (m && strcmp(m, "reduce") == 0 && nargs == 2) {
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ".reduce(");
+            emit_expr(s, n->method_call.args.items[1], depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        /* sort with no args sorts numerically; JS default sort is
+           lexicographic on stringified values, so [10, 2] sorts to
+           [10, 2]. Force a numeric/string-aware comparator. */
+        if (m && strcmp(m, "sort") == 0 && nargs == 0) {
+            sb_add(s, "[...");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "].sort((a, b) => __xs_cmp(a, b))");
+            break;
+        }
+        if (m && strcmp(m, "sort") == 0 && nargs == 1) {
+            sb_add(s, "[...");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "].sort(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_addc(s, ')');
+            break;
+        }
+        /* `arr.keys()` on a Map -> [...m.keys()]; on an array, return
+           the index array. Default JS .keys() returns an iterator, not
+           an array, which doesn't compare equal to [1,2,3]. */
+        if (m && strcmp(m, "keys") == 0 && nargs == 0) {
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; if (__o instanceof Map) return [...__o.keys()]; if (Array.isArray(__o)) return [...__o.keys()]; return Object.keys(__o); })()");
+            break;
+        }
+        if (m && strcmp(m, "values") == 0 && nargs == 0) {
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; if (__o instanceof Map) return [...__o.values()]; if (Array.isArray(__o)) return [...__o]; return Object.values(__o); })()");
+            break;
+        }
+        if (m && strcmp(m, "get") == 0 && nargs >= 1) {
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; const __k = ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, "; if (__o instanceof Map) return __o.has(__k) ? __o.get(__k) : ");
+            if (nargs >= 2) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "null");
+            sb_add(s, "; return __o[__k] !== undefined ? __o[__k] : ");
+            if (nargs >= 2) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "null");
+            sb_add(s, "; })()");
+            break;
+        }
+        if (m && strcmp(m, "has") == 0 && nargs == 1) {
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; const __k = ");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, "; if (__o instanceof Map) return __o.has(__k); return Object.prototype.hasOwnProperty.call(__o, __k); })()");
             break;
         }
         /* `.to_str()` is the XS spelling; JS uses .toString(), which
            also covers bigints, numbers, and arrays correctly. */
-        if (m && strcmp(m, "to_str") == 0 && n->method_call.args.len == 0) {
+        if (m && strcmp(m, "to_str") == 0 && nargs == 0) {
             sb_add(s, "String(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
             break;
         }
         /* `.to_int()` -> Number(...) | 0 truncation */
-        if (m && strcmp(m, "to_int") == 0 && n->method_call.args.len == 0) {
+        if (m && strcmp(m, "to_int") == 0 && nargs == 0) {
             sb_add(s, "Math.trunc(Number(");
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, "))");
             break;
         }
         /* `.to_float()` -> Number(...) */
-        if (m && strcmp(m, "to_float") == 0 && n->method_call.args.len == 0) {
+        if (m && strcmp(m, "to_float") == 0 && nargs == 0) {
             sb_add(s, "Number(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
             break;
         }
-        emit_expr(s, n->method_call.obj, depth);
-        if (n->method_call.optional) sb_add(s, "?.");
-        else sb_addc(s, '.');
-        sb_add(s, n->method_call.method);
-        sb_addc(s, '(');
-        for (int i = 0; i < n->method_call.args.len; i++) {
-            if (i) sb_add(s, ", ");
-            emit_expr(s, n->method_call.args.items[i], depth);
+        /* Default: dispatch through __xs_call_method so a method call on a
+           Map (whose value at the named key is the actual function) and a
+           method call on a class instance both reach the right callable.
+           Optional-call (?. before the call) bails on null receivers. */
+        if (n->method_call.optional) {
+            sb_add(s, "(((__o) => __o == null ? undefined : __xs_call_method(__o, \"");
+            sb_add(s, n->method_call.method);
+            sb_add(s, "\"");
+            for (int i = 0; i < n->method_call.args.len; i++) {
+                sb_add(s, ", ");
+                emit_expr(s, n->method_call.args.items[i], depth);
+            }
+            sb_add(s, "))(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "))");
+        } else {
+            sb_add(s, "__xs_call_method(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", \"");
+            sb_add(s, n->method_call.method);
+            sb_addc(s, '"');
+            for (int i = 0; i < n->method_call.args.len; i++) {
+                sb_add(s, ", ");
+                emit_expr(s, n->method_call.args.items[i], depth);
+            }
+            sb_addc(s, ')');
         }
-        sb_addc(s, ')');
         break;
     }
     case NODE_INDEX:
@@ -406,10 +762,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_addc(s, ')');
         break;
     case NODE_FIELD:
+        /* Field access has to handle plain JS objects, classes (where the
+           field is a real property), and Maps (where the same dot syntax
+           in XS retrieves a string key). __xs_field probes both. */
+        sb_add(s, "__xs_field(");
         emit_expr(s, n->field.obj, depth);
-        if (n->field.optional) sb_add(s, "?.");
-        else sb_addc(s, '.');
-        sb_add(s, n->field.name);
+        sb_printf(s, ", \"%s\"", n->field.name);
+        if (n->field.optional) sb_add(s, ", true");
+        sb_addc(s, ')');
         break;
     case NODE_SCOPE:
         for (int i = 0; i < n->scope.nparts; i++) {
@@ -425,6 +785,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             emit_expr(s, tgt->index.index, depth);
             sb_add(s, ", ");
+            emit_expr(s, n->assign.value, depth);
+            sb_addc(s, ')');
+        } else if (tgt && VAL_TAG(tgt) == NODE_FIELD && strcmp(n->assign.op, "=") == 0) {
+            /* Field assignment: emit a JS dot-set rather than wrapping
+               the LHS in __xs_field, which is a function call and not an
+               assignable target. The runtime helper __xs_setfield does
+               the same Map/object dispatch the read path does. */
+            sb_add(s, "__xs_setfield(");
+            emit_expr(s, tgt->field.obj, depth);
+            sb_printf(s, ", \"%s\", ", tgt->field.name);
             emit_expr(s, n->assign.value, depth);
             sb_addc(s, ')');
         } else {
@@ -1374,9 +1744,14 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
     case NODE_PAT_STRUCT:
         for (int i = 0; i < pat->pat_struct.fields.len; i++) {
             char sub[256];
-            snprintf(sub, sizeof sub, "%s.%s", subject, pat->pat_struct.fields.items[i].key);
+            const char *fkey = pat->pat_struct.fields.items[i].key;
+            snprintf(sub, sizeof sub, "%s.%s", subject, fkey);
             if (pat->pat_struct.fields.items[i].val) {
                 emit_pattern_bindings(s, pat->pat_struct.fields.items[i].val, sub, depth);
+            } else if (fkey) {
+                /* Shorthand: `Point { x, y }` binds x and y directly. */
+                sb_indent(s, depth);
+                sb_printf(s, "const %s = %s;\n", fkey, sub);
             }
         }
         break;
@@ -2120,6 +2495,18 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 in_class_method = 0;
                 sb_indent(s, depth + 1);
                 sb_add(s, "}\n");
+            } else if (m && (VAL_TAG(m) == NODE_LET || VAL_TAG(m) == NODE_VAR)) {
+                /* Class field decl: `let n = 0` inside a class body lowers
+                   to a public field. JS class fields don't take const/let
+                   keywords, just `name = expr;`. */
+                sb_indent(s, depth + 1);
+                if (m->let.name) sb_add(s, m->let.name);
+                else sb_add(s, "_");
+                if (m->let.value) {
+                    sb_add(s, " = ");
+                    emit_expr(s, m->let.value, depth + 1);
+                }
+                sb_add(s, ";\n");
             } else if (m) {
                 emit_stmt(s, m, depth + 1);
             }
@@ -2295,6 +2682,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    else console.log(s);\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_add = (a, b) => {\n");
+    sb_add(&s, "    if (Array.isArray(a) && Array.isArray(b)) return a.concat(b);\n");
     sb_add(&s, "    if (typeof a === \"string\" || typeof b === \"string\") return __xs_repr(a) + __xs_repr(b);\n");
     sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
     sb_add(&s, "        return BigInt(typeof a === \"bigint\" ? a : Math.trunc(a)) +\n");
@@ -2303,6 +2691,12 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    return a + b;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_arith = (op, a, b) => {\n");
+    /* string * int repeats (matches Python / XS semantics). */
+    sb_add(&s, "    if (op === '*' && typeof a === 'string' && typeof b === 'number') return a.repeat(b < 0 ? 0 : b);\n");
+    sb_add(&s, "    if (op === '*' && typeof a === 'number' && typeof b === 'string') return b.repeat(a < 0 ? 0 : a);\n");
+    sb_add(&s, "    if (op === '*' && Array.isArray(a) && typeof b === 'number') {\n");
+    sb_add(&s, "        const r = []; for (let i = 0; i < b; i++) for (const x of a) r.push(x); return r;\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
     sb_add(&s, "        const ba = typeof a === \"bigint\" ? a : BigInt(Math.trunc(a));\n");
     sb_add(&s, "        const bb = typeof b === \"bigint\" ? b : BigInt(Math.trunc(b));\n");
@@ -2321,8 +2715,11 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "        }\n");
     sb_add(&s, "        return a * b;\n");
     sb_add(&s, "    }\n");
-    sb_add(&s, "    if (op === '-') return a - b;\n");
-    sb_add(&s, "    if (op === '%') return a % b;\n");
+    sb_add(&s, "    if (op === '-' || op === '%') {\n");
+    sb_add(&s, "        if (typeof a !== 'number' || typeof b !== 'number')\n");
+    sb_add(&s, "            throw new Error('type error: ' + (typeof a) + ' ' + op + ' ' + (typeof b));\n");
+    sb_add(&s, "        return op === '-' ? a - b : a % b;\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    return a + b;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_pow = (a, b) => {\n");
@@ -2341,22 +2738,27 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    }\n");
     sb_add(&s, "    return a ** b;\n");
     sb_add(&s, "};\n");
+    /* Errors thrown from the runtime are structured maps so XS-side
+       try/catch arms can pattern-match `e.kind == "division by zero"`,
+       which is what the interp throws. */
+    sb_add(&s, "const __xs_err = (kind, msg) => { const m = new Map(); m.set('kind', kind); m.set('message', msg || kind); return m; };\n");
     sb_add(&s, "const __xs_div = (a, b) => {\n");
-    /* int / 0 is a runtime error; float / 0.0 is NaN. We detect
-       float by !Number.isInteger; bigint 0n is int. */
     sb_add(&s, "    if (typeof b === 'bigint') {\n");
-    sb_add(&s, "        if (b === 0n) throw new Error(\"division by zero\");\n");
+    sb_add(&s, "        if (b === 0n) throw __xs_err('division by zero', 'division by zero');\n");
     sb_add(&s, "        const ba = typeof a === 'bigint' ? a : BigInt(Math.trunc(a));\n");
     sb_add(&s, "        return ba / b;\n");
     sb_add(&s, "    }\n");
     sb_add(&s, "    if (b === 0) {\n");
-    sb_add(&s, "        if (Number.isInteger(a) && Number.isInteger(b)) throw new Error(\"division by zero\");\n");
+    sb_add(&s, "        if (Number.isInteger(a) && Number.isInteger(b)) throw __xs_err('division by zero', 'division by zero');\n");
     sb_add(&s, "        return a / b;\n");
     sb_add(&s, "    }\n");
     sb_add(&s, "    if (Number.isInteger(a) && Number.isInteger(b)) return Math.trunc(a / b);\n");
     sb_add(&s, "    return a / b;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_idx = (o, i) => {\n");
+    sb_add(&s, "    if (o == null) throw __xs_err('type error', 'cannot index null');\n");
+    sb_add(&s, "    if (typeof o === 'number' || typeof o === 'bigint' || typeof o === 'boolean')\n");
+    sb_add(&s, "        throw __xs_err('type error', 'cannot index ' + typeof o);\n");
     sb_add(&s, "    if ((Array.isArray(o) || typeof o === \"string\") && typeof i === \"number\" && i < 0) i = o.length + i;\n");
     sb_add(&s, "    if (o instanceof Map) return o.get(i);\n");
     sb_add(&s, "    return o[i];\n");
@@ -2366,6 +2768,116 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    if (o instanceof Map) { o.set(i, v); return v; }\n");
     sb_add(&s, "    o[i] = v;\n");
     sb_add(&s, "    return v;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_cmp = (a, b) => {\n");
+    sb_add(&s, "    if (typeof a === 'bigint' || typeof b === 'bigint') {\n");
+    sb_add(&s, "        const ba = typeof a === 'bigint' ? a : BigInt(Math.trunc(a));\n");
+    sb_add(&s, "        const bb = typeof b === 'bigint' ? b : BigInt(Math.trunc(b));\n");
+    sb_add(&s, "        return ba < bb ? -1 : ba > bb ? 1 : 0;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return a < b ? -1 : a > b ? 1 : 0;\n");
+    sb_add(&s, "};\n");
+    /* Codepoint-aware len. JS string .length counts UTF-16 units, so
+       "hi 😀".length is 5; the interp treats strings as codepoint
+       sequences. Spread iteration walks codepoints and matches. */
+    sb_add(&s, "const __xs_len = (x) => {\n");
+    sb_add(&s, "    if (x === null || x === undefined) return 0;\n");
+    sb_add(&s, "    if (Array.isArray(x)) return x.length;\n");
+    sb_add(&s, "    if (x instanceof Map) return x.size;\n");
+    sb_add(&s, "    if (x instanceof Set) return x.size;\n");
+    sb_add(&s, "    if (typeof x === 'string') { let n = 0; for (const _ of x) n++; return n; }\n");
+    sb_add(&s, "    if (typeof x.length === 'number') return x.length;\n");
+    sb_add(&s, "    if (typeof x.size === 'number') return x.size;\n");
+    sb_add(&s, "    return 0;\n");
+    sb_add(&s, "};\n");
+    /* String helpers covering XS method names that don't have a 1:1 JS
+       equivalent. Dispatched from emit NODE_METHOD_CALL when the receiver
+       can't be statically narrowed. */
+    sb_add(&s, "const __xs_chars = (s) => [...String(s)];\n");
+    sb_add(&s, "const __xs_str_reverse = (s) => [...String(s)].reverse().join('');\n");
+    sb_add(&s, "const __xs_contains = (a, b) => {\n");
+    sb_add(&s, "    if (typeof a === 'string') return a.includes(String(b));\n");
+    sb_add(&s, "    if (Array.isArray(a)) return a.some(x => __xs_eq(x, b));\n");
+    sb_add(&s, "    if (a instanceof Map) return a.has(b);\n");
+    sb_add(&s, "    if (a instanceof Set) return a.has(b);\n");
+    sb_add(&s, "    return false;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_index_of = (a, x) => {\n");
+    sb_add(&s, "    if (Array.isArray(a)) { for (let i = 0; i < a.length; i++) if (__xs_eq(a[i], x)) return i; return -1; }\n");
+    sb_add(&s, "    if (typeof a === 'string') return a.indexOf(String(x));\n");
+    sb_add(&s, "    return -1;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_is_empty = (x) => __xs_len(x) === 0;\n");
+    /* x.is_a(\"type-name\") - the XS interp accepts both lowercase and
+       capitalised forms (str / String, int / Int). Match its behaviour. */
+    sb_add(&s, "const __xs_is_a = (v, t) => {\n");
+    sb_add(&s, "    const tl = String(t).toLowerCase();\n");
+    sb_add(&s, "    if (v === null || v === undefined) return tl === 'null';\n");
+    sb_add(&s, "    if (typeof v === 'string') return tl === 'str' || tl === 'string';\n");
+    sb_add(&s, "    if (typeof v === 'boolean') return tl === 'bool' || tl === 'boolean';\n");
+    sb_add(&s, "    if (typeof v === 'bigint') return tl === 'bigint' || tl === 'int';\n");
+    sb_add(&s, "    if (typeof v === 'number') {\n");
+    sb_add(&s, "        if (Number.isInteger(v)) return tl === 'int' || tl === 'number' || tl === 'float';\n");
+    sb_add(&s, "        return tl === 'float' || tl === 'number';\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (Array.isArray(v)) return tl === 'array' || tl === 'list';\n");
+    sb_add(&s, "    if (v instanceof Map) return tl === 'map';\n");
+    sb_add(&s, "    if (v instanceof Set) return tl === 'set';\n");
+    sb_add(&s, "    if (typeof v === 'function') return tl === 'fn' || tl === 'function';\n");
+    sb_add(&s, "    if (typeof v === 'object') {\n");
+    sb_add(&s, "        const ctor = v.constructor && v.constructor.name;\n");
+    sb_add(&s, "        return ctor && (ctor === t || ctor.toLowerCase() === tl);\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return false;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_clamp = (x, lo, hi) => x < lo ? lo : x > hi ? hi : x;\n");
+    sb_add(&s, "const __xs_chunks = (a, n) => {\n");
+    sb_add(&s, "    const r = []; for (let i = 0; i < a.length; i += n) r.push(a.slice(i, i + n)); return r;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_enumerate = (a) => {\n");
+    sb_add(&s, "    if (typeof a === 'string') { const r = []; let i = 0; for (const c of a) r.push([i++, c]); return r; }\n");
+    sb_add(&s, "    return Array.from(a, (v, i) => [i, v]);\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_zip = (a, b) => {\n");
+    sb_add(&s, "    const n = Math.min(a.length, b.length); const r = [];\n");
+    sb_add(&s, "    for (let i = 0; i < n; i++) r.push([a[i], b[i]]); return r;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_flatten = (a) => {\n");
+    sb_add(&s, "    if (!Array.isArray(a)) return a; const r = [];\n");
+    sb_add(&s, "    for (const x of a) { if (Array.isArray(x)) for (const y of x) r.push(y); else r.push(x); }\n");
+    sb_add(&s, "    return r;\n");
+    sb_add(&s, "};\n");
+    /* Field access. The interp looks up the name in instance fields,
+       map entries, struct/enum payload, etc. JS dot-access works for
+       classes / objects / actors, but not for Map entries -- a bareword
+       key on a Map literal returns undefined under .foo. Probe both. */
+    sb_add(&s, "const __xs_field = (o, k, optional) => {\n");
+    sb_add(&s, "    if (o === null || o === undefined) return optional ? undefined : o;\n");
+    sb_add(&s, "    if (o instanceof Map) {\n");
+    sb_add(&s, "        if (o.has(k)) return o.get(k);\n");
+    sb_add(&s, "        return o[k];\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return o[k];\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_setfield = (o, k, v) => {\n");
+    sb_add(&s, "    if (o instanceof Map) { o.set(k, v); return v; }\n");
+    sb_add(&s, "    o[k] = v; return v;\n");
+    sb_add(&s, "};\n");
+    /* Method dispatch. JS dot-call binds `this` to the receiver; we keep
+       that semantics for class instances and plain objects, but Maps don't
+       expose their entries as properties, so a bareword-keyed lambda would
+       resolve to undefined under .method(). The helper picks the right
+       lookup site for each shape. */
+    sb_add(&s, "const __xs_call_method = (o, m, ...args) => {\n");
+    sb_add(&s, "    if (o == null) throw new TypeError(\"method '\" + m + \"' on null\");\n");
+    sb_add(&s, "    if (o instanceof Map) {\n");
+    sb_add(&s, "        if (o.has(m)) { const f = o.get(m); if (typeof f === 'function') return f(...args); }\n");
+    sb_add(&s, "        if (typeof o[m] === 'function') return o[m](...args);\n");
+    sb_add(&s, "        throw new TypeError(\"no method '\" + m + \"' on map\");\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    const f = o[m];\n");
+    sb_add(&s, "    if (typeof f === 'function') return f.apply(o, args);\n");
+    sb_add(&s, "    throw new TypeError(\"no method '\" + m + \"' on \" + typeof o);\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_resume = (v) => v;\n");
     /* Structural equality. JS '===' is reference-equal for arrays /
