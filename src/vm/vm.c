@@ -1025,6 +1025,10 @@ static void vm_register_stdlib(VM *vm) {
     REG("bool",    vm_bool_fn);
     REG("repr",    vm_repr);
     REG("dbg",     vm_repr);
+    {
+        extern Value *builtin_xs_fmt_export(Interp *, Value **, int);
+        REG("__xs_fmt", builtin_xs_fmt_export);
+    }
     REG("range",   vm_range);
     REG("abs",     vm_abs);
     REG("min",     vm_min);

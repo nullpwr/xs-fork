@@ -432,6 +432,145 @@ static Value *builtin_repr(Interp *i, Value **args, int argc) {
     Value *v = xs_str(s); free(s); return v;
 }
 
+/* Apply an f-string format spec like "%.2f" / ">5" / "x" / "b" / "%".
+ * Mirrors the Python mini-language: alignment + width + precision +
+ * type. Unknown specs leave the value as-is (default str). */
+Value *builtin_xs_fmt_export(Interp *i, Value **args, int argc);
+static Value *builtin_xs_fmt(Interp *i, Value **args, int argc) {
+    if (argc < 1) return xs_str("");
+    Value *v = args[0];
+    const char *spec = (argc >= 2 && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : "";
+    int slen = (int)strlen(spec);
+
+    char align = 0;
+    char fill = ' ';
+    int width = 0;
+    int precision = -1;
+    char type = 0;
+    int has_pct = 0;
+    int comma = 0;
+
+    int sp = 0;
+    if (slen >= 2 && (spec[1] == '<' || spec[1] == '>' || spec[1] == '^')) {
+        fill = spec[0];
+        align = spec[1];
+        sp = 2;
+    } else if (slen >= 1 && (spec[0] == '<' || spec[0] == '>' || spec[0] == '^')) {
+        align = spec[0];
+        sp = 1;
+    }
+    while (sp < slen && spec[sp] >= '0' && spec[sp] <= '9') {
+        width = width * 10 + (spec[sp] - '0'); sp++;
+    }
+    if (sp < slen && spec[sp] == ',') { comma = 1; sp++; }
+    if (sp < slen && spec[sp] == '.') {
+        sp++;
+        precision = 0;
+        while (sp < slen && spec[sp] >= '0' && spec[sp] <= '9') {
+            precision = precision * 10 + (spec[sp] - '0'); sp++;
+        }
+    }
+    if (sp < slen) {
+        if (spec[sp] == '%') { has_pct = 1; type = 'f'; if (precision < 0) precision = 2; }
+        else type = spec[sp];
+    }
+
+    char buf[256];
+    char *body = NULL;
+    if (type == 'x' || type == 'X' || type == 'b' || type == 'o') {
+        int64_t iv = (VAL_TAG(v) == XS_INT) ? VAL_INT(v)
+                    : (VAL_TAG(v) == XS_FLOAT) ? (int64_t)v->f : 0;
+        if (type == 'x') snprintf(buf, sizeof(buf), "%llx", (long long)iv);
+        else if (type == 'X') snprintf(buf, sizeof(buf), "%llX", (long long)iv);
+        else if (type == 'o') snprintf(buf, sizeof(buf), "%llo", (long long)iv);
+        else {
+            uint64_t uv = (uint64_t)(iv < 0 ? -iv : iv);
+            char tmp[68]; int p = 66; tmp[66] = '\0';
+            if (uv == 0) tmp[--p] = '0';
+            while (uv) { tmp[--p] = (uv & 1) ? '1' : '0'; uv >>= 1; }
+            if (iv < 0) tmp[--p] = '-';
+            snprintf(buf, sizeof(buf), "%s", tmp + p);
+        }
+        body = xs_strdup(buf);
+    } else if (type == 'f' || (precision >= 0 && (VAL_TAG(v) == XS_FLOAT || VAL_TAG(v) == XS_INT))) {
+        double fv = (VAL_TAG(v) == XS_FLOAT) ? v->f
+                  : (VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
+        if (has_pct) fv *= 100.0;
+        int p = precision >= 0 ? precision : 6;
+        snprintf(buf, sizeof(buf), "%.*f", p, fv);
+        body = xs_strdup(buf);
+        if (has_pct) {
+            int bl = (int)strlen(body);
+            body = xs_realloc(body, bl + 2);
+            body[bl] = '%'; body[bl+1] = '\0';
+        }
+    } else if (type == 'e' || type == 'E') {
+        double fv = (VAL_TAG(v) == XS_FLOAT) ? v->f
+                  : (VAL_TAG(v) == XS_INT) ? (double)VAL_INT(v) : 0.0;
+        int p = precision >= 0 ? precision : 6;
+        snprintf(buf, sizeof(buf), type == 'e' ? "%.*e" : "%.*E", p, fv);
+        body = xs_strdup(buf);
+    } else {
+        body = inst_to_str(i, v, 0);
+        if (precision >= 0 && body) {
+            int bl = (int)strlen(body);
+            if (bl > precision) body[precision] = '\0';
+        }
+    }
+    if (comma && body) {
+        int neg = (body[0] == '-') ? 1 : 0;
+        char *dot = strchr(body, '.');
+        int int_end = dot ? (int)(dot - body) : (int)strlen(body);
+        int int_len = int_end - neg;
+        int n_commas = (int_len - 1) / 3;
+        if (n_commas > 0) {
+            int new_len = (int)strlen(body) + n_commas + 1;
+            char *nb = xs_malloc(new_len);
+            int wi = 0;
+            if (neg) nb[wi++] = '-';
+            int first = int_len % 3; if (first == 0) first = 3;
+            for (int j = 0; j < int_len; j++) {
+                if (j > 0 && (j - first) % 3 == 0) nb[wi++] = ',';
+                nb[wi++] = body[neg + j];
+            }
+            int tail_len = (int)strlen(body) - int_end;
+            memcpy(nb + wi, body + int_end, tail_len);
+            wi += tail_len;
+            nb[wi] = '\0';
+            free(body); body = nb;
+        }
+    }
+    if (!body) body = xs_strdup("");
+
+    int blen = (int)strlen(body);
+    if (width > blen) {
+        int pad = width - blen;
+        char *r;
+        if (align == '<') {
+            r = xs_malloc(width + 1);
+            memcpy(r, body, blen);
+            for (int j = 0; j < pad; j++) r[blen + j] = fill;
+            r[width] = '\0';
+        } else if (align == '^') {
+            int lpad = pad / 2, rpad = pad - lpad;
+            r = xs_malloc(width + 1);
+            for (int j = 0; j < lpad; j++) r[j] = fill;
+            memcpy(r + lpad, body, blen);
+            for (int j = 0; j < rpad; j++) r[lpad + blen + j] = fill;
+            r[width] = '\0';
+        } else {
+            r = xs_malloc(width + 1);
+            for (int j = 0; j < pad; j++) r[j] = fill;
+            memcpy(r + pad, body, blen);
+            r[width] = '\0';
+        }
+        free(body); body = r;
+    }
+    Value *out = xs_str(body);
+    free(body);
+    return out;
+}
+
 Value *builtin_abs(Interp *i, Value **args, int argc) {
     (void)i;
     if (argc<1) return xs_int(0);
@@ -1294,6 +1433,7 @@ void stdlib_register(Interp *i) {
     interp_define_native(i, "bool",      builtin_bool);
     interp_define_native(i, "char",      builtin_char);
     interp_define_native(i, "repr",      builtin_repr);
+    interp_define_native(i, "__xs_fmt",  builtin_xs_fmt);
     interp_define_native(i, "dbg",       builtin_dbg);
     interp_define_native(i, "pprint",    builtin_pprint);
     interp_define_native(i, "len",       builtin_len);
@@ -1474,3 +1614,8 @@ Value *stdlib_load_module(Interp *i, const char *name) {
 
 
 
+
+
+Value *builtin_xs_fmt_export(Interp *i, Value **args, int argc) {
+    return builtin_xs_fmt(i, args, argc);
+}

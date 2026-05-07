@@ -620,7 +620,36 @@ static Node *parse_string_literal(Parser *p, Token *tok) {
             memcpy(expr_src, raw + i + 1, elen);
             expr_src[elen] = '\0';
 
-            /* Sub-lex and sub-parse */
+            /* Pull off a `:spec` tail (Python-style format spec). The
+               spec runs from the first top-level ':' to the end of the
+               brace expression. We split at the unquoted top-level ':'
+               only; nested type annotations / colons inside parens or
+               quotes stay inside the expression. */
+            char *fmt_spec = NULL;
+            int paren_d = 0, brack_d = 0, brace_d = 0;
+            for (int k = 0; k < elen; k++) {
+                char ck = expr_src[k];
+                if (ck == '"' || ck == '\'') {
+                    char q = ck; k++;
+                    while (k < elen && expr_src[k] != q) {
+                        if (expr_src[k] == '\\' && k+1 < elen) k++;
+                        k++;
+                    }
+                    continue;
+                }
+                if (ck == '(') paren_d++;
+                else if (ck == ')') paren_d--;
+                else if (ck == '[') brack_d++;
+                else if (ck == ']') brack_d--;
+                else if (ck == '{') brace_d++;
+                else if (ck == '}') brace_d--;
+                else if (ck == ':' && paren_d == 0 && brack_d == 0 && brace_d == 0) {
+                    fmt_spec = xs_strdup(expr_src + k + 1);
+                    expr_src[k] = '\0';
+                    break;
+                }
+            }
+
             Lexer sub_lex;
             lexer_init(&sub_lex, expr_src, span.file);
             TokenArray sub_ta = lexer_tokenize(&sub_lex);
@@ -630,6 +659,24 @@ static Node *parse_string_literal(Parser *p, Token *tok) {
             token_array_free(&sub_ta);
             comment_list_free(&sub_lex.comments);
             free(expr_src);
+
+            if (expr_node && fmt_spec) {
+                Node *callee = node_new(NODE_IDENT, span);
+                callee->ident.name = xs_strdup("__xs_fmt");
+                Node *spec_node = node_new(NODE_LIT_STRING, span);
+                spec_node->lit_string.sval = fmt_spec;
+                spec_node->lit_string.interpolated = 0;
+                spec_node->lit_string.parts = nodelist_new();
+                Node *call = node_new(NODE_CALL, span);
+                call->call.callee = callee;
+                call->call.args = nodelist_new();
+                call->call.kwargs = nodepairlist_new();
+                nodelist_push(&call->call.args, expr_node);
+                nodelist_push(&call->call.args, spec_node);
+                expr_node = call;
+            } else if (fmt_spec) {
+                free(fmt_spec);
+            }
 
             if (expr_node) nodelist_push(&n->lit_string.parts, expr_node);
             i = j + 1;
