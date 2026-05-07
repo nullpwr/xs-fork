@@ -1314,6 +1314,7 @@ static Value *builtin_chr(Interp *i, Value **args, int argc) {
 /* channel(capacity) */
 Value *native_channel_send(Interp *ig, Value **a, int n);
 Value *native_channel_recv(Interp *ig, Value **a, int n);
+Value *native_channel_recv_pair(Interp *ig, Value **a, int n);
 Value *native_channel_try_recv(Interp *ig, Value **a, int n);
 Value *native_channel_close(Interp *ig, Value **a, int n);
 Value *native_channel_is_closed(Interp *ig, Value **a, int n);
@@ -1341,6 +1342,7 @@ static Value *builtin_channel(Interp *i, Value **args, int argc) {
     Value *data = xs_array_new();        map_set(ch->map,"_buf",data);    value_decref(data);
     map_take(ch->map, "send", xs_native(native_channel_send));
     map_take(ch->map, "recv", xs_native(native_channel_recv));
+    map_take(ch->map, "recv_pair", xs_native(native_channel_recv_pair));
     map_take(ch->map, "try_recv", xs_native(native_channel_try_recv));
     map_take(ch->map, "close", xs_native(native_channel_close));
     map_take(ch->map, "is_closed", xs_native(native_channel_is_closed));

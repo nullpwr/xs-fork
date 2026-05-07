@@ -73,6 +73,25 @@ Value *native_channel_recv(Interp *ig, Value **a, int n) {
     return xs_chan_recv(a[0], ig);
 }
 
+/* recv_pair: Go-style (value, ok) tuple. ok=false signals the channel
+ * was closed and drained, removing the ambiguity between "received
+ * null" and "channel done". A null value is considered a real send
+ * if the channel still has buffered items or is still open. */
+Value *native_channel_recv_pair(Interp *ig, Value **a, int n) {
+    if (n < 1) return value_incref(XS_NULL_VAL);
+    Value *v = xs_chan_recv(a[0], ig);
+    int ok = 1;
+    if (VAL_TAG(v) == XS_NULL
+        && xs_chan_is_closed(a[0])
+        && xs_chan_len(a[0]) == 0) {
+        ok = 0;
+    }
+    Value *t = xs_tuple_new();
+    array_push(t->arr, v);
+    array_push(t->arr, ok ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL));
+    return t;
+}
+
 Value *native_channel_try_recv(Interp *ig, Value **a, int n) {
     (void)ig;
     if (n < 1) return value_incref(XS_NULL_VAL);
@@ -141,6 +160,7 @@ static Value *native_async_channel(Interp *ig, Value **a, int n) {
     value_decref(capv);
     map_take(ch, "send", xs_native(native_channel_send));
     map_take(ch, "recv", xs_native(native_channel_recv));
+    map_take(ch, "recv_pair", xs_native(native_channel_recv_pair));
     map_take(ch, "try_recv", xs_native(native_channel_try_recv));
     map_take(ch, "close", xs_native(native_channel_close));
     map_take(ch, "is_closed", xs_native(native_channel_is_closed));

@@ -3140,13 +3140,26 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             mc_result = value_incref(XS_NULL_VAL);
                         }
                     } else goto map_generic_method;
-                } else if (strcmp(mc_name,"recv")==0 || strcmp(mc_name,"try_recv")==0) {
+                } else if (strcmp(mc_name,"recv")==0 || strcmp(mc_name,"try_recv")==0
+                                                        || strcmp(mc_name,"recv_pair")==0) {
                     Value *ch_type = map_get(mc_obj->map, "__type");
                     if (ch_type && VAL_TAG(ch_type) == XS_STR && strcmp(ch_type->s, "channel") == 0) {
-                        int nonblocking = (mc_name[0] == 't');
-                        if (nonblocking) {
+                        if (strcmp(mc_name, "try_recv") == 0) {
                             extern Value *xs_chan_try_recv(Value *);
                             mc_result = xs_chan_try_recv(mc_obj);
+                        } else if (strcmp(mc_name, "recv_pair") == 0) {
+                            extern Value *xs_chan_recv(Value *, struct Interp *);
+                            extern int xs_chan_is_closed(Value *);
+                            extern int xs_chan_len(Value *);
+                            Value *v = xs_chan_recv(mc_obj, NULL);
+                            int ok = !(VAL_TAG(v) == XS_NULL
+                                       && xs_chan_is_closed(mc_obj)
+                                       && xs_chan_len(mc_obj) == 0);
+                            Value *t = xs_tuple_new();
+                            array_push(t->arr, v);
+                            array_push(t->arr, ok ? value_incref(XS_TRUE_VAL)
+                                                  : value_incref(XS_FALSE_VAL));
+                            mc_result = t;
                         } else {
                             extern Value *xs_chan_recv(Value *, struct Interp *);
                             mc_result = xs_chan_recv(mc_obj, NULL);
@@ -6166,6 +6179,10 @@ int vm_step_jit(VM *vm) {
     vm->step_yielded = 0;
     int rc = vm_dispatch(vm, 0);
     if (rc != 0) return -1;
+    /* If a runtime_error fired during the step, propagate the throw
+       instead of returning 0 -- otherwise the JIT pops a stale null
+       result and keeps executing past the fault. */
+    if (g_xs_pending_throw) return -1;
     if (vm->step_yielded) return 0;
     return 1;
 }

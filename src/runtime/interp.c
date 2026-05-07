@@ -3014,6 +3014,17 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                 }
                 if (strcmp(method,"recv")==0)
                     return xs_chan_recv(obj, i);
+                if (strcmp(method,"recv_pair")==0) {
+                    Value *v = xs_chan_recv(obj, i);
+                    int ok = !(VAL_TAG(v) == XS_NULL
+                               && xs_chan_is_closed(obj)
+                               && xs_chan_len(obj) == 0);
+                    Value *t = xs_tuple_new();
+                    array_push(t->arr, v);
+                    array_push(t->arr, ok ? value_incref(XS_TRUE_VAL)
+                                          : value_incref(XS_FALSE_VAL));
+                    return t;
+                }
                 if (strcmp(method,"try_recv")==0)
                     return xs_chan_try_recv(obj);
                 if (strcmp(method,"close")==0) {
@@ -3164,6 +3175,17 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     }
                     if (strcmp(method,"recv")==0)
                         return xs_chan_recv(obj, i);
+                    if (strcmp(method,"recv_pair")==0) {
+                        Value *v = xs_chan_recv(obj, i);
+                        int ok = !(VAL_TAG(v) == XS_NULL
+                                   && xs_chan_is_closed(obj)
+                                   && xs_chan_len(obj) == 0);
+                        Value *t = xs_tuple_new();
+                        array_push(t->arr, v);
+                        array_push(t->arr, ok ? value_incref(XS_TRUE_VAL)
+                                              : value_incref(XS_FALSE_VAL));
+                        return t;
+                    }
                     if (strcmp(method,"try_recv")==0)
                         return xs_chan_try_recv(obj);
                     if (strcmp(method,"close")==0) {

@@ -616,6 +616,21 @@ static Node *parse_string_literal(Parser *p, Token *tok) {
                 continue;
             }
 
+            /* Compute the (line, col) of the byte after the `{` in the
+               original source. raw[0..i] is the prefix; walk it counting
+               newlines so error spans inside the interpolation point at
+               the actual identifier rather than 1:1. */
+            int sub_line = span.line;
+            int sub_col = span.col + 1; /* skip the opening quote */
+            for (int rk = 0; rk <= i; rk++) {
+                if (raw[rk] == '\n') {
+                    sub_line++;
+                    sub_col = 1;
+                } else {
+                    sub_col++;
+                }
+            }
+
             char *expr_src = xs_malloc(elen + 1);
             memcpy(expr_src, raw + i + 1, elen);
             expr_src[elen] = '\0';
@@ -652,6 +667,8 @@ static Node *parse_string_literal(Parser *p, Token *tok) {
 
             Lexer sub_lex;
             lexer_init(&sub_lex, expr_src, span.file);
+            sub_lex.line = sub_line;
+            sub_lex.col = sub_col;
             TokenArray sub_ta = lexer_tokenize(&sub_lex);
             Parser sub_p;
             parser_init(&sub_p, &sub_ta, span.file);
