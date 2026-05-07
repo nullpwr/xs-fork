@@ -1385,18 +1385,31 @@ static void emit_expr(SB *s, Node *n, int depth) {
         /* handle expr { arms } -> generator-based effect handler IIFE.
            Wrap the handled expression in a generator function so that any
            `perform` nodes inside it (which emit `(yield {...})`) have an
-           enclosing generator to yield into. The wrapper itself is a
-           generator (function*) so direct performs in the body work; for
-           helper functions that themselves perform, the call site emits
-           a generator-call and we delegate to it via `yield*` so any
-           markers it yields propagate up to the handler loop. The runtime
-           tag check below treats a non-generator return value as a plain
-           value, which keeps non-perform expressions working too. */
+           enclosing generator to yield into. We can't go through the
+           usual NODE_BLOCK emit because that produces an arrow IIFE and
+           `yield` inside an arrow is a SyntaxError -- the body has to
+           live directly inside the function*(). For non-block bodies
+           we still wrap with the gen-call check so a helper that itself
+           performs gets `yield*`'d. */
         sb_add(s, "(() => {\n");
         sb_indent(s, depth + 1);
-        sb_add(s, "const __body = (function*() { const __r = ");
-        emit_expr(s, n->handle.expr, depth + 1);
-        sb_add(s, "; if (__r && typeof __r.next === \"function\") return yield* __r; return __r; });\n");
+        Node *body = n->handle.expr;
+        if (body && VAL_TAG(body) == NODE_BLOCK) {
+            sb_add(s, "const __body = (function*() {\n");
+            emit_block_body(s, body, depth + 2);
+            if (body->block.expr) {
+                sb_indent(s, depth + 2);
+                sb_add(s, "return ");
+                emit_expr(s, body->block.expr, depth + 2);
+                sb_add(s, ";\n");
+            }
+            sb_indent(s, depth + 1);
+            sb_add(s, "});\n");
+        } else {
+            sb_add(s, "const __body = (function*() { const __r = ");
+            emit_expr(s, n->handle.expr, depth + 1);
+            sb_add(s, "; if (__r && typeof __r.next === \"function\") return yield* __r; return __r; });\n");
+        }
         sb_indent(s, depth + 1);
         sb_add(s, "const __gen = __body();\n");
         sb_indent(s, depth + 1);
