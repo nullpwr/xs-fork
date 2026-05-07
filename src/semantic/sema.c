@@ -409,9 +409,14 @@ static void walk(SemaCtx *ctx, Node *n) {
         if (variants) free(variants);
         if (missing) {
             int is_unverifiable = (strstr(missing, "cannot be verified") != NULL);
-            Diagnostic *d = diag_new(is_unverifiable ? DIAG_WARNING : DIAG_ERROR,
-                DIAG_PHASE_SEMANTIC, "S0001",
-                "match is not exhaustive: missing pattern '%s'", missing);
+            Diagnostic *d;
+            if (is_unverifiable) {
+                d = diag_new(DIAG_WARNING, DIAG_PHASE_SEMANTIC, "S0001",
+                    "match may not be exhaustive: add a `_` arm to cover unknown cases");
+            } else {
+                d = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC, "S0001",
+                    "match is not exhaustive: missing pattern '%s'", missing);
+            }
             diag_annotate(d, n->span, 1, "non-exhaustive match");
             diag_hint(d, "add a wildcard '_' pattern to cover remaining cases");
             diag_note(d, "all match expressions must cover every possible value");

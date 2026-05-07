@@ -1944,13 +1944,21 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             }
         }
 
+        /* Fall-through: no arm matched. Raise MatchError instead of
+           leaving arbitrary stack state -- the previous shape returned
+           the subject (or whatever was on top of stack), masking
+           missing-case bugs. Mirrors the interp. */
+        emit_const(c, xs_str("kind"));
+        emit_const(c, xs_str("MatchError"));
+        emit_const(c, xs_str("message"));
+        emit_const(c, xs_str("no match arm fits the subject"));
+        emit(c, MAKE_B(OP_MAKE_MAP, 0, 0, 2));
+        emit(c, MAKE_A(OP_THROW, 0, 0));
+        if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+
         for (int i = 0; i < n_arm_jumps; i++)
             patch_jump(c, arm_jumps[i]);
         if (arm_jumps) free(arm_jumps);
-
-        if (want_value) {
-            /* fallthrough with null if no arm matched */
-        }
         return;
     }
 
