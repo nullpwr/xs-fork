@@ -2118,17 +2118,33 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 for (int64_t j = start; j < end; j++)
                     array_push(arr->arr, value_incref(col->arr->items[j]));
                 r = arr;
-            } else if (VAL_TAG(col)==XS_MAP && VAL_TAG(idx)==XS_STR) {
+            } else if (VAL_TAG(col)==XS_MAP && (VAL_TAG(idx)==XS_STR
+                                                || VAL_TAG(idx)==XS_INT
+                                                || VAL_TAG(idx)==XS_BOOL
+                                                || VAL_TAG(idx)==XS_NULL
+                                                || VAL_TAG(idx)==XS_FLOAT)) {
+                /* OP_INDEX_SET stringifies non-string keys; do the same
+                   on lookup so m[14]=v; m[14] round-trips. */
+                char kbuf[64];
+                const char *key;
+                if (VAL_TAG(idx) == XS_STR) key = idx->s;
+                else {
+                    if (VAL_TAG(idx)==XS_INT) snprintf(kbuf, sizeof kbuf, "%lld", (long long)VAL_INT(idx));
+                    else if (VAL_TAG(idx)==XS_BOOL) snprintf(kbuf, sizeof kbuf, "%s", VAL_INT(idx)?"true":"false");
+                    else if (VAL_TAG(idx)==XS_NULL) snprintf(kbuf, sizeof kbuf, "null");
+                    else snprintf(kbuf, sizeof kbuf, "%g", idx->f);
+                    key = kbuf;
+                }
                 Value *cid = map_get(col->map, "_chan_id");
                 int is_chan = (cid && VAL_TAG(cid) == XS_INT);
-                if (is_chan && (strcmp(idx->s, "_buf") == 0 ||
-                                strcmp(idx->s, "_cap") == 0 ||
-                                strcmp(idx->s, "_chan_id") == 0 ||
-                                strcmp(idx->s, "_type") == 0 ||
-                                strcmp(idx->s, "__type") == 0)) {
+                if (is_chan && (strcmp(key, "_buf") == 0 ||
+                                strcmp(key, "_cap") == 0 ||
+                                strcmp(key, "_chan_id") == 0 ||
+                                strcmp(key, "_type") == 0 ||
+                                strcmp(key, "__type") == 0)) {
                     r = value_incref(XS_NULL_VAL);
                 } else {
-                    Value *v = map_get(col->map, idx->s);
+                    Value *v = map_get(col->map, key);
                     r = v ? value_incref(v) : value_incref(XS_NULL_VAL);
                 }
             } else if (VAL_TAG(col)==XS_RANGE && VAL_TAG(idx)==XS_INT && col->range) {

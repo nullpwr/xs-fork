@@ -607,6 +607,36 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
     }
 
     case NODE_LIT_ARRAY: {
+        if (n->lit_array.repeat_val && n->lit_array.repeat_cnt > 0) {
+            int arr_slot = local_add_hidden(c);
+            int idx_slot = local_add_hidden(c);
+            int fill_slot = local_add_hidden(c);
+            emit(c, MAKE_B(OP_MAKE_ARRAY, 0, 0, 0));
+            emit_a(c, OP_STORE_LOCAL, arr_slot);
+            compile_node(c, n->lit_array.repeat_val, 1);
+            emit_a(c, OP_STORE_LOCAL, fill_slot);
+            emit_const(c, xs_int(0));
+            emit_a(c, OP_STORE_LOCAL, idx_slot);
+            int loop_top = c->current->proto->chunk.len;
+            emit_a(c, OP_LOAD_LOCAL, idx_slot);
+            emit_const(c, xs_int(n->lit_array.repeat_cnt));
+            emit(c, MAKE_A(OP_LT, 0, 0));
+            int j_exit = emit_jump(c, OP_JUMP_IF_FALSE);
+            emit_a(c, OP_LOAD_LOCAL, arr_slot);
+            emit_a(c, OP_LOAD_LOCAL, fill_slot);
+            int pi = emit_global_name(c, "push");
+            emit(c, MAKE_A(OP_METHOD_CALL, 1, (uint16_t)(unsigned)pi));
+            emit(c, MAKE_A(OP_POP, 0, 0));
+            emit_a(c, OP_LOAD_LOCAL, idx_slot);
+            emit_const(c, xs_int(1));
+            emit(c, MAKE_A(OP_ADD, 0, 0));
+            emit_a(c, OP_STORE_LOCAL, idx_slot);
+            int back_off = loop_top - (c->current->proto->chunk.len + 1);
+            emit(c, MAKE_A(OP_JUMP, 0, (uint16_t)(int16_t)back_off));
+            patch_jump(c, j_exit);
+            emit_a(c, OP_LOAD_LOCAL, arr_slot);
+            break;
+        }
         int cnt = n->lit_array.elems.len;
         int has_spread = 0;
         for (int i = 0; i < cnt; i++)
