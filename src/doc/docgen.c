@@ -77,6 +77,98 @@ static void dl_push(DeclList *d, Node *n) {
 }
 static void dl_free(DeclList *d) { free(d->items); }
 
+/* Slurp the source file so we can scan for `--- doc` comments before
+   each declaration. The parser doesn't attach comments to nodes, so we
+   key off span->line and look upward for the nearest contiguous block
+   of `---` lines. NULL on error -- doc generation still succeeds, just
+   without comment text. */
+static char *slurp(const char *path) {
+    if (!path) return NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    fseek(f, 0, SEEK_SET);
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    buf[got] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* Build a 1-indexed array of line offsets so we can slice out a given
+   source line by number. line_offs[L] is the byte offset of line L's
+   first character. line_offs[nlines+1] is the file end. */
+static int *line_offsets(const char *src, int *nlines_out) {
+    int cap = 64, n = 1;
+    int *off = (int *)malloc((size_t)cap * sizeof(int));
+    if (!off) { *nlines_out = 0; return NULL; }
+    off[0] = 0;
+    if (!src) { *nlines_out = 0; return off; }
+    off[1] = 0;
+    for (int i = 0; src[i]; i++) {
+        if (src[i] == '\n') {
+            n++;
+            if (n + 1 >= cap) {
+                cap *= 2;
+                int *tmp = (int *)realloc(off, (size_t)cap * sizeof(int));
+                if (!tmp) { free(off); *nlines_out = 0; return NULL; }
+                off = tmp;
+            }
+            off[n] = i + 1;
+        }
+    }
+    *nlines_out = n;
+    return off;
+}
+
+/* Return 1 if line L (1-indexed) starts with `---`. Trims leading
+   whitespace. */
+static int is_doc_line(const char *src, int *line_offs, int nlines, int L) {
+    if (L < 1 || L > nlines) return 0;
+    const char *p = src + line_offs[L];
+    while (*p == ' ' || *p == '\t') p++;
+    return p[0] == '-' && p[1] == '-' && p[2] == '-';
+}
+
+/* Return 1 if line L is blank or only whitespace. */
+static int is_blank_line(const char *src, int *line_offs, int nlines, int L) {
+    if (L < 1 || L > nlines) return 1;
+    const char *p = src + line_offs[L];
+    while (*p && *p != '\n') {
+        if (*p != ' ' && *p != '\t') return 0;
+        p++;
+    }
+    return 1;
+}
+
+/* Emit the doc-comment block immediately preceding `decl_line` (skipping
+   only blank lines). If the line above is code, no doc block exists --
+   we don't keep walking upward, otherwise a fn with no doc would steal
+   another decl's comment block. */
+static void emit_doc_block(SB *s, const char *src, int *line_offs,
+                           int nlines, int decl_line) {
+    if (!src || !line_offs || decl_line <= 1) return;
+    int top = decl_line - 1;
+    while (top >= 1 && is_blank_line(src, line_offs, nlines, top)) top--;
+    if (top < 1 || !is_doc_line(src, line_offs, nlines, top)) return;
+    int start = top;
+    while (start > 1 && is_doc_line(src, line_offs, nlines, start - 1)) start--;
+    for (int L = start; L <= top; L++) {
+        const char *p = src + line_offs[L];
+        while (*p == ' ' || *p == '\t') p++;
+        p += 3;
+        if (*p == ' ') p++;
+        const char *eol = strchr(p, '\n');
+        int len = eol ? (int)(eol - p) : (int)strlen(p);
+        sb_addn(s, p, len);
+        sb_addc(s, '\n');
+    }
+    sb_addc(s, '\n');
+}
+
 static void collect_decls(Node *program,
                           DeclList *fns, DeclList *structs, DeclList *enums,
                           DeclList *traits, DeclList *impls, DeclList *consts,
@@ -105,6 +197,9 @@ static void gen_markdown(SB *s, Node *program, const char *filename,
                          DeclList *traits, DeclList *impls, DeclList *consts,
                          DeclList *aliases, DeclList *effects) {
     (void)program;
+    char *src = slurp(filename);
+    int nlines = 0;
+    int *line_offs = src ? line_offsets(src, &nlines) : NULL;
     sb_printf(s, "# Module: %s\n\n", filename ? filename : "<unknown>");
 
     /* Functions */
@@ -133,6 +228,7 @@ static void gen_markdown(SB *s, Node *program, const char *filename,
                 type_to_str(s, n->fn_decl.ret_type);
             }
             sb_add(s, "`\n\n");
+            emit_doc_block(s, src, line_offs, nlines, n->span.line);
         }
     }
 
@@ -246,6 +342,8 @@ static void gen_markdown(SB *s, Node *program, const char *filename,
             }
         }
     }
+    free(src);
+    free(line_offs);
 }
 
 static void json_escape(SB *s, const char *str) {

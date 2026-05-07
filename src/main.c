@@ -480,6 +480,13 @@ static void cov_register_nodelist(XSCoverage *cov, NodeList *nl) {
 #endif /* XSC_ENABLE_COVERAGE */
 
 static char *read_file(const char *path) {
+    {
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "xs: '%s' is a directory\n", path);
+            return NULL;
+        }
+    }
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "xs: cannot open '%s'\n", path);
@@ -1349,6 +1356,36 @@ int main(int argc, char **argv) {
         } else if (strcmp(sub, "doc") == 0) {
 #ifdef XSC_ENABLE_DOC
             const char *target = sub_argc >= 1 ? sub_arg(0) : ".";
+            struct stat st;
+            int is_dir = (stat(target, &st) == 0 && S_ISDIR(st.st_mode));
+            if (is_dir) {
+                DIR *d = opendir(target);
+                if (!d) {
+                    fprintf(stderr, "xs doc: cannot open dir '%s'\n", target);
+                    return 1;
+                }
+                int rc = 0, found = 0;
+                struct dirent *ent;
+                while ((ent = readdir(d)) != NULL) {
+                    const char *n = ent->d_name;
+                    int nl = (int)strlen(n);
+                    if (nl < 4 || strcmp(n + nl - 3, ".xs") != 0) continue;
+                    char path[1024];
+                    snprintf(path, sizeof path, "%s/%s", target, n);
+                    Node *prog = parse_file(path, NULL);
+                    if (!prog) { rc = 1; continue; }
+                    char *out = docgen_generate(prog, path, "markdown");
+                    if (out) { printf("%s", out); free(out); }
+                    node_free(prog);
+                    found = 1;
+                }
+                closedir(d);
+                if (!found) {
+                    fprintf(stderr, "xs doc: no .xs files in '%s'\n", target);
+                }
+                cache_free(g_sema_cache);
+                return rc;
+            }
             Node *prog = parse_file(target, NULL);
             if (!prog) return 1;
             char *out = docgen_generate(prog, target, "markdown");
