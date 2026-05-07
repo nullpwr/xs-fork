@@ -36,4 +36,11 @@ extern __thread int g_xs_in_try;
    so workers don't trample each other. */
 extern __thread Value *g_xs_pending_throw;
 
+/* Set to 1 when g_xs_pending_throw was installed by xs_runtime_error
+   itself. The VM's uncaught-throw path uses this to avoid double-
+   counting against the process exit code: xs_runtime_error already
+   bumped g_xs_runtime_error_count, so the uncaught handler should
+   not bump it again. Cleared once consumed by the VM. */
+extern __thread int g_xs_throw_from_runtime;
+
 #endif

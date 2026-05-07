@@ -53,6 +53,7 @@ int g_xs_runtime_error_count = 0;
    would let a worker park its exception on top of a sibling's. */
 __thread int g_xs_in_try         = 0;
 __thread Value *g_xs_pending_throw = NULL;
+__thread int g_xs_throw_from_runtime = 0;
 
 void xs_runtime_error(Span span, const char *label, const char *hint,
                       const char *fmt, ...) {
@@ -134,6 +135,7 @@ void xs_runtime_error(Span span, const char *label, const char *hint,
         if (g_current_interp->cf.value) value_decref(g_current_interp->cf.value);
         g_current_interp->cf.signal = CF_THROW;
         g_current_interp->cf.value  = value_incref(err_value);
+        g_xs_throw_from_runtime = 1;
     }
     /* Install a pending throw for the VM dispatcher. The VM has no
        interp pointer to set cf.signal on, so it polls this slot at the
@@ -145,6 +147,7 @@ void xs_runtime_error(Span span, const char *label, const char *hint,
         g_xs_pending_throw = err_value
             ? value_incref(err_value)
             : xs_error_new(label ? label : "RuntimeError", buf, NULL);
+        g_xs_throw_from_runtime = 1;
     }
     if (err_value) value_decref(err_value);
     if (!in_try) diag_render_one(d, g_current_source, span.file);

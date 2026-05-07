@@ -1656,6 +1656,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         if (g_xs_pending_throw) {
             Value *exc = g_xs_pending_throw;
             g_xs_pending_throw = NULL;
+            int from_runtime = g_xs_throw_from_runtime;
             int handled = 0;
             while (vm->frame_count > 0) {
                 CallFrame *cf = &vm->frames[vm->frame_count - 1];
@@ -1666,6 +1667,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     PUSH(exc);
                     frame = cf;
                     frame->ip = te->catch_ip;
+                    g_xs_throw_from_runtime = 0;
                     handled = 1;
                     break;
                 }
@@ -1674,6 +1676,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 value_decref(cf->closure_val);
                 vm->frame_count--;
             }
+            (void)from_runtime;
             if (!handled) {
                 if (vm->is_thread_worker) {
                     /* Capture for the spawn-thread's future to surface
@@ -1682,15 +1685,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     vm->uncaught_thread_exc = exc;
                     return 1;
                 }
-                char *s = value_str(exc);
-                fprintf(stderr, "uncaught: %s\n", s);
-                free(s);
-                value_decref(exc);
-                /* Surface the uncaught throw to the host so a trigger
-                   callback (or anyone calling into vm_invoke) doesn't
-                   keep firing on the same broken state. */
                 extern int g_xs_runtime_error_count;
-                g_xs_runtime_error_count++;
+                extern __thread int g_xs_throw_from_runtime;
+                if (!g_xs_throw_from_runtime) {
+                    char *s = value_str(exc);
+                    fprintf(stderr, "uncaught: %s\n", s);
+                    free(s);
+                    g_xs_runtime_error_count++;
+                }
+                value_decref(exc);
+                g_xs_throw_from_runtime = 0;
                 return 1;
             }
             continue; /* re-enter loop at catch handler */
@@ -2086,9 +2090,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_INDEX_GET: {
             Value *idx = POP(), *col = POP(); Value *r;
             if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_INT) {
-                int64_t i = VAL_INT(idx);
+                int64_t orig = VAL_INT(idx);
+                int64_t i = orig;
                 if (i < 0) i += col->arr->len;
-                r = (i>=0 && i<col->arr->len) ? value_incref(col->arr->items[i]) : value_incref(XS_NULL_VAL);
+                if (i < 0 || i >= col->arr->len) {
+                    xs_runtime_error(span_zero(), "IndexError",
+                                     "use .get(i) for nullable lookup",
+                                     "index %lld out of bounds (len %d)",
+                                     (long long)orig, col->arr->len);
+                    r = value_incref(XS_NULL_VAL);
+                } else {
+                    r = value_incref(col->arr->items[i]);
+                }
             } else if ((VAL_TAG(col)==XS_ARRAY||VAL_TAG(col)==XS_TUPLE) && VAL_TAG(idx)==XS_RANGE && idx->range) {
                 int64_t start = idx->range->start;
                 int64_t end = idx->range->end;
@@ -2729,12 +2742,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         vm->frame_count--;
                     }
                     if (!handled) {
-                        char *s = value_str(exc);
-                        fprintf(stderr, "uncaught: %s\n", s);
-                        free(s);
-                        value_decref(exc);
                         extern int g_xs_runtime_error_count;
-                        g_xs_runtime_error_count++;
+                        extern __thread int g_xs_throw_from_runtime;
+                        if (!g_xs_throw_from_runtime) {
+                            char *s = value_str(exc);
+                            fprintf(stderr, "uncaught: %s\n", s);
+                            free(s);
+                            g_xs_runtime_error_count++;
+                        }
+                        value_decref(exc);
+                        g_xs_throw_from_runtime = 0;
                         return 1;
                     }
                 } else {
@@ -3930,6 +3947,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=mc_obj->arr->len>0?value_incref(mc_obj->arr->items[0]):value_incref(XS_NULL_VAL);
                 else if (strcmp(mc_name,"last")==0)
                     mc_result=mc_obj->arr->len>0?value_incref(mc_obj->arr->items[mc_obj->arr->len-1]):value_incref(XS_NULL_VAL);
+                else if (strcmp(mc_name,"get")==0) {
+                    if (mc_argc<1||VAL_TAG(mc_args[0])!=XS_INT) {
+                        mc_result = mc_argc>=2 ? value_incref(mc_args[1]) : value_incref(XS_NULL_VAL);
+                    } else {
+                        int gi = (int)VAL_INT(mc_args[0]);
+                        if (gi < 0) gi += mc_obj->arr->len;
+                        if (gi < 0 || gi >= mc_obj->arr->len)
+                            mc_result = mc_argc>=2 ? value_incref(mc_args[1]) : value_incref(XS_NULL_VAL);
+                        else
+                            mc_result = value_incref(mc_obj->arr->items[gi]);
+                    }
+                }
                 else if (strcmp(mc_name,"contains")==0||strcmp(mc_name,"includes")==0) {
                     mc_result=value_incref(XS_FALSE_VAL);
                     if(mc_argc>=1){for(int j=0;j<mc_obj->arr->len;j++){if(value_equal(mc_obj->arr->items[j],mc_args[0])){value_decref(mc_result);mc_result=value_incref(XS_TRUE_VAL);break;}}}
@@ -4836,6 +4865,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_THROW: {
             Value *exc = POP();
+            extern __thread int g_xs_throw_from_runtime;
+            g_xs_throw_from_runtime = 0;
             int handled = 0;
             while (vm->frame_count > 0) {
                 CallFrame *cf = &vm->frames[vm->frame_count - 1];
@@ -4873,12 +4904,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     vm->uncaught_thread_exc = exc;
                     return 1;
                 }
-                char *s = value_str(exc);
-                fprintf(stderr, "uncaught: %s\n", s);
-                free(s);
-                value_decref(exc);
                 extern int g_xs_runtime_error_count;
-                g_xs_runtime_error_count++;
+                extern __thread int g_xs_throw_from_runtime;
+                if (!g_xs_throw_from_runtime) {
+                    char *s = value_str(exc);
+                    fprintf(stderr, "uncaught: %s\n", s);
+                    free(s);
+                    g_xs_runtime_error_count++;
+                }
+                value_decref(exc);
+                g_xs_throw_from_runtime = 0;
                 return 1;
             }
             break;
@@ -6159,9 +6194,8 @@ Value *vm_index_get_fast(Value *col, Value *idx) {
         int64_t i = VAL_INT(idx);
         int64_t n = col->arr->len;
         if (i < 0) i += n;
-        Value *r = (i >= 0 && i < n)
-                 ? value_incref(col->arr->items[i])
-                 : value_incref(XS_NULL_VAL);
+        if (i < 0 || i >= n) return NULL;
+        Value *r = value_incref(col->arr->items[i]);
         value_decref(idx); value_decref(col);
         return r;
     }

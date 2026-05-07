@@ -2207,6 +2207,15 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (strcmp(method, "last") == 0) {
             return arr->len>0?value_incref(arr->items[arr->len-1]):value_incref(XS_NULL_VAL);
         }
+        if (strcmp(method, "get") == 0) {
+            if (argc < 1 || VAL_TAG(args[0]) != XS_INT)
+                return argc >= 2 ? value_incref(args[1]) : value_incref(XS_NULL_VAL);
+            int gi = (int)VAL_INT(args[0]);
+            if (gi < 0) gi = arr->len + gi;
+            if (gi < 0 || gi >= arr->len)
+                return argc >= 2 ? value_incref(args[1]) : value_incref(XS_NULL_VAL);
+            return value_incref(arr->items[gi]);
+        }
         if (strcmp(method, "is_empty") == 0) {
             return arr->len==0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
@@ -5562,7 +5571,18 @@ do_call: ;
 
         if (VAL_TAG(obj) == XS_ARRAY || VAL_TAG(obj) == XS_TUPLE) {
             if (VAL_TAG(idx) == XS_INT) {
-                result = value_incref(array_get(obj->arr, (int)VAL_INT(idx)));
+                int orig_idx = (int)VAL_INT(idx);
+                int ai = orig_idx;
+                if (ai < 0) ai = obj->arr->len + ai;
+                if (ai < 0 || ai >= obj->arr->len) {
+                    xs_runtime_error(n->span, "IndexError",
+                                     "use .get(i) for nullable lookup",
+                                     "index %d out of bounds (len %d)",
+                                     orig_idx, obj->arr->len);
+                    result = value_incref(XS_NULL_VAL);
+                } else {
+                    result = value_incref(obj->arr->items[ai]);
+                }
             } else if (VAL_TAG(idx) == XS_RANGE) {
                 XSRange *r = idx->range;
                 Value *slice = xs_array_new();
@@ -10260,13 +10280,16 @@ void interp_run(Interp *i, Node *program) {
                                 else if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC) {
                                     goto run_done;
                                 } else if (i->cf.signal == CF_THROW) {
-                                    Value *exc = i->cf.value;
-                                    char *s = exc ? value_repr(exc) : xs_strdup("<error>");
-                                    Node *sn2 = reparsed2->program.stmts.items[m];
-                                    fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
-                                            sn2->span.file ? sn2->span.file : "<unknown>",
-                                            sn2->span.line, sn2->span.col, s);
-                                    free(s);
+                                    if (!g_xs_throw_from_runtime) {
+                                        Value *exc = i->cf.value;
+                                        char *s = exc ? value_repr(exc) : xs_strdup("<error>");
+                                        Node *sn2 = reparsed2->program.stmts.items[m];
+                                        fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
+                                                sn2->span.file ? sn2->span.file : "<unknown>",
+                                                sn2->span.line, sn2->span.col, s);
+                                        free(s);
+                                    }
+                                    g_xs_throw_from_runtime = 0;
                                     CF_CLEAR(i);
                                 } else if (i->cf.signal) {
                                     CF_CLEAR(i);
@@ -10280,13 +10303,16 @@ void interp_run(Interp *i, Node *program) {
                     else if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC) {
                         goto run_done;
                     } else if (i->cf.signal == CF_THROW) {
-                        Value *exc = i->cf.value;
-                        char *s = exc ? value_repr(exc) : xs_strdup("<error>");
-                        Node *sn = reparsed->program.stmts.items[k];
-                        fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
-                                sn->span.file ? sn->span.file : "<unknown>",
-                                sn->span.line, sn->span.col, s);
-                        free(s);
+                        if (!g_xs_throw_from_runtime) {
+                            Value *exc = i->cf.value;
+                            char *s = exc ? value_repr(exc) : xs_strdup("<error>");
+                            Node *sn = reparsed->program.stmts.items[k];
+                            fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
+                                    sn->span.file ? sn->span.file : "<unknown>",
+                                    sn->span.line, sn->span.col, s);
+                            free(s);
+                        }
+                        g_xs_throw_from_runtime = 0;
                         CF_CLEAR(i);
                     } else if (i->cf.signal) {
                         CF_CLEAR(i);
@@ -10349,17 +10375,17 @@ void interp_run(Interp *i, Node *program) {
                 }
             } else {
                 Value *exc = i->cf.value;
-                char *s = exc ? value_repr(exc) : xs_strdup("<error>");
-                Node *sn = program->program.stmts.items[j];
-                fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
-                        sn->span.file ? sn->span.file : "<unknown>",
-                        sn->span.line, sn->span.col, s);
-                free(s);
-                /* Park the value before CF_CLEAR drops it so @on_panic
-                   below sees the cause rather than a null. */
+                if (!g_xs_throw_from_runtime) {
+                    char *s = exc ? value_repr(exc) : xs_strdup("<error>");
+                    Node *sn = program->program.stmts.items[j];
+                    fprintf(stderr, "xs: error at %s:%d:%d: unhandled exception: %s\n",
+                            sn->span.file ? sn->span.file : "<unknown>",
+                            sn->span.line, sn->span.col, s);
+                    free(s);
+                }
+                g_xs_throw_from_runtime = 0;
                 if (exc) i->unhandled_exception_value = value_incref(exc);
                 CF_CLEAR(i);
-                /* Record that the program failed so the CLI can exit non-zero. */
                 i->had_unhandled_exception = 1;
                 break;
             }

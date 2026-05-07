@@ -50,8 +50,9 @@ assert_eq(arr[4], 50)
 -- negative wrap
 assert_eq(arr[-1], 50)
 assert_eq(arr[-2], 40)
--- out-of-bounds returns null (matches interp)
-assert_eq(arr[100], null)
+-- out-of-bounds: arr[i] throws, arr.get(i) returns null
+assert_eq(arr.get(100), null)
+assert_eq(arr.get(100, "miss"), "miss")
 
 -- map[str]
 let m = {"a": 1, "b": 2, "c": 3}

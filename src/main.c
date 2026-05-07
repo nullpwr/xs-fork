@@ -2553,8 +2553,8 @@ run_file:;
         /* Any xs_runtime_error() call during execution must surface as a
            non-zero exit even if the VM chose to continue with a null. */
         if (rc == 0 && g_xs_runtime_error_count > 0) rc = 1;
-        if (rc != 0) {
-            fprintf(stderr, "xs: --vm exit %d (runtime_errors=%d)\n",
+        if (rc != 0 && getenv("XS_VERBOSE_EXIT")) {
+            fprintf(stderr, "xs: exit %d (runtime_errors=%d)\n",
                     rc, g_xs_runtime_error_count);
         }
         return rc;
@@ -2742,8 +2742,9 @@ run_file:;
         int had_error = (interp->cf.signal == CF_ERROR || interp->cf.signal == CF_PANIC)
                         || interp->had_unhandled_exception
                         || g_xs_runtime_error_count > 0;
-        if (had_error) {
-            fprintf(stderr, "xs: exit 1 (cf.signal=%d unhandled=%d runtime_errors=%d)\n",
+        if (had_error && getenv("XS_VERBOSE_EXIT")) {
+            fprintf(stderr,
+                    "xs: exit 1 (cf.signal=%d unhandled=%d runtime_errors=%d)\n",
                     interp->cf.signal, interp->had_unhandled_exception,
                     g_xs_runtime_error_count);
         }
