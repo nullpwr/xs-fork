@@ -229,6 +229,31 @@ println("{name} has {len(name)} chars")  -- XS has 2 chars
 println("\{not interpolated}")    -- {not interpolated}
 ```
 
+### Format Specs
+
+After the expression, an optional `:spec` controls how the value
+is rendered. Spec syntax follows Python's mini-language:
+`{value:[fill][align][width][,][.prec][type]}`.
+
+```xs
+let pi = 3.14159
+println("{pi:.2}")                -- 3.14
+println("{pi:8.2}")               -- "    3.14"
+println("{pi:<8.2}")              -- "3.14    "
+println("{pi:^8.2}")              -- "  3.14  "
+println("{pi:.2%}")               -- 314.16%
+
+let n = 1234567
+println("{n:,}")                  -- 1,234,567
+println("{255:x}")                -- ff
+println("{255:X}")                -- FF
+println("{8:b}")                  -- 1000
+println("{8:o}")                  -- 10
+
+-- Fill char before the alignment marker
+println("{42:0>5}")               -- 00042
+```
+
 ### Escape Sequences
 
 | Escape | Character |
@@ -403,6 +428,9 @@ var arr = [1, 2, 3, 4, 5]
 -- access
 arr[0]                           -- 1
 arr[-1]                          -- 5 (negative indexing)
+arr[100]                         -- IndexError: out of bounds
+arr.get(100)                     -- null (explicit nullable lookup)
+arr.get(100, "missing")          -- "missing" (default fallback)
 
 -- mutating methods (modify in-place, return null)
 arr.push(6)                      -- append element
@@ -2143,7 +2171,19 @@ println(bch.recv())              -- a
 println(bch.is_full())           -- false
 ```
 
-`close()` marks a channel done. Subsequent `send` raises `ChannelClosed`; `recv` on a drained closed channel returns `null` instead of blocking forever. Iterating with `for v in ch` drains the currently-buffered values:
+`close()` marks a channel done. Subsequent `send` raises `ChannelClosed`; `recv` on a drained closed channel returns `null` instead of blocking forever. When the channel itself can carry `null` values, use `recv_pair()` for a Go-style `(value, ok)` tuple where `ok=false` distinguishes "closed" from "received null":
+
+```xs
+let ch = channel(2)
+ch.send(null)
+ch.send("hi")
+ch.close()
+ch.recv_pair()                    -- (null, true)   -- a real null was sent
+ch.recv_pair()                    -- (hi, true)
+ch.recv_pair()                    -- (null, false)  -- closed and drained
+```
+
+Iterating with `for v in ch` drains the currently-buffered values:
 
 ```xs
 let q = channel()
@@ -2702,7 +2742,8 @@ println(os.env("HOME"))          -- /home/user
 
 | Function | Description |
 |----------|-------------|
-| `parse(str)` | Parse JSON string into XS value |
+| `parse(str)` | Parse JSON string into XS value (raises `JsonError` on bad input) |
+| `parse_safe(str)` | Same as `parse` but returns `null` on bad input instead of raising |
 | `stringify(val)` | Serialize XS value to JSON string |
 | `pretty(val)` | Serialize with indentation |
 | `valid(str)` | Check if string is valid JSON |
@@ -2714,6 +2755,7 @@ println(s)                       -- {"a":1,"b":[1,2,3]}
 let m = json.parse(s)
 println(m["a"])                  -- 1
 println(json.valid("[1,2,3]"))   -- true
+println(json.parse_safe("xxx"))  -- null (no throw)
 ```
 
 ---
