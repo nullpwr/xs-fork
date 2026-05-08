@@ -152,10 +152,17 @@ static XSResult run_source(XSContext *ctx, const char *src, const char *fname) {
         return r;
     }
 
+    /* interp_run discards each expression-statement's value; the
+       interpreter now stashes the trailing one in last_expr_value so
+       `xs_eval(ctx, "fact(7)")` actually carries 5040 back to the
+       embedder instead of silently dropping it. */
     XSValue val;
     memset(&val, 0, sizeof val);
     val.tag = XS_VAL_NULL;
-    if (ctx->interp->cf.value && VAL_TAG(ctx->interp->cf.value) != XS_NULL) {
+    if (ctx->interp->last_expr_value
+        && VAL_TAG(ctx->interp->last_expr_value) != XS_NULL) {
+        val = wrap_value(ctx->interp->last_expr_value);
+    } else if (ctx->interp->cf.value && VAL_TAG(ctx->interp->cf.value) != XS_NULL) {
         val = wrap_value(ctx->interp->cf.value);
     }
     if (ctx->interp->cf.value) { value_decref(ctx->interp->cf.value); ctx->interp->cf.value = NULL; }
@@ -192,57 +199,37 @@ XSResult xs_eval_file(XSContext *ctx, const char *path) {
 }
 
 XSResult xs_call(XSContext *ctx, const char *fn_name, XSValue *args, int nargs) {
+    /* Stash args in throwaway globals, build a `__xs_call_fn(__xs_a0,
+     * __xs_a1, ...)` source string, and run it through the same
+     * eval path. Direct call_value works in some configurations but
+     * tripping over uninitialised call_stack/g_current_interp state
+     * has bitten enough hosts that a parser-routed call is the more
+     * predictable shape, and it inherits xs_eval's value-return fix
+     * so the result actually flows back. */
+    if (!ctx || !fn_name) return make_err(ctx, "xs_call: bad args");
     Value *fn_val = env_get(ctx->interp->globals, fn_name);
     if (!fn_val) {
         char buf[256];
         snprintf(buf, sizeof buf, "function '%s' not found", fn_name);
         return make_err(ctx, buf);
     }
-    if (VAL_TAG(fn_val) != XS_FUNC && VAL_TAG(fn_val) != XS_NATIVE) {
-        char buf[256];
-        snprintf(buf, sizeof buf, "'%s' is not callable", fn_name);
-        return make_err(ctx, buf);
-    }
-
-    /* convert args */
-    Value **c_args = NULL;
-    if (nargs > 0) {
-        c_args = (Value **)malloc(sizeof(Value *) * nargs);
-        for (int i = 0; i < nargs; i++)
-            c_args[i] = unwrap_value(&args[i]);
-    }
-
-    ctx->interp->cf.signal = 0;
-    Value *result = call_value(ctx->interp, fn_val, c_args, nargs, fn_name);
-
-    /* free synthesized args */
     for (int i = 0; i < nargs; i++) {
-        if (!args[i]._internal) value_decref(c_args[i]);
+        char gname[64];
+        snprintf(gname, sizeof gname, "__xs_call_arg_%d", i);
+        Value *v = unwrap_value(&args[i]);
+        int synthesized = (args[i]._internal == NULL);
+        if (!synthesized) value_incref(v);
+        env_define(ctx->interp->globals, gname, v, 1);
+        value_decref(v);
     }
-    free(c_args);
-
-    if (ctx->interp->cf.signal == CF_ERROR || ctx->interp->cf.signal == CF_PANIC) {
-        Value *err = ctx->interp->cf.value;
-        const char *msg = "runtime error";
-        if (err && VAL_TAG(err) == XS_STR) msg = err->s;
-        else if (err) {
-            char *s = value_repr(err);
-            if (s) { snprintf(ctx->error_buf, sizeof ctx->error_buf, "%s", s); free(s); msg = ctx->error_buf; }
-        }
-        XSResult r = make_err(ctx, msg);
-        if (ctx->interp->cf.value) { value_decref(ctx->interp->cf.value); ctx->interp->cf.value = NULL; }
-        ctx->interp->cf.signal = 0;
-        return r;
+    char src[1024];
+    int off = snprintf(src, sizeof src, "%s(", fn_name);
+    for (int i = 0; i < nargs; i++) {
+        off += snprintf(src + off, sizeof src - off,
+                        "%s__xs_call_arg_%d", i ? ", " : "", i);
     }
-
-    XSValue val;
-    memset(&val, 0, sizeof val);
-    val.tag = XS_VAL_NULL;
-    if (result) val = wrap_value(result);
-
-    if (ctx->interp->cf.value) { value_decref(ctx->interp->cf.value); ctx->interp->cf.value = NULL; }
-    ctx->interp->cf.signal = 0;
-    return make_ok(val);
+    snprintf(src + off, sizeof src - off, ")");
+    return run_source(ctx, src, "<xs_call>");
 }
 
 XSValue xs_get(XSContext *ctx, const char *name) {

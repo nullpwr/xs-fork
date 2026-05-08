@@ -466,6 +466,7 @@ void interp_free(Interp *i) {
         free(frame);
     }
     if (i->resume_value) value_decref(i->resume_value);
+    if (i->last_expr_value) value_decref(i->last_expr_value);
     for (int t = 0; t < i->n_tasks; t++) {
         if (i->task_queue[t].fn)     value_decref(i->task_queue[t].fn);
         if (i->task_queue[t].result) value_decref(i->task_queue[t].result);
@@ -8825,6 +8826,8 @@ void interp_exec(Interp *i, Node *stmt) {
     switch (VAL_TAG(stmt)) {
     case NODE_EXPR_STMT: {
         Value *v = EVAL(i, stmt->expr_stmt.expr);
+        if (i->last_expr_value) value_decref(i->last_expr_value);
+        i->last_expr_value = v ? value_incref(v) : NULL;
         value_decref(v);
         break;
     }
@@ -10253,6 +10256,10 @@ void interp_run(Interp *i, Node *program) {
     /* Reset per-invocation counters but keep any caps set by the
        embedder / CLI. */
     xs_limits_reset();
+    if (i->last_expr_value) {
+        value_decref(i->last_expr_value);
+        i->last_expr_value = NULL;
+    }
     g_current_interp = i;
     g_plugin_interp = i;
     i->current_program = program;

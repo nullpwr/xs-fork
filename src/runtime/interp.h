@@ -143,6 +143,12 @@ struct Interp {
        what went wrong. */
     int          had_unhandled_exception;
     Value       *unhandled_exception_value;
+
+    /* Most recent expression-statement value, retained so embed-API
+       callers (xs_eval / xs_call) can read back the result of code
+       like `42` or `fact(7)`. Cleared at the start of each
+       interp_run; refreshed for every NODE_EXPR_STMT executed. */
+    Value       *last_expr_value;
 };
 
 Interp *interp_new(const char *filename);
