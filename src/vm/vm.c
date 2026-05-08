@@ -4885,6 +4885,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 TryEntry *te = &frame->try_stack[frame->try_depth++];
                 te->catch_ip  = frame->ip + INSTR_sBx(instr);
                 te->stack_top = vm->sp;
+                te->handle_local_base = -1;
                 g_xs_in_try++;
             }
             break;
@@ -5041,6 +5042,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 TryEntry *te = &frame->try_stack[frame->try_depth++];
                 te->catch_ip  = frame->ip + INSTR_sBx(instr);
                 te->stack_top = vm->sp;
+                /* Convert proto-relative local count to an absolute
+                 * stack offset: frame->base is where this proto's
+                 * locals start, A is the local-count before the
+                 * handle body. The arm-state snapshot covers stack
+                 * positions >= this offset only, so outer-frame
+                 * locals (declared before the handle, or in any
+                 * caller) survive a multi-shot resume restore. */
+                te->handle_local_base =
+                    (int)(frame->base - vm->stack) + (int)INSTR_A(instr);
+                g_xs_in_try++;
             }
             break;
         }
@@ -5110,6 +5121,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     cf->try_depth--;
                     cur->sp_off = (int)(vm->sp - vm->stack);
                     cur->stack_top_off = (int)(te->stack_top - vm->stack);
+                    cur->arm_local_base = te->handle_local_base;
                     cur->valid = 1;
                     {
                         int lo = cur->stack_top_off;
@@ -5198,14 +5210,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     memcpy(cur->arm_frames, vm->frames,
                            sizeof(CallFrame) * (size_t)vm->frame_count);
                     cur->arm_sp_off = (int)(vm->sp - vm->stack);
-                    int n = cur->arm_sp_off;
+                    /* Capture the in-handle slice [arm_local_base,
+                     * arm_sp_off) -- arm-state and body-inside-handle
+                     * locals + the eval stack. Locals at lower
+                     * indices are outer-frame state and stay shared
+                     * across resume so inner arms can mutate them
+                     * persistently (see vm.h/EffectCont). */
+                    int lo = cur->arm_local_base;
+                    if (lo < 0) lo = 0;
+                    int hi = cur->arm_sp_off;
+                    if (hi < lo) hi = lo;
+                    int n = hi - lo;
                     if (cur->arm_snapshot_cap < n) {
                         cur->arm_snapshot_cap = n;
                         cur->arm_stack_snapshot = realloc(cur->arm_stack_snapshot,
                             (size_t)n * sizeof(Value *));
                     }
                     for (int si = 0; si < n; si++) {
-                        Value *v = vm->stack[si];
+                        Value *v = vm->stack[lo + si];
                         cur->arm_stack_snapshot[si] = v ? value_incref(v) : NULL;
                     }
                     cur->arm_snapshot_len = n;
@@ -5275,14 +5297,15 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 memcpy(vm->frames, cur->arm_frames,
                        sizeof(CallFrame) * (size_t)cur->arm_frame_count);
                 vm->frame_count = cur->arm_frame_count;
-                int n = cur->arm_snapshot_len;
+                int lo = cur->arm_local_base;
+                if (lo < 0) lo = 0;
                 if (cur->arm_stack_snapshot) {
-                    for (int si = 0; si < n; si++) {
-                        Value *prev = vm->stack[si];
+                    for (int si = 0; si < cur->arm_snapshot_len; si++) {
+                        Value *prev = vm->stack[lo + si];
                         Value *snap = cur->arm_stack_snapshot[si];
                         Value *next = snap ? value_incref(snap) : NULL;
                         if (prev && prev != next) value_decref(prev);
-                        vm->stack[si] = next;
+                        vm->stack[lo + si] = next;
                     }
                 }
                 vm->sp = vm->stack + cur->arm_sp_off;
@@ -5294,14 +5317,68 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
 
         case OP_EFFECT_DONE: {
-            /* Arm body has finished -- release the saved continuation
-             * (and its arm snapshot) so a future perform doesn't see
-             * stale state. */
+            /* Steal the arm body's trailing value off the stack first;
+             * it threads through to the outer arm's resume call site
+             * (or back out of the handle as the handle's value if no
+             * outer arm is mid-resume). */
+            Value *trailing = (vm->sp > vm->stack)
+                ? POP() : value_incref(XS_NULL_VAL);
+            /* Release the saved continuation (and its arm snapshot)
+             * so a future perform doesn't see stale state. */
             if (vm->eff_stack_count > 0) {
                 EffectCont *cur = &vm->eff_stack[vm->eff_stack_count - 1];
                 eff_cont_release_snapshot(cur);
                 cur->valid = 0;
                 vm->eff_stack_count--;
+            }
+            /* Nested perform under multi-shot resume: an outer arm is
+             * still mid-resume on the LIFO stack. Restore its arm
+             * state so the outer arm picks up where its resume() left
+             * off (next iteration of its own loop, or its trailing
+             * arm-body value). Without this we'd jump out of the
+             * handle and abandon every outer arm still on the stack
+             * -- exactly why nested perform inside multi-shot resume
+             * only ever visited the first outer branch.
+             *
+             * Clear in_resume on the restored outer cont so its next
+             * resume() takes a fresh snapshot of its (now-advanced)
+             * arm state. Otherwise a later EFFECT_DONE would re-
+             * restore the stale snapshot and loop. */
+            int restored = 0;
+            for (int oj = vm->eff_stack_count - 1; oj >= 0; oj--) {
+                EffectCont *outer = &vm->eff_stack[oj];
+                if (!outer->valid || !outer->in_resume) continue;
+                if (vm->frames_cap < outer->arm_frame_count) {
+                    vm->frames_cap = outer->arm_frame_count;
+                    vm->frames = realloc(vm->frames,
+                        (size_t)vm->frames_cap * sizeof(CallFrame));
+                }
+                memcpy(vm->frames, outer->arm_frames,
+                       sizeof(CallFrame) * (size_t)outer->arm_frame_count);
+                vm->frame_count = outer->arm_frame_count;
+                int lo_o = outer->arm_local_base;
+                if (lo_o < 0) lo_o = 0;
+                if (outer->arm_stack_snapshot) {
+                    for (int si = 0; si < outer->arm_snapshot_len; si++) {
+                        Value *prev = vm->stack[lo_o + si];
+                        Value *snap = outer->arm_stack_snapshot[si];
+                        Value *next = snap ? value_incref(snap) : NULL;
+                        if (prev && prev != next) value_decref(prev);
+                        vm->stack[lo_o + si] = next;
+                    }
+                }
+                vm->sp = vm->stack + outer->arm_sp_off;
+                frame = FRAME;
+                outer->in_resume = 0;
+                PUSH(trailing);
+                restored = 1;
+                break;
+            }
+            if (!restored) {
+                /* Outermost arm finished -- this is the handle's
+                 * value, sitting on top of the stack for the JUMP
+                 * over_handler that follows. */
+                PUSH(trailing);
             }
             break;
         }

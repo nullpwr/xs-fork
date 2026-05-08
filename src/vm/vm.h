@@ -23,6 +23,14 @@ typedef struct {
 typedef struct {
     Instruction *catch_ip;
     Value      **stack_top;  /* sp at TRY_BEGIN (for unwinding) */
+    /* For handle/effect tries: number of locals declared in the
+     * enclosing function BEFORE this handle. Used to scope the
+     * arm-state snapshot in OP_EFFECT_RESUME so multi-shot replay
+     * preserves outer-frame locals (e.g. `var r = []` declared
+     * outside the handle) but still captures arm-locals (e.g.
+     * loop counter `var i = 0`) that nested arms would otherwise
+     * stomp. -1 for non-handle try frames. */
+    int          handle_local_base;
 } TryEntry;
 
 /* open upvalue points to stack slot; closed holds its own copy */
@@ -87,6 +95,14 @@ typedef struct {
     Value     **arm_stack_snapshot;
     int         arm_snapshot_len;
     int         arm_snapshot_cap;
+    /* First slot index belonging to the handle's body+arms. Locals at
+     * lower indices are outer-frame state (e.g. `var r = []` declared
+     * before the handle) and stay live across resume; arm-state and
+     * body-inside-handle locals are in [arm_local_base, max). The
+     * snapshot covers only the in-handle slice so an outer-arm
+     * restore doesn't undo modifications inner arms made to outer
+     * locals. */
+    int         arm_local_base;
 } EffectCont;
 
 typedef struct VM {

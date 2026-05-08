@@ -54,7 +54,7 @@ void *ralow_codegen(XSJIT *j, IRFunc *f, IRAlloc *a) {
 #define VM_OFF_FRAME_COUNT   36
 #define FRAME_OFF_IP          8
 #define FRAME_OFF_BASE       16
-#define FRAME_SIZE         1608
+#define FRAME_SIZE         2120
 #define VAL_OFF_REFCOUNT      4
 
 #define X_VM    19

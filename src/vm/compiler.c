@@ -159,6 +159,12 @@ static int emit_jump(Compiler *c, Opcode op) {
     return idx;
 }
 
+static int emit_jump_a(Compiler *c, Opcode op, int a) {
+    int idx = c->current->proto->chunk.len;
+    emit(c, MAKE_A(op, (uint8_t)a, 0));
+    return idx;
+}
+
 static void patch_jump(Compiler *c, int instr_idx) {
     int offset = c->current->proto->chunk.len - instr_idx - 1;
     Instruction *ip = &c->current->proto->chunk.code[instr_idx];
@@ -2804,7 +2810,17 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
          * the arm's resume call site (and arm bodies are
          * structurally consistent for OP_EFFECT_DONE). The trailing
          * pop below restores the caller's want_value contract. */
-        int try_start = emit_jump(c, OP_TRY_BEGIN);
+        /* Snapshot the proto's local count BEFORE compiling the body
+         * so the runtime can scope arm-state snapshots to slots
+         * declared inside this handle. Outer locals stay shared, which
+         * is what nested arms need to communicate via mutations. The
+         * count is encoded in OP_EFFECT_HANDLE's A byte; cap at 255
+         * since that's all the field holds (only large functions
+         * approach this, and the cap just falls back to "snapshot
+         * everything" -- the v1.2.1 behaviour). */
+        int local_base = c->current->proto->nlocals;
+        if (local_base > 255) local_base = 0;
+        int try_start = emit_jump_a(c, OP_EFFECT_HANDLE, local_base);
         compile_node(c, n->handle.expr, 1);
         emit(c, MAKE_A(OP_TRY_END, 0, 0));
         emit(c, MAKE_A(OP_HANDLE_BODY_END, 0, 0));
