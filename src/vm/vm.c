@@ -2878,10 +2878,11 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             }
             else if (VAL_TAG(iter)==XS_MAP && map_get(iter->map, "_chan_id") &&
                      VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
-                /* Channel: snapshot the current buffered length; ITER_GET
-                   drains that many via try_recv. */
-                extern int xs_chan_len(Value *);
-                r = xs_int(xs_chan_len(iter));
+                /* Channel: report INT64_MAX so the loop's idx<len check
+                   never aborts the iteration prematurely. ITER_GET does
+                   blocking recv and bails to the post-loop label via
+                   its sBx when the channel is closed-and-drained. */
+                r = xs_int(INT64_MAX);
             }
             else if (VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) r = xs_int(iter->map->len);
             else if (VAL_TAG(iter)==XS_RANGE && iter->range) {
@@ -2918,11 +2919,22 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             } else if (VAL_TAG(iter)==XS_MAP && iter->map &&
                        map_get(iter->map, "_chan_id") &&
                        VAL_TAG(map_get(iter->map, "_chan_id")) == XS_INT) {
-                /* Channel iteration: ignore idx, pop the next buffered
-                   value via try_recv. ITER_LEN snapshotted the count so
-                   the loop bound matches the drain. */
-                extern Value *xs_chan_try_recv(Value *);
-                r = xs_chan_try_recv(iter);
+                /* Channel iteration: blocking recv until the producer
+                   closes the channel. Returns null only when the buffer
+                   is drained AND the channel is closed; in that case
+                   skip past the loop body via the ITER_GET sBx encoded
+                   by the compiler so we don't bind a phantom null. */
+                extern Value *xs_chan_recv(Value *, struct Interp *);
+                r = xs_chan_recv(iter, NULL);
+                int chan_done = (!r || VAL_TAG(r) == XS_NULL);
+                if (chan_done) {
+                    if (r) value_decref(r);
+                    value_decref(idx);
+                    value_decref(iter);
+                    int exit_off = INSTR_sBx(instr);
+                    frame->ip += exit_off;
+                    break;
+                }
             } else if ((VAL_TAG(iter)==XS_MAP||VAL_TAG(iter)==XS_MODULE) && iter->map) {
                 /* walk m->order so iteration order matches what the
                    user inserted -- bucket order made `for k in m` and

@@ -5988,7 +5988,13 @@ do_call: ;
                 Value *val;
                 if (closed) val = xs_chan_try_recv(iter);
                 else        val = xs_chan_recv(iter, i);
-                if (!val) {
+                /* recv returns the XS_NULL_VAL singleton (a real Value*,
+                   not C NULL) when the channel is closed-and-drained,
+                   so the C-null check alone misses the close signal and
+                   the loop binds null once before exiting. */
+                int got_null = !val || VAL_TAG(val) == XS_NULL;
+                if (got_null) {
+                    if (val) value_decref(val);
                     if (xs_chan_is_closed(iter) && xs_chan_len(iter) <= 0) break;
                     continue;
                 }

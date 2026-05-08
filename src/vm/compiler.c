@@ -1432,6 +1432,7 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         emit_a(c, OP_LOAD_LOCAL, idx_slot);
         Node *pat = n->for_loop.pattern;
         int want_pairs = (pat && VAL_TAG(pat) == NODE_PAT_TUPLE) ? 1 : 0;
+        int iter_get_idx = c->current->proto->chunk.len;
         emit(c, MAKE_A(OP_ITER_GET, want_pairs, 0));
         const char *pat_name = NULL;
         if (pat) {
@@ -1493,6 +1494,10 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
         emit(c, MAKE_A(OP_JUMP, 0, (uint16_t)(int16_t)back_off));
 
         patch_jump(c, j_exit);
+        /* For channels, ITER_GET takes a blocking recv and bails to here
+           when the channel is closed-and-drained. Same patch encoding as
+           j_exit so the IP lands on the post-loop label. */
+        patch_jump(c, iter_get_idx);
         if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         loop_pop_patch_breaks(c);
         return;
