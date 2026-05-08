@@ -2117,17 +2117,24 @@ The VM and JIT capture a stack snapshot at perform time and replay it for each r
 
 ### Spawn
 
-`spawn` runs a block as a task. In the current interpreter, tasks execute immediately (cooperative, not preemptive).
+`spawn` runs a block on a real OS thread. The body returns a future
+the parent can `await` for the value or hand to a `nursery` for
+structured-concurrency cleanup. Bytecode execution is GIL-serialized
+so two pure-compute spawns trade off rather than running on different
+cores at once, but blocking calls (`time.sleep`, channel `send` / `recv`,
+`io` reads) release the GIL so a sibling actually runs while one is
+waiting.
 
 ```xs
 var done = false
-spawn { done = true }
-println(done)                    -- true
+let t = spawn { done = true }
+println(done)                    -- false (spawn runs concurrently)
+await t
+println(done)                    -- true (worker has finished)
 
--- spawn returns a task handle (a map)
-let t = spawn { 1 + 2 }
-println(t["_result"])            -- 3
-println(t["_status"])            -- done
+-- await returns the body's value
+let result = spawn { 1 + 2 }
+println(await result)            -- 3
 ```
 
 ### Async / Await
