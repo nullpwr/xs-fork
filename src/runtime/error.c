@@ -63,6 +63,19 @@ void xs_runtime_error(Span span, const char *label, const char *hint,
        try/catch frame to absorb it. A caught error must not poison
        the program's exit code. */
     if (!in_try) g_xs_runtime_error_count++;
+    /* If the caller couldn't supply a span (the typical case for
+       natives invoked through the VM), pull the active VM frame's
+       source position so the error still lands on a real line. */
+    if (span.line == 0) {
+        if (g_current_interp && g_current_interp->current_span.line) {
+            span = g_current_interp->current_span;
+        } else {
+#ifdef XSC_ENABLE_VM
+            extern Span vm_active_span_global(void);
+            span = vm_active_span_global();
+#endif
+        }
+    }
     va_list ap;
     va_start(ap, fmt);
     char buf[512];

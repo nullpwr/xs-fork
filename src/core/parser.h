@@ -60,4 +60,9 @@ Node *parser_parse_while(Parser *p);
 Node *parser_parse_match(Parser *p);
 Node *parser_parse_fn_decl(Parser *p, int is_pub, int is_async, int is_pure);
 
+/* True if a decorator name is a wrapping decorator (memoize, retry,
+   trace, timed) -- the runtime replaces the fn's binding with a
+   wrapper that runs around the original. */
+int parser_decorator_is_wrapping(const char *name);
+
 #endif /* PARSER_H */

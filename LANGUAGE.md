@@ -3371,12 +3371,14 @@ fn on_input(text) {
 
 ## Decorators
 
-A function declaration can carry one or more decorators that answer
-"what triggers this function?" Most functions have none, some have
-one trigger plus an optional `@once`. Five of them have an evaluated
-argument (`@every(1s)`, `@cron("* * * * *")`, `@delayed(500ms)`,
-`@on_signal("INT")`, `@watch("./config")`, `@export("name")`); the
-rest take none.
+A function declaration can carry one or more decorators. They split
+into two categories. Trigger decorators answer "what schedules this
+function?" -- the runtime fires the body without a direct caller.
+Wrapping decorators answer "what happens around every call?" -- the
+bound name resolves to a dispatcher that intercepts the call and
+delegates to the original.
+
+### Trigger decorators
 
 ```xs
 @on_start fn boot() { setup_things() }
@@ -3413,6 +3415,48 @@ The runtime stays alive while any persistent trigger is registered
 fired or been quiesced by `@once`, the process exits naturally.
 `xs.exit(n)` forces an immediate shutdown and still fires `@on_exit`
 handlers.
+
+### Wrapping decorators
+
+```xs
+@memoize fn fib(n) {
+    if n < 2 { return n }
+    return fib(n-1) + fib(n-2)
+}
+
+@retry(5) fn fetch(url) { http.get(url) }
+
+@trace fn handle(req) { ... }
+@timed fn build_index() { ... }
+```
+
+`@memoize` caches results by a string-key derived from the call's
+argument values; subsequent calls with equal arguments return the
+cached value without re-running the body. Recursive calls hit the
+same cache, so `fib(10)` only invokes the body 11 times.
+
+`@retry(n)` runs the body up to `n` attempts, swallowing each thrown
+exception and retrying. The first attempt that returns normally
+becomes the call's result. If every attempt throws, the final
+exception is re-raised so the caller's surrounding `try` (or the
+top-level handler) can see it. The default is 3 attempts when the
+argument is omitted.
+
+`@trace` prints the call name and arguments before the body runs and
+the return value after, both to stderr. `@timed` measures monotonic
+wall-clock around the call and prints the elapsed milliseconds.
+Both pass arguments through unchanged and return the body's result.
+
+Wrapping decorators compose with each other in declaration order
+(outermost first):
+
+```xs
+@timed @memoize fn expensive(x) { ... }
+```
+
+Here `@memoize` wraps the original fn first, then `@timed` wraps the
+memoized dispatcher; the timer measures the cache hit when one
+exists.
 
 ---
 

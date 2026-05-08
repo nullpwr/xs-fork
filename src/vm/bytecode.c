@@ -28,6 +28,9 @@ void proto_free(XSProto *p) {
      * Values, so just drop the array. */
     free(p->chunk.ic_class);
     free(p->chunk.ic_version);
+    free(p->chunk.lines);
+    free(p->chunk.cols);
+    free(p->source_file);
     for (int i = 0; i < p->n_inner; i++) proto_free(p->inner[i]);
     free(p->inner);
     free(p->uv_descs);
@@ -40,11 +43,24 @@ void proto_free(XSProto *p) {
 
 int chunk_write(XSChunk *c, Instruction i) {
     if (c->len == c->cap) {
-        c->cap = c->cap ? c->cap * 2 : 16;
-        c->code = xs_realloc(c->code, (size_t)c->cap * sizeof(Instruction));
+        int new_cap = c->cap ? c->cap * 2 : 16;
+        c->code  = xs_realloc(c->code,  (size_t)new_cap * sizeof(Instruction));
+        c->lines = xs_realloc(c->lines, (size_t)new_cap * sizeof(int));
+        c->cols  = xs_realloc(c->cols,  (size_t)new_cap * sizeof(int));
+        for (int k = c->cap; k < new_cap; k++) { c->lines[k] = 0; c->cols[k] = 0; }
+        c->cap = new_cap;
     }
-    c->code[c->len++] = i;
-    return c->len - 1;
+    c->code[c->len]  = i;
+    c->lines[c->len] = 0;
+    c->cols[c->len]  = 0;
+    return c->len++;
+}
+
+void chunk_set_loc(XSChunk *c, int ip, int line, int col) {
+    if (ip >= 0 && ip < c->len) {
+        c->lines[ip] = line;
+        c->cols[ip]  = col;
+    }
 }
 
 int chunk_add_const(XSChunk *c, Value *v) {
@@ -233,10 +249,17 @@ static void proto_write(FILE *f, XSProto *p) {
     write_u16(f, (uint16_t)p->arity);
     write_u16(f, (uint16_t)p->nlocals);
     write_u16(f, (uint16_t)p->n_upvalues);
+    /* source file (per-proto; inner protos write their own copy) */
+    write_str(f, p->source_file);
     /* code */
     write_u32(f, (uint32_t)p->chunk.len);
     for (int i = 0; i < p->chunk.len; i++)
         write_u32(f, p->chunk.code[i]);
+    /* per-instruction line/col */
+    for (int i = 0; i < p->chunk.len; i++) {
+        write_u32(f, (uint32_t)(p->chunk.lines ? p->chunk.lines[i] : 0));
+        write_u32(f, (uint32_t)(p->chunk.cols  ? p->chunk.cols[i]  : 0));
+    }
     /* constants */
     write_u16(f, (uint16_t)p->chunk.nconsts);
     for (int i = 0; i < p->chunk.nconsts; i++) {
@@ -264,7 +287,8 @@ int proto_write_file(XSProto *p, const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     fwrite("XSC", 1, 4, f); /* includes null terminator */
-    write_u16(f, 1); /* format version */
+    write_u16(f, 2); /* format version: v2 adds per-proto source_file +
+                        per-instruction lines/cols */
     proto_write(f, p);
     fclose(f);
     return 0;
@@ -277,10 +301,18 @@ static XSProto *proto_read(Reader *r) {
     free(name);
     p->nlocals = read_u16(r);
     p->n_upvalues = read_u16(r);
+    /* source file (per-proto) */
+    p->source_file = read_str(r);
     /* code */
     int ncode = (int)read_u32(r);
     for (int i = 0; i < ncode; i++)
         chunk_write(&p->chunk, read_u32(r));
+    /* per-instruction line/col */
+    for (int i = 0; i < ncode; i++) {
+        int line = (int)read_u32(r);
+        int col  = (int)read_u32(r);
+        chunk_set_loc(&p->chunk, i, line, col);
+    }
     /* constants */
     int nconsts = read_u16(r);
     for (int i = 0; i < nconsts; i++) {
@@ -323,7 +355,7 @@ static int read_header(Reader *r) {
     char magic[4] = {0};
     if (rd_read(r, magic, 4) != 4 || memcmp(magic, "XSC", 4) != 0) return -1;
     uint16_t ver = read_u16(r);
-    return ver == 1 ? 0 : -1;
+    return ver == 2 ? 0 : -1;
 }
 
 XSProto *proto_read_file(const char *path) {

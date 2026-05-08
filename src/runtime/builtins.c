@@ -1555,6 +1555,16 @@ void stdlib_register(Interp *i) {
     interp_define_native(i, "repr",      builtin_repr);
     interp_define_native(i, "__xs_fmt",  builtin_xs_fmt);
     interp_define_native(i, "__xs_call_with_array", builtin_xs_call_with_array);
+    {
+        extern Value *builtin_wrap_memoize_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_retry_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_trace_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_timed_export(Interp *, Value **, int);
+        interp_define_native(i, "__wrap_memoize", builtin_wrap_memoize_export);
+        interp_define_native(i, "__wrap_retry",   builtin_wrap_retry_export);
+        interp_define_native(i, "__wrap_trace",   builtin_wrap_trace_export);
+        interp_define_native(i, "__wrap_timed",   builtin_wrap_timed_export);
+    }
     interp_define_native(i, "dbg",       builtin_dbg);
     interp_define_native(i, "pprint",    builtin_pprint);
     interp_define_native(i, "len",       builtin_len);
@@ -1744,3 +1754,199 @@ Value *builtin_xs_fmt_export(Interp *i, Value **args, int argc) {
 Value *builtin_xs_call_with_array_export(Interp *i, Value **args, int argc) {
     return builtin_xs_call_with_array(i, args, argc);
 }
+
+/* === Wrapping decorators ============================================
+ * The fn_decl runtime path detects @memoize / @retry / @trace / @timed
+ * and calls the matching __wrap_*_make below to produce a wrapper map
+ * that the call dispatchers (interp call_value, vm OP_CALL) recognise
+ * via _wrap_kind. Wrappers carry the original fn in _wrap_fn and
+ * whatever per-decorator state they need (cache, retry count, name).
+ * The dispatch enters wrap_call_dispatch which runs the wrapper logic
+ * and may invoke the original through the same call_value path. */
+
+static Value *wrap_make_base(const char *kind, Value *fn, const char *name) {
+    Value *m = xs_map_new();
+    Value *kv = xs_str(kind);
+    map_set(m->map, "_wrap_kind", kv); value_decref(kv);
+    Value *fv = value_incref(fn);
+    map_set(m->map, "_wrap_fn", fv); value_decref(fv);
+    if (name) {
+        Value *nv = xs_str(name);
+        map_set(m->map, "_wrap_name", nv); value_decref(nv);
+    }
+    return m;
+}
+
+static Value *builtin_wrap_memoize(Interp *i, Value **args, int argc) {
+    (void)i;
+    if (argc < 1) return value_incref(XS_NULL_VAL);
+    const char *name = (argc >= 2 && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : NULL;
+    Value *m = wrap_make_base("memoize", args[0], name);
+    Value *cache = xs_map_new();
+    map_set(m->map, "_wrap_cache", cache); value_decref(cache);
+    return m;
+}
+
+static Value *builtin_wrap_retry(Interp *i, Value **args, int argc) {
+    (void)i;
+    if (argc < 1) return value_incref(XS_NULL_VAL);
+    const char *name = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : NULL;
+    Value *m = wrap_make_base("retry", args[0], name);
+    int64_t n = 3;
+    if (argc >= 2 && VAL_TAG(args[1]) == XS_INT) n = VAL_INT(args[1]);
+    if (n < 1) n = 1;
+    Value *nv = xs_int(n);
+    map_set(m->map, "_wrap_n", nv); value_decref(nv);
+    return m;
+}
+
+static Value *builtin_wrap_trace(Interp *i, Value **args, int argc) {
+    (void)i;
+    if (argc < 1) return value_incref(XS_NULL_VAL);
+    const char *name = (argc >= 2 && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : NULL;
+    return wrap_make_base("trace", args[0], name);
+}
+
+static Value *builtin_wrap_timed(Interp *i, Value **args, int argc) {
+    (void)i;
+    if (argc < 1) return value_incref(XS_NULL_VAL);
+    const char *name = (argc >= 2 && VAL_TAG(args[1]) == XS_STR) ? args[1]->s : NULL;
+    return wrap_make_base("timed", args[0], name);
+}
+
+/* Dispatch a call on a wrapper map. Returns NULL if the receiver
+   isn't a wrapper (caller falls through to ordinary dispatch). */
+Value *wrap_call_dispatch(Interp *interp, Value *wrap, Value **args, int argc) {
+    if (!wrap || VAL_TAG(wrap) != XS_MAP || !wrap->map) return NULL;
+    Value *kv = map_get(wrap->map, "_wrap_kind");
+    if (!kv || VAL_TAG(kv) != XS_STR || !kv->s) return NULL;
+    const char *kind = kv->s;
+    Value *fn = map_get(wrap->map, "_wrap_fn");
+    if (!fn) return value_incref(XS_NULL_VAL);
+    Value *name_v = map_get(wrap->map, "_wrap_name");
+    const char *name = (name_v && VAL_TAG(name_v) == XS_STR) ? name_v->s : "fn";
+
+    if (strcmp(kind, "memoize") == 0) {
+        Value *cache_v = map_get(wrap->map, "_wrap_cache");
+        if (!cache_v || VAL_TAG(cache_v) != XS_MAP)
+            return call_value(interp, fn, args, argc, name);
+        /* Build a key from arg values; their str repr is the storage
+           index. Cheap and cycle-free; meant for value-typed inputs. */
+        size_t cap = 64;
+        char *kbuf = xs_malloc(cap);
+        size_t kp = 0;
+        kbuf[kp] = '\0';
+        for (int j = 0; j < argc; j++) {
+            char *as = value_str(args[j]);
+            size_t al = strlen(as);
+            while (kp + al + 2 > cap) { cap *= 2; kbuf = xs_realloc(kbuf, cap); }
+            if (j) kbuf[kp++] = '|';
+            memcpy(kbuf + kp, as, al); kp += al;
+            kbuf[kp] = '\0';
+            free(as);
+        }
+        Value *cached = map_get(cache_v->map, kbuf);
+        if (cached) { Value *r = value_incref(cached); free(kbuf); return r; }
+        Value *r = call_value(interp, fn, args, argc, name);
+        if (r) map_set(cache_v->map, kbuf, value_incref(r));
+        free(kbuf);
+        return r;
+    }
+    if (strcmp(kind, "retry") == 0) {
+        Value *nv = map_get(wrap->map, "_wrap_n");
+        int64_t n = (nv && VAL_TAG(nv) == XS_INT) ? VAL_INT(nv) : 3;
+        Value *r = NULL;
+        extern __thread int g_xs_in_try;
+        Value *last_exc = NULL;
+        int last_threw = 0;
+        for (int64_t a = 0; a < n; a++) {
+            /* Pre-clear any stale throw left from a previous attempt. */
+            if (g_xs_pending_throw) {
+                value_decref(g_xs_pending_throw);
+                g_xs_pending_throw = NULL;
+            }
+            if (interp) {
+                if (interp->cf.value) value_decref(interp->cf.value);
+                interp->cf.value = NULL;
+                interp->cf.signal = 0;
+            }
+            /* Mark this region as inside a try so xs_runtime_error
+               parks the throw on g_xs_pending_throw / cf.signal
+               instead of unwinding past us. interp counts try_depth;
+               vm uses g_xs_in_try. */
+            g_xs_in_try++;
+            int saved_try_depth = 0;
+            if (interp) { saved_try_depth = interp->try_depth; interp->try_depth++; }
+            r = call_value(interp, fn, args, argc, name);
+            g_xs_in_try--;
+            if (interp) interp->try_depth = saved_try_depth;
+            int threw = (g_xs_pending_throw != NULL) ||
+                        (interp && interp->cf.signal == CF_THROW);
+            if (!threw) { last_threw = 0; break; }
+            last_threw = 1;
+            /* swallow the error so next attempt sees a clean slate;
+               keep a copy in case all attempts fail and we re-throw. */
+            if (last_exc) { value_decref(last_exc); last_exc = NULL; }
+            if (g_xs_pending_throw) {
+                last_exc = g_xs_pending_throw;
+                g_xs_pending_throw = NULL;
+            } else if (interp && interp->cf.value) {
+                last_exc = value_incref(interp->cf.value);
+            }
+            if (interp) {
+                interp->cf.signal = 0;
+                if (interp->cf.value) {
+                    value_decref(interp->cf.value);
+                    interp->cf.value = NULL;
+                }
+            }
+            if (r) value_decref(r);
+            r = NULL;
+        }
+        if (last_threw) {
+            /* All attempts failed; re-raise the last exception so the
+               caller's surrounding try/catch (or top-level) sees it. */
+            if (interp) {
+                interp->cf.signal = CF_THROW;
+                interp->cf.value  = last_exc;
+            } else {
+                g_xs_pending_throw = last_exc;
+            }
+            last_exc = NULL;
+            if (r) { value_decref(r); r = NULL; }
+            return value_incref(XS_NULL_VAL);
+        }
+        if (last_exc) value_decref(last_exc);
+        return r ? r : value_incref(XS_NULL_VAL);
+    }
+    if (strcmp(kind, "trace") == 0) {
+        fprintf(stderr, "[trace] -> %s(", name);
+        for (int j = 0; j < argc; j++) {
+            char *as = value_str(args[j]);
+            fprintf(stderr, "%s%s", j ? ", " : "", as);
+            free(as);
+        }
+        fprintf(stderr, ")\n");
+        Value *r = call_value(interp, fn, args, argc, name);
+        char *rs = value_str(r);
+        fprintf(stderr, "[trace] <- %s = %s\n", name, rs);
+        free(rs);
+        return r;
+    }
+    if (strcmp(kind, "timed") == 0) {
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        Value *r = call_value(interp, fn, args, argc, name);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = (t1.tv_sec - t0.tv_sec) * 1000.0 +
+                    (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        fprintf(stderr, "[timed] %s: %.3f ms\n", name, ms);
+        return r;
+    }
+    return call_value(interp, fn, args, argc, name);
+}
+
+Value *builtin_wrap_memoize_export(Interp *i, Value **a, int n) { return builtin_wrap_memoize(i, a, n); }
+Value *builtin_wrap_retry_export(Interp *i, Value **a, int n) { return builtin_wrap_retry(i, a, n); }
+Value *builtin_wrap_trace_export(Interp *i, Value **a, int n) { return builtin_wrap_trace(i, a, n); }
+Value *builtin_wrap_timed_export(Interp *i, Value **a, int n) { return builtin_wrap_timed(i, a, n); }

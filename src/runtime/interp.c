@@ -935,6 +935,16 @@ Value *call_value(Interp *i, Value *callee, Value **args, int argc,
                           const char *call_site) {
     if (!callee) return value_incref(XS_NULL_VAL);
 
+    /* Wrapping decorators (@memoize / @retry / @trace / @timed) bind
+       the fn name to a map carrying _wrap_kind, so the call dispatcher
+       has to recognise it first and route to the wrapper logic. */
+    if (VAL_TAG(callee) == XS_MAP && callee->map &&
+        map_get(callee->map, "_wrap_kind")) {
+        extern Value *wrap_call_dispatch(Interp *, Value *, Value **, int);
+        Value *r = wrap_call_dispatch(i, callee, args, argc);
+        if (r) return r;
+    }
+
     /* VM-mode entry: when a script is run from a file the bytecode VM
        calls native functions with NULL for the Interp* (vm_dispatch's
        OP_CALL / OP_METHOD_CALL pass NULL because the interp isn't the
@@ -9264,6 +9274,20 @@ void interp_exec(Interp *i, Node *stmt) {
                 strcmp(existing->fn->name, stmt->fn_decl.name) == 0) {
                 already_hoisted = 1;
             }
+            /* If hoist wrapped the fn in a @memoize / @retry / @trace /
+               @timed dispatcher, the binding is now an XS_MAP wrapper
+               carrying the same name; running the stmt path here would
+               clobber that wrapper with the raw fn again. */
+            if (existing && VAL_TAG(existing) == XS_MAP && existing->map) {
+                Value *wk = map_get(existing->map, "_wrap_kind");
+                Value *wn = map_get(existing->map, "_wrap_name");
+                if (wk && VAL_TAG(wk) == XS_STR &&
+                    wn && VAL_TAG(wn) == XS_STR &&
+                    stmt->fn_decl.name &&
+                    strcmp(wn->s, stmt->fn_decl.name) == 0) {
+                    already_hoisted = 1;
+                }
+            }
             if (already_hoisted) {
                 /* nothing to do -- hoist already did it */
             } else if (existing && VAL_TAG(existing) == XS_OVERLOAD) {
@@ -10501,6 +10525,34 @@ static void hoist_functions(Interp *i, NodeList *stmts) {
         Value *v = xs_func_new(fn);
         env_define(i->env, stmt->fn_decl.name, v, 1);
         register_fn_decl_triggers(i, stmt, v);
+        /* Wrapping decorators: feed the bound fn through @memoize /
+           @retry / @trace / @timed in declaration order, re-binding
+           the name to the produced wrapper map. The wrapper is then
+           callable via wrap_call_dispatch in call_value. */
+        for (int dk = 0; dk < stmt->fn_decl.n_decorators; dk++) {
+            Decorator *d = &stmt->fn_decl.decorators[dk];
+            if (!parser_decorator_is_wrapping(d->name)) continue;
+            Value *cur = env_get(i->env, stmt->fn_decl.name);
+            if (!cur) continue;
+            char wname[64];
+            snprintf(wname, sizeof wname, "__wrap_%s", d->name);
+            Value *make = env_get(i->env, wname);
+            if (!make) continue;
+            int wargc = 1 + d->n_args + 1;
+            Value **wargs = xs_calloc(wargc, sizeof(Value*));
+            wargs[0] = value_incref(cur);
+            for (int a = 0; a < d->n_args; a++)
+                wargs[1 + a] = EVAL(i, d->args[a]);
+            wargs[1 + d->n_args] = xs_str(stmt->fn_decl.name);
+            Value *wrapped = call_value(i, make, wargs, wargc, d->name);
+            for (int a = 0; a < wargc; a++)
+                if (wargs[a]) value_decref(wargs[a]);
+            free(wargs);
+            if (wrapped) {
+                env_define(i->env, stmt->fn_decl.name, wrapped, 1);
+                value_decref(wrapped);
+            }
+        }
         value_decref(v);
     }
 }

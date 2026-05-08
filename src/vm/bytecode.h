@@ -156,6 +156,11 @@ typedef struct {
     Value      **ic;           /* parallel to code[], owned Value* (LOAD_GLOBAL) */
     struct XSClass **ic_class; /* parallel to code[], borrowed (LOAD_FIELD) */
     uint64_t    *ic_version;   /* parallel to code[], opcode-specific */
+    /* Source span per instruction. lines[ip]/cols[ip] are the position
+       of the AST node that emitted the opcode at code[ip]; the VM uses
+       them to make runtime errors land on the offending source line
+       instead of "<unknown>:0:0". 0 means "no info recorded". */
+    int         *lines, *cols;
 } XSChunk;
 
 typedef struct XSProto XSProto;
@@ -181,6 +186,11 @@ struct XSProto {
                                   * at runtime when the method also
                                   * captures outer upvalues. */
     int         is_variadic;
+    /* Source filename owned by the proto (or NULL). Used to render
+       runtime errors at the right file when the call originated from
+       this proto's bytecode. Inner protos inherit by reading this off
+       the enclosing chunk at compile time. */
+    char       *source_file;
     /* Cached pointer to the proto's tier-2 JIT entry (int(*)(VM*)).
      * Populated by jit_compile when lowering succeeds; read by the
      * tier-2 inner-frame dispatcher (tier2_run_until) so recursive
@@ -198,6 +208,7 @@ struct XSProto {
 XSProto *proto_new(const char *name, int arity);
 void     proto_free(XSProto *p);
 int      chunk_write(XSChunk *c, Instruction i);
+void     chunk_set_loc(XSChunk *c, int ip, int line, int col);
 int      chunk_add_const(XSChunk *c, Value *v);
 void     proto_dump(XSProto *p);
 const char *bytecode_op_name(Opcode op);

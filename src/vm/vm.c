@@ -30,6 +30,56 @@
 
 static int vm_dispatch(VM *vm, int stop_frame);
 static Value *vm_invoke(VM *vm, Value *fn, Value **args, int argc);
+
+/* Build the source span for the instruction the current frame just
+   executed. Used to land runtime errors on the offending source line
+   instead of "<unknown>:0:0". The compiler stamps lines/cols onto
+   each instruction; ip points one past the executing op (the dispatch
+   advances it before the op runs), so step back by one to look it
+   up. */
+/* Public lookup for the runtime-error reporter: returns the active
+   VM's source span if a thread-local VM is set, else span_zero. Used
+   as a fallback in xs_runtime_error so natives that pass span_zero
+   still surface a useful location when invoked through the VM. */
+Span vm_active_span_global(void);
+Span vm_active_span_global(void) {
+    if (!g_vm_for_invoke) {
+        Span z = {0}; z.file = "<unknown>"; return z;
+    }
+    /* Inline-equivalent of vm_current_span(g_vm_for_invoke) below. */
+    Span s = {0};
+    s.file = "<unknown>";
+    VM *vm = g_vm_for_invoke;
+    if (vm->frame_count <= 0) return s;
+    CallFrame *cf = &vm->frames[vm->frame_count - 1];
+    if (!cf->closure_val || !cf->closure_val->cl ||
+        !cf->closure_val->cl->proto) return s;
+    XSProto *p = cf->closure_val->cl->proto;
+    if (p->source_file) s.file = p->source_file;
+    int ip = (int)(cf->ip - p->chunk.code) - 1;
+    if (ip >= 0 && ip < p->chunk.len && p->chunk.lines) {
+        s.line = p->chunk.lines[ip];
+        s.col  = p->chunk.cols[ip];
+    }
+    return s;
+}
+
+static Span vm_current_span(VM *vm) {
+    Span s = {0};
+    s.file = "<unknown>";
+    if (!vm || vm->frame_count <= 0) return s;
+    CallFrame *cf = &vm->frames[vm->frame_count - 1];
+    if (!cf->closure_val || !cf->closure_val->cl ||
+        !cf->closure_val->cl->proto) return s;
+    XSProto *p = cf->closure_val->cl->proto;
+    if (p->source_file) s.file = p->source_file;
+    int ip = (int)(cf->ip - p->chunk.code) - 1;
+    if (ip >= 0 && ip < p->chunk.len && p->chunk.lines) {
+        s.line = p->chunk.lines[ip];
+        s.col  = p->chunk.cols[ip];
+    }
+    return s;
+}
 /* Thread-local so per-thread VMs can resolve callback fn-targets without
    trampling the parent's pointer; native callbacks (array.map, etc.)
    thread their work through whichever VM the current thread is running. */
@@ -132,7 +182,7 @@ static Value *vm_int_fn(Interp *interp, Value **args, int argc) {
     if (VAL_TAG(v) == XS_FLOAT) {
         /* NaN -> exposed LLONG_MIN under C cast. Reject explicitly. */
         if (isnan(v->f) || isinf(v->f)) {
-            xs_runtime_error(span_zero(), "TypeError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "TypeError", NULL,
                              "int(): can't convert non-finite float");
             return value_incref(XS_NULL_VAL);
         }
@@ -142,7 +192,7 @@ static Value *vm_int_fn(Interp *interp, Value **args, int argc) {
         const char *s = v->s;
         while (*s == ' ' || *s == '\t') s++;
         if (!*s) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "int(): empty string");
             return value_incref(XS_NULL_VAL);
         }
@@ -150,24 +200,24 @@ static Value *vm_int_fn(Interp *interp, Value **args, int argc) {
         errno = 0;
         long long iv = strtoll(s, &end, 0);
         if (end == s) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "int(): invalid literal: '%s'", v->s);
             return value_incref(XS_NULL_VAL);
         }
         while (end && (*end == ' ' || *end == '\t')) end++;
         if (end && *end) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "int(): trailing characters in '%s'", v->s);
             return value_incref(XS_NULL_VAL);
         }
         if (errno == ERANGE) {
-            xs_runtime_error(span_zero(), "OverflowError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "OverflowError", NULL,
                              "int(): value out of range: '%s'", v->s);
             return value_incref(XS_NULL_VAL);
         }
         return xs_int((int64_t)iv);
     }
-    xs_runtime_error(span_zero(), "TypeError", NULL,
+    xs_runtime_error(vm_current_span(g_vm_for_invoke), "TypeError", NULL,
                      "int(): cannot convert from this type");
     return value_incref(XS_NULL_VAL);
 }
@@ -183,26 +233,26 @@ static Value *vm_float_fn(Interp *interp, Value **args, int argc) {
         const char *s = v->s;
         while (*s == ' ' || *s == '\t') s++;
         if (!*s) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "float(): empty string");
             return value_incref(XS_NULL_VAL);
         }
         char *end = NULL;
         double d = strtod(s, &end);
         if (end == s) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "float(): invalid literal: '%s'", v->s);
             return value_incref(XS_NULL_VAL);
         }
         while (end && (*end == ' ' || *end == '\t')) end++;
         if (end && *end) {
-            xs_runtime_error(span_zero(), "ValueError", NULL,
+            xs_runtime_error(vm_current_span(g_vm_for_invoke), "ValueError", NULL,
                              "float(): trailing characters in '%s'", v->s);
             return value_incref(XS_NULL_VAL);
         }
         return xs_float(d);
     }
-    xs_runtime_error(span_zero(), "TypeError", NULL,
+    xs_runtime_error(vm_current_span(g_vm_for_invoke), "TypeError", NULL,
                      "float(): cannot convert from this type");
     return value_incref(XS_NULL_VAL);
 }
@@ -1044,6 +1094,16 @@ static void vm_register_stdlib(VM *vm) {
         extern Value *builtin_xs_call_with_array_export(Interp *, Value **, int);
         REG("__xs_call_with_array", builtin_xs_call_with_array_export);
     }
+    {
+        extern Value *builtin_wrap_memoize_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_retry_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_trace_export(Interp *, Value **, int);
+        extern Value *builtin_wrap_timed_export(Interp *, Value **, int);
+        REG("__wrap_memoize", builtin_wrap_memoize_export);
+        REG("__wrap_retry",   builtin_wrap_retry_export);
+        REG("__wrap_trace",   builtin_wrap_trace_export);
+        REG("__wrap_timed",   builtin_wrap_timed_export);
+    }
     REG("range",   vm_range);
     REG("abs",     vm_abs);
     REG("min",     vm_min);
@@ -1666,7 +1726,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         /* Per-opcode resource-limit tick. Bails out through the same
            pending-throw path so try/catch can catch it. */
         if (xs_limits_tick()) {
-            xs_runtime_error(span_zero(), "ResourceLimit", NULL,
+            xs_runtime_error(vm_current_span(vm), "ResourceLimit", NULL,
                              "%s exceeded", xs_limits_exceeded_name());
         }
         /* If xs_runtime_error queued a throw (e.g. from an arithmetic
@@ -1689,6 +1749,16 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     g_xs_throw_from_runtime = 0;
                     handled = 1;
                     break;
+                }
+                /* Re-entry sentinel pushed by vm_invoke_public has no
+                   closure_val; stop unwinding here so the throw bubbles
+                   back to the embedder (e.g. wrap_call_dispatch's retry
+                   loop) instead of tearing down the outer VM frames it
+                   was suspended on top of. */
+                if (cf->closure_val == NULL) {
+                    g_xs_pending_throw = exc;
+                    g_xs_throw_from_runtime = from_runtime;
+                    return 1;
                 }
                 upvalue_close_all(&vm->open_upvalues, cf->base);
                 while (vm->sp > cf->base) value_decref(POP());
@@ -1866,10 +1936,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av + bv);
             } else {
-                Span s = {0};
-                xs_runtime_error(s, "type mismatch", NULL,
-                    "cannot add values of tag %d and %d",
-                    (int)VAL_TAG(a), (int)VAL_TAG(b));
+                xs_runtime_error(vm_current_span(vm), "type mismatch", NULL,
+                    "cannot add %s and %s",
+                    value_type_str(a), value_type_str(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
@@ -1894,10 +1963,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av - bv);
             } else {
-                Span s = {0};
-                xs_runtime_error(s, "type mismatch", NULL,
-                    "cannot subtract values of tag %d and %d",
-                    (int)VAL_TAG(a), (int)VAL_TAG(b));
+                xs_runtime_error(vm_current_span(vm), "type mismatch", NULL,
+                    "cannot subtract %s and %s",
+                    value_type_str(a), value_type_str(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
@@ -1952,10 +2020,9 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 double bv = VAL_TAG(b)==XS_INT?(double)VAL_INT(b):(VAL_TAG(b)==XS_BIGINT?bigint_to_double(b->bigint):b->f);
                 r = xs_float(av * bv);
             } else {
-                Span s = {0};
-                xs_runtime_error(s, "type mismatch", NULL,
-                    "cannot multiply values of tag %d and %d",
-                    (int)VAL_TAG(a), (int)VAL_TAG(b));
+                xs_runtime_error(vm_current_span(vm), "type mismatch", NULL,
+                    "cannot multiply %s and %s",
+                    value_type_str(a), value_type_str(b));
                 r = value_incref(XS_NULL_VAL);
             }
             value_decref(a); value_decref(b); PUSH(r); break;
@@ -2127,7 +2194,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 int64_t i = orig;
                 if (i < 0) i += col->arr->len;
                 if (i < 0 || i >= col->arr->len) {
-                    xs_runtime_error(span_zero(), "IndexError",
+                    xs_runtime_error(vm_current_span(vm), "IndexError",
                                      "use .get(i) for nullable lookup",
                                      "index %lld out of bounds (len %d)",
                                      (long long)orig, col->arr->len);
@@ -2230,13 +2297,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                    error for users coming from languages with mutable
                    string buffers. */
                 value_decref(val); value_decref(idx); value_decref(col);
-                xs_runtime_error(span_zero(), "TypeError", NULL,
+                xs_runtime_error(vm_current_span(vm), "TypeError", NULL,
                                  "strings are immutable; cannot assign by index");
                 break;
             }
             if (VAL_TAG(col) == XS_TUPLE) {
                 value_decref(val); value_decref(idx); value_decref(col);
-                xs_runtime_error(span_zero(), "TypeError", NULL,
+                xs_runtime_error(vm_current_span(vm), "TypeError", NULL,
                                  "tuples are immutable; cannot assign by index");
                 break;
             }
@@ -2254,7 +2321,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                        was expected but not supported). Raise instead. */
                     int64_t orig_idx = VAL_INT(idx);
                     value_decref(val); value_decref(idx); value_decref(col);
-                    xs_runtime_error(span_zero(), "IndexError", NULL,
+                    xs_runtime_error(vm_current_span(vm), "IndexError", NULL,
                                      "index %lld out of bounds (len %lld)",
                                      (long long)orig_idx, (long long)n);
                     break;
@@ -2394,7 +2461,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 map_set(obj->map, name, val);
             } else if (VAL_TAG(obj) == XS_TUPLE) {
                 value_decref(val); value_decref(obj);
-                xs_runtime_error(span_zero(), "TypeError", NULL,
+                xs_runtime_error(vm_current_span(vm), "TypeError", NULL,
                                  "tuples are immutable; cannot assign field '%s'", name);
                 break;
             }
@@ -2485,6 +2552,19 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     vm->sp[-argc - 1] = best;
                     callee = best;
                 }
+            }
+            /* Wrapping decorator? The fn name's binding is a map with
+               _wrap_kind; route to the runtime helper that handles the
+               around-call logic and may dispatch back to the original. */
+            if (VAL_TAG(callee) == XS_MAP && callee->map &&
+                map_get(callee->map, "_wrap_kind")) {
+                extern Value *wrap_call_dispatch(Interp *, Value *, Value **, int);
+                Value **args = vm->sp - argc;
+                Value *result = wrap_call_dispatch(NULL, callee, args, argc);
+                for (int i = 0; i < argc; i++) value_decref(POP());
+                value_decref(POP());
+                PUSH(result ? result : value_incref(XS_NULL_VAL));
+                break;
             }
             if (VAL_TAG(callee) == XS_NATIVE) {
                 Value **args = vm->sp - argc;
@@ -2784,6 +2864,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             frame = cf;
                             handled = 1;
                             break;
+                        }
+                        if (cf->closure_val == NULL) {
+                            g_xs_pending_throw = exc;
+                            return 1;
                         }
                         upvalue_close_all(&vm->open_upvalues, cf->base);
                         while (vm->sp > cf->base) value_decref(POP());
@@ -3927,7 +4011,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         snprintf(label, sizeof label,
                                  "no method '%s' on type '%s'",
                                  mc_name, tname ? tname : "?");
-                        xs_runtime_error(span_zero(), label, NULL,
+                        xs_runtime_error(vm_current_span(vm), label, NULL,
                                          "value of type '%s' has no method '%s'",
                                          tname ? tname : "?", mc_name);
                         for (int j = 0; j < mc_argc; j++) value_decref(POP());
@@ -5427,7 +5511,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 snprintf(label, sizeof label,
                          "no method '%s' on type '%s'",
                          mc_name, tname ? tname : "?");
-                xs_runtime_error(span_zero(), label, NULL,
+                xs_runtime_error(vm_current_span(vm), label, NULL,
                                  "value of type '%s' has no method '%s'",
                                  tname ? tname : "?", mc_name);
             }
@@ -5455,7 +5539,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             int64_t n2 = VAL_INT(b);
             if (n2 < 0) {
                 value_decref(a); value_decref(b);
-                xs_runtime_error(span_zero(), "ValueError", NULL,
+                xs_runtime_error(vm_current_span(vm), "ValueError", NULL,
                                  "shift count cannot be negative");
                 PUSH(value_incref(XS_NULL_VAL));
                 break;
@@ -5485,7 +5569,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             int64_t n2 = VAL_INT(b);
             if (n2 < 0) {
                 value_decref(a); value_decref(b);
-                xs_runtime_error(span_zero(), "ValueError", NULL,
+                xs_runtime_error(vm_current_span(vm), "ValueError", NULL,
                                  "shift count cannot be negative");
                 PUSH(value_incref(XS_NULL_VAL));
                 break;
@@ -5548,6 +5632,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     frame = cf;
                     handled = 1;
                     break;
+                }
+                /* Re-entry sentinel pushed by vm_invoke_public has no
+                   closure_val; stop unwinding so the embedder (e.g.
+                   wrap_call_dispatch's retry loop) sees the throw. */
+                if (cf->closure_val == NULL) {
+                    g_xs_pending_throw = exc;
+                    return 1;
                 }
                 upvalue_close_all(&vm->open_upvalues, cf->base);
                 while (vm->sp > cf->base) value_decref(POP());

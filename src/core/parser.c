@@ -446,11 +446,26 @@ static int is_known_decorator(const char *name) {
         "export",
         "once",
         "test",
+        /* wrapping decorators -- replace the bound fn with a wrapper
+           that runs around it. */
+        "memoize", "retry", "trace", "timed",
         NULL
     };
     for (int i = 0; known[i]; i++)
         if (strcmp(name, known[i]) == 0) return 1;
     return 0;
+}
+
+/* Wrapping decorators replace the function's binding with a callable
+   wrapper map after the runtime constructs the original. They differ
+   from triggers (which just record the fn into a registry) and from
+   discovery markers (which only flag for the test runner). */
+int parser_decorator_is_wrapping(const char *name) {
+    if (!name) return 0;
+    return strcmp(name, "memoize") == 0 ||
+           strcmp(name, "retry") == 0 ||
+           strcmp(name, "trace") == 0 ||
+           strcmp(name, "timed") == 0;
 }
 
 /* @cron / @every / @delayed schedule the function with no caller, so

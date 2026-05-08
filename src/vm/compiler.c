@@ -1,6 +1,7 @@
 #include "vm/compiler.h"
 #include "core/value.h"
 #include "core/xs_bigint.h"
+#include "core/parser.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -46,6 +47,11 @@ typedef struct {
     int            n_errors;
     LoopCtx        loop_stack[MAX_LOOP_DEPTH];
     int            loop_depth;
+    /* Tracked per compile_node entry so emit() can stamp the source
+       position of the AST node onto the just-emitted instruction.
+       Picked up by the VM at runtime to render errors at a useful
+       location instead of "<unknown>:0:0". */
+    int            cur_line, cur_col;
 } Compiler;
 
 static void scope_push(Compiler *c, CompilerScope *s, XSProto *proto) {
@@ -140,7 +146,9 @@ static int upvalue_resolve(CompilerScope *scope, const char *name) {
 }
 
 static void emit(Compiler *c, Instruction instr) {
-    chunk_write(&c->current->proto->chunk, instr);
+    int ip = chunk_write(&c->current->proto->chunk, instr);
+    if (c->cur_line)
+        chunk_set_loc(&c->current->proto->chunk, ip, c->cur_line, c->cur_col);
 }
 
 static void emit_a(Compiler *c, Opcode op, int bx) {
@@ -474,6 +482,10 @@ static int compile_fn(Compiler *c, const char *name,
     XSProto *parent = c->current->proto;
     XSProto *inner  = proto_new(name ? name : "<lambda>", arity);
     inner->is_variadic = has_variadic;
+    /* Inner protos inherit the enclosing proto's filename so errors
+       inside a nested fn / lambda still know where to render. */
+    if (parent->source_file)
+        inner->source_file = xs_strdup(parent->source_file);
 
     if (parent->n_inner == parent->cap_inner) {
         parent->cap_inner = parent->cap_inner ? parent->cap_inner * 2 : 4;
@@ -569,11 +581,25 @@ static void emit_make_closure(Compiler *c, int inner_idx) {
     emit_a(c, OP_MAKE_CLOSURE, idx);
 }
 
+static void compile_node_inner(Compiler *c, Node *n, int want_value);
+
+/* Public entry point. Wraps compile_node_inner to save/restore the
+   compiler's cur_line/col around recursive descent so a child node
+   doesn't permanently rewrite the parent's tracked position. */
 static void compile_node(Compiler *c, Node *n, int want_value) {
+    int saved_line = c->cur_line, saved_col = c->cur_col;
+    compile_node_inner(c, n, want_value);
+    c->cur_line = saved_line;
+    c->cur_col  = saved_col;
+}
+
+static void compile_node_inner(Compiler *c, Node *n, int want_value) {
     if (!n) {
         if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         return;
     }
+
+    if (n->span.line) { c->cur_line = n->span.line; c->cur_col = n->span.col; }
 
     switch (VAL_TAG(n)) {
 
@@ -1240,6 +1266,22 @@ static void compile_node(Compiler *c, Node *n, int want_value) {
             for (int dk = 0; dk < n->fn_decl.n_decorators; dk++) {
                 Decorator *d = &n->fn_decl.decorators[dk];
                 if (strcmp(d->name, "once") == 0) continue;
+                /* Wrapping decorators: build a wrapper map from the
+                   original fn + decorator args + fn name, store back
+                   under fname. The dispatcher recognises _wrap_kind. */
+                if (parser_decorator_is_wrapping(d->name)) {
+                    char wname[64];
+                    snprintf(wname, sizeof wname, "__wrap_%s", d->name);
+                    compile_name_load(c, wname);
+                    compile_name_load(c, fname);
+                    for (int aa = 0; aa < d->n_args; aa++)
+                        compile_node(c, d->args[aa], 1);
+                    emit_const(c, xs_str(fname));
+                    int wargc = 1 + d->n_args + 1;
+                    emit(c, MAKE_B(OP_CALL, 0, 0, (uint8_t)wargc));
+                    compile_name_store(c, fname);
+                    continue;
+                }
                 compile_name_load(c, "__register_decorator");
                 compile_name_load(c, fname);
                 emit_const(c, xs_int(has_once ? 1 : 0));
@@ -3135,6 +3177,8 @@ XSProto *compile_program(Node *program) {
     Compiler c = {0};
     CompilerScope top;
     XSProto *p = proto_new("<main>", 0);
+    if (program && program->span.file)
+        p->source_file = xs_strdup(program->span.file);
     scope_push(&c, &top, p);
     compile_node(&c, program, 0);
     emit(&c, MAKE_A(OP_PUSH_NULL, 0, 0));
