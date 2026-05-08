@@ -2918,7 +2918,15 @@ static Node *parse_match(Parser *p) {
         Node *guard = NULL;
         if (pp_check(p, TK_IF)) {
             pp_advance(p);
+            /* Suppress arrow-lambda parsing inside the guard so the
+               match arm's trailing `=> body` isn't eaten as a lambda
+               body. e.g. `(a, b) if a == b => "eq"` previously parsed
+               as `(a == lambda(b) => "eq")` because the guard's b =>
+               grabbed the arrow. */
+            int saved_nal = p->no_arrow_lambda;
+            p->no_arrow_lambda = 1;
             guard = parse_expr(p, 0);
+            p->no_arrow_lambda = saved_nal;
         }
 
         /* => or { */

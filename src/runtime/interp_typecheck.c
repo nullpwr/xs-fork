@@ -222,6 +222,17 @@ const char *value_type_str(Value *v) {
         case XS_STRUCT_VAL: return v->st ? v->st->type_name : "struct";
         case XS_INST:  return (v->inst && v->inst->class_) ? v->inst->class_->name : "instance";
         case XS_ENUM_VAL: return v->en ? v->en->type_name : "enum";
+        case XS_NULL:   return "null";
+        case XS_CHAR:   return "char";
+        case XS_BIGINT: return "int";
+        case XS_DURATION: return "duration";
+        case XS_RANGE:  return "range";
+        case XS_REGEX:  return "regex";
+        case XS_MODULE: return "module";
+        case XS_CLASS_VAL: return "class";
+#ifdef XSC_ENABLE_VM
+        case XS_CLOSURE: return "fn";
+#endif
         default: return "unknown";
     }
 }

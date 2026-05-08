@@ -2611,6 +2611,31 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             }
             return res;
         }
+        if (strcmp(method, "windows") == 0) {
+            /* arr.windows(n): array of overlapping size-n slices.
+               [1,2,3,4].windows(2) -> [[1,2], [2,3], [3,4]]. */
+            int wn = (argc > 0 && VAL_TAG(args[0]) == XS_INT) ? (int)VAL_INT(args[0]) : 2;
+            if (wn < 1) wn = 1;
+            Value *res = xs_array_new();
+            for (int j = 0; j + wn <= arr->len; j++) {
+                Value *win = xs_array_new();
+                for (int k = 0; k < wn; k++)
+                    array_push(win->arr, value_incref(arr->items[j + k]));
+                array_push(res->arr, win);
+            }
+            return res;
+        }
+        if (strcmp(method, "pairwise") == 0) {
+            /* Adjacent (a, b) pairs as tuples. */
+            Value *res = xs_array_new();
+            for (int j = 0; j + 1 < arr->len; j++) {
+                Value *t = xs_tuple_new();
+                array_push(t->arr, value_incref(arr->items[j]));
+                array_push(t->arr, value_incref(arr->items[j + 1]));
+                array_push(res->arr, t);
+            }
+            return res;
+        }
         if (strcmp(method, "avg") == 0 || strcmp(method, "mean") == 0) {
             if (arr->len == 0) return xs_float(0.0);
             double s = 0;
@@ -2717,9 +2742,11 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         if (strcmp(method, "count") == 0) {
             if (argc<1) return xs_int(arr->len);
             int64_t cnt=0;
+            int is_callable = (VAL_TAG(args[0])==XS_FUNC||VAL_TAG(args[0])==XS_NATIVE
+                              || VAL_TAG(args[0])==XS_CLOSURE);
             for (int j=0;j<arr->len;j++) {
                 Value *a[1]={arr->items[j]};
-                if (VAL_TAG(args[0])==XS_FUNC||VAL_TAG(args[0])==XS_NATIVE) {
+                if (is_callable) {
                     Value *r=call_value(i, args[0], a, 1, "count");
                     int ok=value_truthy(r); value_decref(r);
                     if (!i->cf.signal && ok) cnt++;
@@ -3551,6 +3578,12 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                     if (strcmp(method, "len") == 0) return xs_int(arr->len);
                     if (strcmp(method, "is_empty") == 0)
                         return arr->len==0?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
+                    if (strcmp(method, "front") == 0 || strcmp(method, "first") == 0 ||
+                        strcmp(method, "peek_front") == 0)
+                        return arr->len ? value_incref(arr->items[0]) : value_incref(XS_NULL_VAL);
+                    if (strcmp(method, "back") == 0 || strcmp(method, "last") == 0 ||
+                        strcmp(method, "peek_back") == 0)
+                        return arr->len ? value_incref(arr->items[arr->len-1]) : value_incref(XS_NULL_VAL);
                     if (strcmp(method, "to_array") == 0) {
                         Value *res = xs_array_new();
                         for (int j = 0; j < arr->len; j++)
@@ -3715,7 +3748,10 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             }
                             return value_incref(XS_NULL_VAL);
                         }
-                        if (strcmp(method, "has") == 0) {
+                        if (strcmp(method, "has") == 0 ||
+                            strcmp(method, "contains") == 0 ||
+                            strcmp(method, "has_key") == 0 ||
+                            strcmp(method, "includes") == 0) {
                             if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return value_incref(XS_FALSE_VAL);
                             return map_has(dm, args[0]->s) ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
                         }
@@ -3854,6 +3890,32 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                         }
                         free(ks);
                         return res;
+                    }
+                    if (strcmp(method, "values") == 0) {
+                        /* Skip the _type tag so sum()/avg()/count() over
+                           a Counter's values produce the numeric totals
+                           the user expects, not the implementation tag. */
+                        Value *res = xs_array_new();
+                        int nk = 0; char **ks = map_keys(m, &nk);
+                        for (int j = 0; j < nk; j++) {
+                            if (strcmp(ks[j], "_type") != 0) {
+                                Value *v = map_get(m, ks[j]);
+                                if (v) array_push(res->arr, value_incref(v));
+                            }
+                            free(ks[j]);
+                        }
+                        free(ks);
+                        return res;
+                    }
+                    if (strcmp(method, "len") == 0 || strcmp(method, "size") == 0) {
+                        int nk = 0; char **ks = map_keys(m, &nk);
+                        int64_t sz = 0;
+                        for (int j = 0; j < nk; j++) {
+                            if (strcmp(ks[j], "_type") != 0) sz++;
+                            free(ks[j]);
+                        }
+                        free(ks);
+                        return xs_int(sz);
                     }
                     if (strcmp(method, "most_common") == 0) {
                         int topn = (argc>=1&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):m->len;
@@ -4720,6 +4782,22 @@ static Value *eval_binop(Interp *i, Node *n) {
         char *buf=xs_malloc(slen*n2+1); buf[0]='\0';
         for (int j=0;j<n2;j++) strcat(buf,right->s);
         result=xs_str(buf); free(buf); goto done;
+    }
+
+    /* arr * int / int * arr: array repetition, mirrors string. */
+    if (op[0]=='*' && op[1]=='\0' &&
+        ((VAL_TAG(left)==XS_ARRAY && VAL_TAG(right)==XS_INT) ||
+         (VAL_TAG(left)==XS_INT && VAL_TAG(right)==XS_ARRAY))) {
+        Value *av = VAL_TAG(left)==XS_ARRAY ? left : right;
+        Value *iv = VAL_TAG(left)==XS_ARRAY ? right : left;
+        int64_t count = VAL_INT(iv);
+        Value *out = xs_array_new();
+        if (count > 0 && av->arr) {
+            for (int64_t ci = 0; ci < count; ci++)
+                for (int j = 0; j < av->arr->len; j++)
+                    array_push(out->arr, value_incref(av->arr->items[j]));
+        }
+        result = out; goto done;
     }
 
     if (op[0]=='+' && op[1]=='+') {

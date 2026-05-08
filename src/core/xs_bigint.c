@@ -3,6 +3,7 @@
 #include "core/value.h"
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 
 
 #define LIMB_BITS 32
@@ -757,10 +758,13 @@ Value *xs_safe_neg(int64_t a) {
 
 Value *xs_safe_pow(int64_t base, int64_t exp) {
     if (exp < 0) {
-        /* Integer power with negative exponent */
+        /* base ** -n promotes to float so 2 ** -2 is 0.25 instead of
+           the truncated 0. Special-case -1 / 1 because they round-trip
+           cleanly (`(-1) ** -3 == -1`, `1 ** -100 == 1`). */
         if (base == 1) return xs_int(1);
         if (base == -1) return xs_int((exp & 1) ? -1 : 1);
-        return xs_int(0);
+        if (base == 0) return xs_float(1.0/0.0);
+        return xs_float(pow((double)base, (double)exp));
     }
     if (exp == 0) return xs_int(1);
     if (base == 0) return xs_int(0);

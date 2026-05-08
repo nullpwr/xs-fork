@@ -1932,6 +1932,20 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     buf[slen * (size_t)count] = '\0';
                     r = xs_str(buf); free(buf);
                 }
+            } else if ((VAL_TAG(a)==XS_ARRAY && VAL_TAG(b)==XS_INT)
+                    || (VAL_TAG(b)==XS_ARRAY && VAL_TAG(a)==XS_INT)) {
+                /* arr * n / n * arr: repeat the array. Mirrors string
+                   repetition; commutative for ergonomics. */
+                Value *av = VAL_TAG(a)==XS_ARRAY ? a : b;
+                Value *iv = VAL_TAG(a)==XS_ARRAY ? b : a;
+                int64_t count = VAL_INT(iv);
+                Value *out = xs_array_new();
+                if (count > 0 && av->arr) {
+                    for (int64_t ci = 0; ci < count; ci++)
+                        for (int j = 0; j < av->arr->len; j++)
+                            array_push(out->arr, value_incref(av->arr->items[j]));
+                }
+                r = out;
             } else if ((VAL_TAG(a) == XS_INT || VAL_TAG(a) == XS_FLOAT || VAL_TAG(a) == XS_BIGINT) &&
                        (VAL_TAG(b) == XS_INT || VAL_TAG(b) == XS_FLOAT || VAL_TAG(b) == XS_BIGINT)) {
                 double av = VAL_TAG(a)==XS_INT?(double)VAL_INT(a):(VAL_TAG(a)==XS_BIGINT?bigint_to_double(a->bigint):a->f);
@@ -3018,6 +3032,364 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 break;
             }
 
+            /* Stopwatch: { _start: float } from time.stopwatch(). */
+            if (VAL_TAG(mc_obj) == XS_MAP && mc_obj->map &&
+                map_get(mc_obj->map, "_start") &&
+                (strcmp(mc_name, "elapsed") == 0 ||
+                 strcmp(mc_name, "elapsed_ms") == 0 ||
+                 strcmp(mc_name, "reset") == 0)) {
+                Value *sv = map_get(mc_obj->map, "_start");
+                double start = sv && VAL_TAG(sv) == XS_FLOAT ? sv->f
+                              : sv && VAL_TAG(sv) == XS_INT ? (double)VAL_INT(sv) : 0.0;
+                struct timespec ts2; clock_gettime(CLOCK_REALTIME, &ts2);
+                double now2 = (double)ts2.tv_sec + (double)ts2.tv_nsec/1e9;
+                if (strcmp(mc_name, "reset") == 0) {
+                    Value *nv = xs_float(now2);
+                    map_set(mc_obj->map, "_start", nv);
+                    value_decref(nv);
+                    mc_result = value_incref(XS_NULL_VAL);
+                } else {
+                    double e = now2 - start;
+                    if (strcmp(mc_name, "elapsed_ms") == 0) e *= 1000.0;
+                    mc_result = xs_float(e);
+                }
+                for (int j = 0; j < mc_argc; j++) value_decref(POP());
+                value_decref(POP());
+                PUSH(mc_result);
+                break;
+            }
+
+            /* Collections wrappers (Stack, Set, Counter, Deque, PQ,
+               OrderedMap) are stored as XS_MAP{_type, _data}. The
+               interp had a full dispatch path; the vm previously fell
+               through to the generic map-method machinery and rejected
+               .push/.contains/etc with "no method". Mirror the most
+               common methods here. */
+            if (VAL_TAG(mc_obj) == XS_MAP && mc_obj->map) {
+                Value *_ct = map_get(mc_obj->map, "_type");
+                if (_ct && VAL_TAG(_ct) == XS_STR && _ct->s) {
+                    const char *ct = _ct->s;
+                    Value *_data = map_get(mc_obj->map, "_data");
+                    int matched = 1;
+                    if (strcmp(ct, "Stack") == 0 && _data && VAL_TAG(_data) == XS_ARRAY) {
+                        XSArray *a = _data->arr;
+                        if (strcmp(mc_name, "push") == 0) {
+                            if (mc_argc >= 1) array_push(a, value_incref(mc_args[0]));
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "pop") == 0) {
+                            if (a->len == 0) mc_result = value_incref(XS_NULL_VAL);
+                            else { mc_result = a->items[a->len-1]; a->len--; }
+                        } else if (strcmp(mc_name, "peek") == 0) {
+                            mc_result = a->len ? value_incref(a->items[a->len-1])
+                                                : value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "len") == 0 || strcmp(mc_name, "size") == 0) {
+                            mc_result = xs_int(a->len);
+                        } else if (strcmp(mc_name, "is_empty") == 0) {
+                            mc_result = xs_bool(a->len == 0);
+                        } else if (strcmp(mc_name, "to_array") == 0) {
+                            Value *r = xs_array_new();
+                            for (int j = 0; j < a->len; j++)
+                                array_push(r->arr, value_incref(a->items[j]));
+                            mc_result = r;
+                        } else if (strcmp(mc_name, "clear") == 0) {
+                            for (int j = 0; j < a->len; j++) value_decref(a->items[j]);
+                            a->len = 0;
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else matched = 0;
+                    } else if (strcmp(ct, "Set") == 0 && _data && VAL_TAG(_data) == XS_MAP) {
+                        XSMap *sd = _data->map;
+                        if (strcmp(mc_name, "add") == 0) {
+                            if (mc_argc >= 1) {
+                                char *k = value_str(mc_args[0]);
+                                Value *tv = value_incref(XS_TRUE_VAL);
+                                map_set(sd, k, tv); value_decref(tv);
+                                free(k);
+                            }
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "remove") == 0) {
+                            if (mc_argc >= 1) {
+                                char *k = value_str(mc_args[0]);
+                                map_del(sd, k); free(k);
+                            }
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "contains") == 0 ||
+                                   strcmp(mc_name, "includes") == 0) {
+                            int hit = 0;
+                            if (mc_argc >= 1) {
+                                char *k = value_str(mc_args[0]);
+                                hit = map_has(sd, k);
+                                free(k);
+                            }
+                            mc_result = xs_bool(hit);
+                        } else if (strcmp(mc_name, "len") == 0 || strcmp(mc_name, "size") == 0) {
+                            mc_result = xs_int(sd->len);
+                        } else if (strcmp(mc_name, "is_empty") == 0) {
+                            mc_result = xs_bool(sd->len == 0);
+                        } else if (strcmp(mc_name, "to_array") == 0) {
+                            Value *r = xs_array_new();
+                            int nk = 0; char **ks = map_keys(sd, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                array_push(r->arr, xs_str(ks[j]));
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = r;
+                        } else if (strcmp(mc_name, "clear") == 0) {
+                            int nk = 0; char **ks = map_keys(sd, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                map_del(sd, ks[j]); free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "union") == 0 ||
+                                   strcmp(mc_name, "intersection") == 0 ||
+                                   strcmp(mc_name, "difference") == 0) {
+                            /* Build a fresh Set wrapper and populate
+                               from sd / other based on the op. */
+                            int op_union = strcmp(mc_name, "union") == 0;
+                            int op_inter = strcmp(mc_name, "intersection") == 0;
+                            Value *ns = xs_map_new();
+                            Value *nt = xs_str("Set"); map_set(ns->map, "_type", nt); value_decref(nt);
+                            Value *nd = xs_map_new(); map_set(ns->map, "_data", nd); value_decref(nd);
+                            XSMap *odata = NULL;
+                            if (mc_argc >= 1 && VAL_TAG(mc_args[0]) == XS_MAP) {
+                                Value *od = map_get(mc_args[0]->map, "_data");
+                                if (od && VAL_TAG(od) == XS_MAP) odata = od->map;
+                            }
+                            int nk = 0; char **ks = map_keys(sd, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                int has_other = odata && map_has(odata, ks[j]);
+                                int keep = op_union ? 1 :
+                                            op_inter ? has_other : !has_other;
+                                if (keep) {
+                                    Value *tv = value_incref(XS_TRUE_VAL);
+                                    map_set(nd->map, ks[j], tv);
+                                    value_decref(tv);
+                                }
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            if (op_union && odata) {
+                                int nk2 = 0; char **ks2 = map_keys(odata, &nk2);
+                                for (int j = 0; j < nk2; j++) {
+                                    Value *tv = value_incref(XS_TRUE_VAL);
+                                    map_set(nd->map, ks2[j], tv);
+                                    value_decref(tv);
+                                    free(ks2[j]);
+                                }
+                                free(ks2);
+                            }
+                            mc_result = ns;
+                        } else matched = 0;
+                    } else if (strcmp(ct, "Deque") == 0 && _data && VAL_TAG(_data) == XS_ARRAY) {
+                        XSArray *a = _data->arr;
+                        if (strcmp(mc_name, "push_back") == 0 ||
+                            strcmp(mc_name, "push") == 0 ||
+                            strcmp(mc_name, "append") == 0) {
+                            if (mc_argc >= 1) array_push(a, value_incref(mc_args[0]));
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "push_front") == 0) {
+                            if (mc_argc >= 1) {
+                                array_push(a, value_incref(XS_NULL_VAL));
+                                for (int j = a->len - 1; j > 0; j--) a->items[j] = a->items[j - 1];
+                                a->items[0] = value_incref(mc_args[0]);
+                            }
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "pop_back") == 0 ||
+                                   strcmp(mc_name, "pop") == 0) {
+                            if (a->len == 0) mc_result = value_incref(XS_NULL_VAL);
+                            else { mc_result = a->items[a->len - 1]; a->len--; }
+                        } else if (strcmp(mc_name, "pop_front") == 0) {
+                            if (a->len == 0) mc_result = value_incref(XS_NULL_VAL);
+                            else {
+                                mc_result = a->items[0];
+                                for (int j = 0; j < a->len - 1; j++) a->items[j] = a->items[j + 1];
+                                a->len--;
+                            }
+                        } else if (strcmp(mc_name, "front") == 0 || strcmp(mc_name, "first") == 0) {
+                            mc_result = a->len ? value_incref(a->items[0]) : value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "back") == 0 || strcmp(mc_name, "last") == 0) {
+                            mc_result = a->len ? value_incref(a->items[a->len - 1]) : value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "len") == 0 || strcmp(mc_name, "size") == 0) {
+                            mc_result = xs_int(a->len);
+                        } else if (strcmp(mc_name, "is_empty") == 0) {
+                            mc_result = xs_bool(a->len == 0);
+                        } else if (strcmp(mc_name, "to_array") == 0) {
+                            Value *r = xs_array_new();
+                            for (int j = 0; j < a->len; j++)
+                                array_push(r->arr, value_incref(a->items[j]));
+                            mc_result = r;
+                        } else matched = 0;
+                    } else if (strcmp(ct, "OrderedMap") == 0) {
+                        Value *_keys = map_get(mc_obj->map, "_keys");
+                        Value *_dt = map_get(mc_obj->map, "_data");
+                        if (_keys && VAL_TAG(_keys) == XS_ARRAY &&
+                            _dt && VAL_TAG(_dt) == XS_MAP) {
+                            XSArray *ka = _keys->arr;
+                            XSMap *dm = _dt->map;
+                            if (strcmp(mc_name, "set") == 0 || strcmp(mc_name, "insert") == 0) {
+                                if (mc_argc >= 2 && VAL_TAG(mc_args[0]) == XS_STR) {
+                                    if (!map_has(dm, mc_args[0]->s))
+                                        array_push(ka, xs_str(mc_args[0]->s));
+                                    map_set(dm, mc_args[0]->s, value_incref(mc_args[1]));
+                                }
+                                mc_result = value_incref(XS_NULL_VAL);
+                            } else if (strcmp(mc_name, "get") == 0 && mc_argc >= 1 && VAL_TAG(mc_args[0]) == XS_STR) {
+                                Value *v = map_get(dm, mc_args[0]->s);
+                                mc_result = v ? value_incref(v)
+                                              : (mc_argc >= 2 ? value_incref(mc_args[1])
+                                                              : value_incref(XS_NULL_VAL));
+                            } else if (strcmp(mc_name, "keys") == 0) {
+                                Value *r = xs_array_new();
+                                for (int j = 0; j < ka->len; j++)
+                                    array_push(r->arr, value_incref(ka->items[j]));
+                                mc_result = r;
+                            } else if (strcmp(mc_name, "values") == 0) {
+                                Value *r = xs_array_new();
+                                for (int j = 0; j < ka->len; j++) {
+                                    Value *k = ka->items[j];
+                                    if (k && VAL_TAG(k) == XS_STR) {
+                                        Value *v = map_get(dm, k->s);
+                                        if (v) array_push(r->arr, value_incref(v));
+                                    }
+                                }
+                                mc_result = r;
+                            } else if (strcmp(mc_name, "entries") == 0 || strcmp(mc_name, "items") == 0) {
+                                Value *r = xs_array_new();
+                                for (int j = 0; j < ka->len; j++) {
+                                    Value *k = ka->items[j];
+                                    if (k && VAL_TAG(k) == XS_STR) {
+                                        Value *v = map_get(dm, k->s);
+                                        Value *t = xs_tuple_new();
+                                        array_push(t->arr, value_incref(k));
+                                        array_push(t->arr, v ? value_incref(v) : value_incref(XS_NULL_VAL));
+                                        array_push(r->arr, t);
+                                    }
+                                }
+                                mc_result = r;
+                            } else if (strcmp(mc_name, "len") == 0 || strcmp(mc_name, "size") == 0) {
+                                mc_result = xs_int(ka->len);
+                            } else if (strcmp(mc_name, "contains") == 0 ||
+                                       strcmp(mc_name, "has_key") == 0 ||
+                                       strcmp(mc_name, "includes") == 0) {
+                                mc_result = (mc_argc >= 1 && VAL_TAG(mc_args[0]) == XS_STR &&
+                                             map_has(dm, mc_args[0]->s))
+                                            ? value_incref(XS_TRUE_VAL)
+                                            : value_incref(XS_FALSE_VAL);
+                            } else matched = 0;
+                        } else matched = 0;
+                    } else if (strcmp(ct, "Counter") == 0) {
+                        XSMap *cm = mc_obj->map;
+                        if (strcmp(mc_name, "values") == 0) {
+                            Value *r = xs_array_new();
+                            int nk = 0; char **ks = map_keys(cm, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                if (strcmp(ks[j], "_type") != 0) {
+                                    Value *v = map_get(cm, ks[j]);
+                                    if (v) array_push(r->arr, value_incref(v));
+                                }
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = r;
+                        } else if (strcmp(mc_name, "keys") == 0) {
+                            Value *r = xs_array_new();
+                            int nk = 0; char **ks = map_keys(cm, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                if (strcmp(ks[j], "_type") != 0)
+                                    array_push(r->arr, xs_str(ks[j]));
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = r;
+                        } else if (strcmp(mc_name, "len") == 0 || strcmp(mc_name, "size") == 0) {
+                            int64_t sz = 0;
+                            int nk = 0; char **ks = map_keys(cm, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                if (strcmp(ks[j], "_type") != 0) sz++;
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = xs_int(sz);
+                        } else if (strcmp(mc_name, "total") == 0) {
+                            int64_t total = 0;
+                            int nk = 0; char **ks = map_keys(cm, &nk);
+                            for (int j = 0; j < nk; j++) {
+                                if (strcmp(ks[j], "_type") != 0) {
+                                    Value *v = map_get(cm, ks[j]);
+                                    if (v && VAL_TAG(v) == XS_INT) total += VAL_INT(v);
+                                }
+                                free(ks[j]);
+                            }
+                            free(ks);
+                            mc_result = xs_int(total);
+                        } else matched = 0;
+                    } else if (strcmp(ct, "PriorityQueue") == 0 && _data && VAL_TAG(_data) == XS_ARRAY) {
+                        XSArray *a = _data->arr;
+                        if (strcmp(mc_name, "push") == 0 && mc_argc >= 1) {
+                            /* push(item, priority) -- priority defaults to
+                               0 when missing; entries store [item, prio]
+                               so pop returns the item, sorted descending
+                               by priority (matches interp). */
+                            double prio = 0.0;
+                            if (mc_argc >= 2) {
+                                if (VAL_TAG(mc_args[1]) == XS_INT) prio = (double)VAL_INT(mc_args[1]);
+                                else if (VAL_TAG(mc_args[1]) == XS_FLOAT) prio = mc_args[1]->f;
+                            }
+                            Value *entry = xs_array_new();
+                            array_push(entry->arr, value_incref(mc_args[0]));
+                            array_push(entry->arr, xs_float(prio));
+                            int pos = a->len;
+                            for (int j = 0; j < a->len; j++) {
+                                Value *ej = a->items[j];
+                                if (VAL_TAG(ej) == XS_ARRAY && ej->arr->len >= 2) {
+                                    double ep = VAL_TAG(ej->arr->items[1]) == XS_FLOAT
+                                                ? ej->arr->items[1]->f
+                                                : (double)VAL_INT(ej->arr->items[1]);
+                                    if (prio > ep) { pos = j; break; }
+                                }
+                            }
+                            array_push(a, value_incref(XS_NULL_VAL));
+                            for (int j = a->len - 1; j > pos; j--) a->items[j] = a->items[j - 1];
+                            a->items[pos] = entry;
+                            mc_result = value_incref(XS_NULL_VAL);
+                        } else if (strcmp(mc_name, "pop") == 0) {
+                            if (a->len == 0) mc_result = value_incref(XS_NULL_VAL);
+                            else {
+                                Value *entry = a->items[0];
+                                for (int j = 0; j < a->len - 1; j++) a->items[j] = a->items[j + 1];
+                                a->len--;
+                                Value *item = (VAL_TAG(entry) == XS_ARRAY && entry->arr->len >= 1)
+                                              ? value_incref(entry->arr->items[0])
+                                              : value_incref(XS_NULL_VAL);
+                                value_decref(entry);
+                                mc_result = item;
+                            }
+                        } else if (strcmp(mc_name, "peek") == 0) {
+                            if (a->len == 0) mc_result = value_incref(XS_NULL_VAL);
+                            else {
+                                Value *entry = a->items[0];
+                                mc_result = (VAL_TAG(entry) == XS_ARRAY && entry->arr->len >= 1)
+                                            ? value_incref(entry->arr->items[0])
+                                            : value_incref(XS_NULL_VAL);
+                            }
+                        } else if (strcmp(mc_name, "len") == 0) {
+                            mc_result = xs_int(a->len);
+                        } else if (strcmp(mc_name, "is_empty") == 0) {
+                            mc_result = xs_bool(a->len == 0);
+                        } else matched = 0;
+                    } else {
+                        matched = 0;
+                    }
+                    if (matched && mc_result) {
+                        for (int j = 0; j < mc_argc; j++) value_decref(POP());
+                        value_decref(POP());
+                        PUSH(mc_result);
+                        break;
+                    }
+                }
+            }
+
             if (VAL_TAG(mc_obj) == XS_MAP || VAL_TAG(mc_obj) == XS_MODULE) {
                 /* hot path: the cache already has the resolved callable
                    and the dispatch flags (module-vs-self, self arity)
@@ -3316,19 +3688,21 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                     mc_result=m;
                 } else if (strcmp(mc_name,"most_common")==0) {
-                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):mc_obj->map->len;
-                    /* collect entries, sort by value descending, return top n */
+                    /* collect non-meta entries, sort by value descending,
+                       return top n. Skips _type so a Counter doesn't
+                       leak its tag into the most-common list. */
                     Value *arr=xs_array_new();
                     for(int j=0;j<mc_obj->map->cap;j++){
-                        if(mc_obj->map->keys[j]){
+                        if(mc_obj->map->keys[j] &&
+                           strcmp(mc_obj->map->keys[j], "_type") != 0){
                             Value *pair=xs_tuple_new();
                             array_push(pair->arr,xs_str(mc_obj->map->keys[j]));
                             array_push(pair->arr,value_incref(mc_obj->map->vals[j]));
                             array_push(arr->arr,pair);
                         }
                     }
-                    /* bubble sort descending by second element */
                     int alen=arr->arr->len;
+                    int64_t n2=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT)?VAL_INT(mc_args[0]):alen;
                     for(int j=0;j<alen-1;j++) for(int k=0;k<alen-1-j;k++){
                         Value *va=arr->arr->items[k]->arr->items[1];
                         Value *vb=arr->arr->items[k+1]->arr->items[1];
@@ -3710,14 +4084,22 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"replace")==0&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR&&VAL_TAG(mc_args[1])==XS_STR) {
                     const char *from=mc_args[0]->s,*to=mc_args[1]->s;
                     size_t fl=strlen(from),tl=strlen(to);
+                    /* Optional 3rd arg caps the number of replacements,
+                       matching the interp. Without this `replace(x, y, 1)`
+                       silently replaced every occurrence under --vm. */
+                    int max_replace = (mc_argc >= 3 && VAL_TAG(mc_args[2]) == XS_INT)
+                                       ? (int)VAL_INT(mc_args[2]) : -1;
                     size_t cap=strlen(s)*2+64; char *buf=xs_malloc(cap); size_t wpos=0;
                     const char *p3=s; const char *fnd2;
+                    int replaced = 0;
                     while(fl&&(fnd2=strstr(p3,from))!=NULL){
+                        if (max_replace >= 0 && replaced >= max_replace) break;
                         size_t prefix=(size_t)(fnd2-p3);
                         while(wpos+prefix+tl+1>cap){cap*=2;buf=xs_realloc(buf,cap);}
                         memcpy(buf+wpos,p3,prefix); wpos+=prefix;
                         memcpy(buf+wpos,to,tl); wpos+=tl;
                         p3=fnd2+fl;
+                        replaced++;
                     }
                     size_t rest=strlen(p3);
                     while(wpos+rest+1>cap){cap*=2;buf=xs_realloc(buf,cap);}
@@ -4305,7 +4687,30 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         value_decref(r);
                     }
                     frame=FRAME;
-                } else if (strcmp(mc_name,"count")==0) mc_result=xs_int(mc_obj->arr->len);
+                } else if (strcmp(mc_name,"count")==0) {
+                    /* count(): length. count(value): equal-count.
+                       count(fn): predicate-count. The plain-length form
+                       was the only one wired here; the predicate form
+                       interp already had silently returned the length. */
+                    if (mc_argc < 1) {
+                        mc_result = xs_int(mc_obj->arr->len);
+                    } else if (is_callable_tag(VAL_TAG(mc_args[0]))) {
+                        int64_t c = 0;
+                        for (int j = 0; j < mc_obj->arr->len; j++) {
+                            Value *e = mc_obj->arr->items[j];
+                            Value *r = vm_invoke(vm, mc_args[0], &e, 1);
+                            frame = FRAME;
+                            if (r && value_truthy(r)) c++;
+                            if (r) value_decref(r);
+                        }
+                        mc_result = xs_int(c);
+                    } else {
+                        int64_t c = 0;
+                        for (int j = 0; j < mc_obj->arr->len; j++)
+                            if (value_equal(mc_obj->arr->items[j], mc_args[0])) c++;
+                        mc_result = xs_int(c);
+                    }
+                }
                 else if (strcmp(mc_name,"sum")==0) {
                     int64_t si=0; double sf=0; int is_float=0;
                     for(int j=0;j<mc_obj->arr->len;j++){
@@ -4313,6 +4718,27 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         else if(VAL_TAG(mc_obj->arr->items[j])==XS_FLOAT){sf+=mc_obj->arr->items[j]->f;is_float=1;}
                     }
                     mc_result=is_float?xs_float(sf+(double)si):xs_int(si);
+                } else if (strcmp(mc_name,"windows")==0) {
+                    int wn = (mc_argc > 0 && VAL_TAG(mc_args[0]) == XS_INT)
+                             ? (int)VAL_INT(mc_args[0]) : 2;
+                    if (wn < 1) wn = 1;
+                    Value *res = xs_array_new();
+                    for (int j = 0; j + wn <= mc_obj->arr->len; j++) {
+                        Value *win = xs_array_new();
+                        for (int k = 0; k < wn; k++)
+                            array_push(win->arr, value_incref(mc_obj->arr->items[j + k]));
+                        array_push(res->arr, win);
+                    }
+                    mc_result = res;
+                } else if (strcmp(mc_name,"pairwise")==0) {
+                    Value *res = xs_array_new();
+                    for (int j = 0; j + 1 < mc_obj->arr->len; j++) {
+                        Value *t = xs_tuple_new();
+                        array_push(t->arr, value_incref(mc_obj->arr->items[j]));
+                        array_push(t->arr, value_incref(mc_obj->arr->items[j + 1]));
+                        array_push(res->arr, t);
+                    }
+                    mc_result = res;
                 } else if (strcmp(mc_name,"to_map")==0) {
                     Value *res = xs_map_new();
                     for (int j = 0; j < mc_obj->arr->len; j++) {

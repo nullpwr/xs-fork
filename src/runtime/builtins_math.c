@@ -4,6 +4,7 @@
 #include "runtime/interp.h"
 #include "runtime/builtins.h"
 #include "core/value.h"
+#include "core/xs_bigint.h"
 #include <math.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -73,8 +74,22 @@ static Value *native_math_factorial(Interp *ig, Value **a, int n) {
     if (n<1) return xs_int(1);
     int64_t k=(VAL_TAG(a[0])==XS_INT)?VAL_INT(a[0]):(int64_t)a[0]->f;
     if (k<0) return xs_int(0);
-    int64_t r=1; for (int64_t j=2;j<=k;j++) r*=j;
-    return xs_int(r);
+    /* 20! still fits in int64; from 21! we promote to bigint so the
+       result stays correct instead of silently wrapping into the
+       negative range like factorial(30) = -8764578968847253504. */
+    if (k <= 20) {
+        int64_t r = 1;
+        for (int64_t j = 2; j <= k; j++) r *= j;
+        return xs_int(r);
+    }
+    XSBigInt *bi = bigint_from_i64(1);
+    for (int64_t j = 2; j <= k; j++) {
+        XSBigInt *jb = bigint_from_i64(j);
+        XSBigInt *next = bigint_mul(bi, jb);
+        bigint_free(bi); bigint_free(jb);
+        bi = next;
+    }
+    return xs_bigint_val(bi);
 }
 static Value *native_math_sign(Interp *ig, Value **a, int n) {
     (void)ig;
