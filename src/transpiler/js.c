@@ -25,6 +25,26 @@ static int is_callee_name(Node *callee, const char *name) {
     return callee && VAL_TAG(callee) == NODE_IDENT && strcmp(callee->ident.name, name) == 0;
 }
 
+/* Common JS reserved names that XS allows as parameter or variable names. */
+static int is_js_reserved(const char *name) {
+    if (!name) return 0;
+    static const char *resv[] = {
+        "default","class","const","let","var","function","return","if","else",
+        "while","do","for","break","continue","switch","case","try","catch",
+        "finally","throw","new","delete","typeof","instanceof","in","of",
+        "this","super","null","true","false","undefined","void","with",
+        "yield","async","await","import","export","from","as","static",
+        "private","protected","public","interface","extends","implements",
+        "enum","package","arguments","eval", NULL
+    };
+    for (int i = 0; resv[i]; i++) if (strcmp(name, resv[i]) == 0) return 1;
+    return 0;
+}
+static void emit_param_name(SB *s, const char *name) {
+    if (!name) { sb_add(s, "_"); return; }
+    if (is_js_reserved(name)) sb_printf(s, "__xs_%s", name);
+    else sb_add(s, name);
+}
 static void emit_params_ex(SB *s, ParamList *pl, int skip_self) {
     sb_addc(s, '(');
     int first = 1;
@@ -34,8 +54,7 @@ static void emit_params_ex(SB *s, ParamList *pl, int skip_self) {
         if (!first) sb_add(s, ", ");
         first = 0;
         if (p->variadic) sb_add(s, "...");
-        if (p->name) sb_add(s, p->name);
-        else sb_add(s, "_");
+        emit_param_name(s, p->name);
         if (p->default_val) {
             sb_add(s, " = ");
             emit_expr(s, p->default_val, 0);
@@ -129,14 +148,18 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_printf(s, "'%c'", n->lit_char.cval);
         break;
     case NODE_LIT_ARRAY:
-    case NODE_LIT_TUPLE:
-        sb_addc(s, '[');
+    case NODE_LIT_TUPLE: {
+        int is_tuple = (VAL_TAG(n) == NODE_LIT_TUPLE);
+        if (is_tuple) sb_add(s, "__xs_tuple([");
+        else sb_addc(s, '[');
         for (int i = 0; i < n->lit_array.elems.len; i++) {
             if (i) sb_add(s, ", ");
             emit_expr(s, n->lit_array.elems.items[i], depth);
         }
-        sb_addc(s, ']');
+        if (is_tuple) sb_add(s, "])");
+        else sb_addc(s, ']');
         break;
+    }
     case NODE_LIT_MAP: {
         /* Spreads and bareword identifier keys both need special handling.
            An identifier key like `{ a: 1 }` is a string key "a" in the
@@ -195,6 +218,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_IDENT:
         if (in_class_method && n->ident.name && strcmp(n->ident.name, "self") == 0)
             sb_add(s, "this");
+        else if (n->ident.name && is_js_reserved(n->ident.name))
+            sb_printf(s, "__xs_%s", n->ident.name);
         else
             sb_add(s, n->ident.name);
         break;
@@ -361,7 +386,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else if (is_callee_name(n->call.callee, "print")) {
             sb_add(s, "__xs_write(");
         } else if (is_callee_name(n->call.callee, "str")) {
-            sb_add(s, "String(");
+            sb_add(s, "__xs_repr(");
+        } else if (is_callee_name(n->call.callee, "bool")) {
+            sb_add(s, "__xs_truthy(");
         } else if (is_callee_name(n->call.callee, "int")) {
             sb_add(s, "__xs_to_int((");
         } else if (is_callee_name(n->call.callee, "float")) {
@@ -665,24 +692,29 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         /* Method calls forwarded as-is to the JS receiver. The argument
            list often differs (e.g. .any -> .some, .all -> .every,
-           .find on arrays needs a predicate too). */
-        if (m && strcmp(m, "any") == 0) {
+           .find on arrays needs a predicate too). Skip the inline
+           rewrite when the receiver is a known module (async / etc.)
+           so async.all routes through the module polyfill. */
+        int receiver_is_module = 0;
+        if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT) {
+            const char *rn = n->method_call.obj->ident.name;
+            if (rn && (strcmp(rn, "async") == 0 || strcmp(rn, "math") == 0 ||
+                       strcmp(rn, "json") == 0 || strcmp(rn, "time") == 0 ||
+                       strcmp(rn, "random") == 0 || strcmp(rn, "re") == 0 ||
+                       strcmp(rn, "collections") == 0 || strcmp(rn, "string") == 0))
+                receiver_is_module = 1;
+        }
+        if (!receiver_is_module && m && strcmp(m, "any") == 0 && nargs == 1) {
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, ".some(");
-            for (int i = 0; i < nargs; i++) {
-                if (i) sb_add(s, ", ");
-                emit_expr(s, n->method_call.args.items[i], depth);
-            }
+            emit_expr(s, n->method_call.args.items[0], depth);
             sb_addc(s, ')');
             break;
         }
-        if (m && strcmp(m, "all") == 0) {
+        if (!receiver_is_module && m && strcmp(m, "all") == 0 && nargs == 1) {
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, ".every(");
-            for (int i = 0; i < nargs; i++) {
-                if (i) sb_add(s, ", ");
-                emit_expr(s, n->method_call.args.items[i], depth);
-            }
+            emit_expr(s, n->method_call.args.items[0], depth);
             sb_addc(s, ')');
             break;
         }
@@ -774,10 +806,11 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "; if (__o instanceof Map) return __o.has(__k); return Object.prototype.hasOwnProperty.call(__o, __k); })()");
             break;
         }
-        /* `.to_str()` is the XS spelling; JS uses .toString(), which
-           also covers bigints, numbers, and arrays correctly. */
-        if (m && strcmp(m, "to_str") == 0 && nargs == 0) {
-            sb_add(s, "String(");
+        /* `.to_str()` is the XS spelling. Route through __xs_repr so
+           arrays/maps/structs get the same shape the VM emits, not
+           Array.prototype.toString's "1,2,3" or Map's "[object Map]". */
+        if (m && (strcmp(m, "to_str") == 0 || strcmp(m, "to_string") == 0) && nargs == 0) {
+            sb_add(s, "__xs_repr(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
             break;
@@ -1650,8 +1683,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "} })()");
         break;
     case NODE_FOR:
-        /* for-as-expression -> IIFE */
-        sb_add(s, "(function() { ");
+        /* for-as-expression -> IIFE. Use arrow so `this` is preserved
+           in class methods and so super.method() can still resolve. */
+        sb_add(s, "(() => { ");
         if (n->for_loop.label) sb_printf(s, "%s: ", n->for_loop.label);
         sb_add(s, "for (const ");
         if (n->for_loop.pattern) emit_expr(s, n->for_loop.pattern, depth);
@@ -1671,8 +1705,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "} })()");
         break;
     case NODE_LOOP:
-        /* loop-as-expression -> IIFE */
-        sb_add(s, "(function() { ");
+        /* loop-as-expression -> IIFE (arrow preserves this) */
+        sb_add(s, "(() => { ");
         if (n->loop.label) sb_printf(s, "%s: ", n->loop.label);
         sb_add(s, "while (true) {\n");
         if (n->loop.body) {
@@ -2041,6 +2075,35 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             break;
         }
     }
+        /* let {a, b} = m -- map pattern needs Map.get() lookups because
+           the RHS is an XS map (JS Map), not a JS object. */
+        if (!n->let.name && n->let.pattern &&
+            (VAL_TAG(n->let.pattern) == NODE_PAT_MAP ||
+             VAL_TAG(n->let.pattern) == NODE_PAT_STRUCT) && n->let.value) {
+            static int pat_uid = 0;
+            int mid = pat_uid++;
+            sb_indent(s, depth);
+            sb_printf(s, "const __pat_%d = ", mid);
+            emit_expr(s, n->let.value, depth);
+            sb_add(s, ";\n");
+            if (VAL_TAG(n->let.pattern) == NODE_PAT_MAP) {
+                for (int i = 0; i < n->let.pattern->pat_map.nfields; i++) {
+                    const char *k = n->let.pattern->pat_map.keys[i];
+                    if (!k) continue;
+                    sb_indent(s, depth);
+                    sb_printf(s, "let %s = __pat_%d instanceof Map ? __pat_%d.get(\"%s\") : __pat_%d[\"%s\"];\n",
+                              k, mid, mid, k, mid, k);
+                }
+            } else {
+                for (int i = 0; i < n->let.pattern->pat_struct.fields.len; i++) {
+                    const char *k = n->let.pattern->pat_struct.fields.items[i].key;
+                    sb_indent(s, depth);
+                    sb_printf(s, "let %s = __pat_%d instanceof Map ? __pat_%d.get(\"%s\") : __pat_%d[\"%s\"];\n",
+                              k, mid, mid, k, mid, k);
+                }
+            }
+            break;
+        }
         sb_indent(s, depth);
         sb_add(s, "let ");
         if (n->let.name) sb_add(s, n->let.name);
@@ -2858,7 +2921,11 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    if (v === null || v === undefined) return \"null\";\n");
     sb_add(&s, "    if (typeof v === \"string\") return v;\n");
     sb_add(&s, "    if (typeof v === \"number\" || typeof v === \"bigint\" || typeof v === \"boolean\") return String(v);\n");
-    sb_add(&s, "    if (Array.isArray(v)) return \"[\" + v.map(__xs_repr).join(\", \") + \"]\";\n");
+    sb_add(&s, "    if (Array.isArray(v)) {\n");
+    sb_add(&s, "        const open = v.__xs_is_tuple ? \"(\" : \"[\";\n");
+    sb_add(&s, "        const close = v.__xs_is_tuple ? \")\" : \"]\";\n");
+    sb_add(&s, "        return open + v.map(__xs_repr).join(\", \") + close;\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    if (v instanceof Map) {\n");
     sb_add(&s, "        const parts = [];\n");
     sb_add(&s, "        for (const [k, val] of v) parts.push(__xs_repr(k) + \": \" + __xs_repr(val));\n");
@@ -3120,7 +3187,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_zip = (a, b) => {\n");
     sb_add(&s, "    const n = Math.min(a.length, b.length); const r = [];\n");
-    sb_add(&s, "    for (let i = 0; i < n; i++) r.push([a[i], b[i]]); return r;\n");
+    sb_add(&s, "    for (let i = 0; i < n; i++) r.push(__xs_tuple([a[i], b[i]])); return r;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_flatten = (a) => {\n");
     sb_add(&s, "    if (!Array.isArray(a)) return a; const r = [];\n");
@@ -3162,7 +3229,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            case 'entries': case 'items': return [...o.entries()];\n");
     sb_add(&s, "            case 'has': case 'contains': case 'contains_key': case 'has_key':\n");
     sb_add(&s, "                return o.has(args[0]);\n");
-    sb_add(&s, "            case 'get': {\n");
+    sb_add(&s, "            case 'get': case 'get_or': {\n");
     sb_add(&s, "                if (o.has(args[0])) return o.get(args[0]);\n");
     sb_add(&s, "                return args.length >= 2 ? args[1] : null;\n");
     sb_add(&s, "            }\n");
@@ -3240,8 +3307,10 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            case 'drop_while': { let i = 0; while (i < o.length && args[0](o[i])) i++; return o.slice(i); }\n");
     sb_add(&s, "            case 'group_by': { const out = new Map(); for (const x of o) { const k = args[0](x); const arr = out.get(k) || []; arr.push(x); out.set(k, arr); } return out; }\n");
     sb_add(&s, "            case 'partition': { const t = [], f = []; for (const x of o) (args[0](x) ? t : f).push(x); return [t, f]; }\n");
-    sb_add(&s, "            case 'enumerate': return o.map((v, i) => [i, v]);\n");
-    sb_add(&s, "            case 'zip': { const n = Math.min(o.length, args[0].length); const r = []; for (let i = 0; i < n; i++) r.push([o[i], args[0][i]]); return r; }\n");
+    sb_add(&s, "            case 'for_each': case 'each': for (const x of o) args[0](x); return null;\n");
+    sb_add(&s, "            case 'iter': return o.values();\n");
+    sb_add(&s, "            case 'enumerate': return o.map((v, i) => __xs_tuple([i, v]));\n");
+    sb_add(&s, "            case 'zip': { const n = Math.min(o.length, args[0].length); const r = []; for (let i = 0; i < n; i++) r.push(__xs_tuple([o[i], args[0][i]])); return r; }\n");
     sb_add(&s, "            case 'chunks': { const n = args[0]; const r = []; for (let i = 0; i < o.length; i += n) r.push(o.slice(i, i+n)); return r; }\n");
     sb_add(&s, "            case 'windows': { const n = args[0]; const r = []; for (let i = 0; i + n <= o.length; i++) r.push(o.slice(i, i+n)); return r; }\n");
     sb_add(&s, "            case 'step': case 'stride': { const n = args[0]; const r = []; for (let i = 0; i < o.length; i += n) r.push(o[i]); return r; }\n");
@@ -3305,6 +3374,8 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "                const total = w - o.length, l = (total / 2) | 0, r = total - l;\n");
     sb_add(&s, "                return fill.repeat(l) + o + fill.repeat(r);\n");
     sb_add(&s, "            }\n");
+    sb_add(&s, "            case 'find': case 'index_of': case 'indexOf': return o.indexOf(String(args[0]));\n");
+    sb_add(&s, "            case 'last_index_of': case 'rfind': return o.lastIndexOf(String(args[0]));\n");
     sb_add(&s, "            case 'remove_prefix': return args[0] && o.startsWith(args[0]) ? o.slice(args[0].length) : o;\n");
     sb_add(&s, "            case 'remove_suffix': return args[0] && o.endsWith(args[0]) ? o.slice(0, -args[0].length) : o;\n");
     sb_add(&s, "            case 'count': {\n");
@@ -3415,14 +3486,23 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    loads:  (s) => JSON.parse(s),\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const math = {\n");
-    sb_add(&s, "    pi: Math.PI, e: Math.E, inf: Infinity, nan: NaN,\n");
+    sb_add(&s, "    pi: Math.PI, e: Math.E, tau: Math.PI * 2, inf: Infinity, nan: NaN,\n");
     sb_add(&s, "    abs: Math.abs, sqrt: Math.sqrt, pow: Math.pow,\n");
     sb_add(&s, "    floor: Math.floor, ceil: Math.ceil, round: Math.round, trunc: Math.trunc,\n");
     sb_add(&s, "    sin: Math.sin, cos: Math.cos, tan: Math.tan,\n");
     sb_add(&s, "    asin: Math.asin, acos: Math.acos, atan: Math.atan, atan2: Math.atan2,\n");
+    sb_add(&s, "    sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,\n");
     sb_add(&s, "    log: Math.log, log2: Math.log2, log10: Math.log10, exp: Math.exp,\n");
     sb_add(&s, "    min: (...a) => Math.min(...a), max: (...a) => Math.max(...a),\n");
     sb_add(&s, "    sign: Math.sign,\n");
+    sb_add(&s, "    is_nan: (x) => Number.isNaN(x), is_inf: (x) => !Number.isFinite(x) && !Number.isNaN(x),\n");
+    sb_add(&s, "    is_finite: (x) => Number.isFinite(x),\n");
+    sb_add(&s, "    degrees: (rad) => rad * 180 / Math.PI,\n");
+    sb_add(&s, "    radians: (deg) => deg * Math.PI / 180,\n");
+    sb_add(&s, "    gcd: (a, b) => { a = Math.abs(a); b = Math.abs(b); while (b) { [a, b] = [b, a % b]; } return a; },\n");
+    sb_add(&s, "    lcm: (a, b) => { if (a === 0 || b === 0) return 0; const g = (function gcd(x, y) { return y ? gcd(y, x % y) : x; })(Math.abs(a), Math.abs(b)); return Math.abs(a * b) / g; },\n");
+    sb_add(&s, "    cbrt: Math.cbrt, hypot: Math.hypot,\n");
+    sb_add(&s, "    factorial: (n) => { let r = 1n; for (let i = 2n; i <= BigInt(n); i++) r *= i; return r; },\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const time = {\n");
     sb_add(&s, "    now: () => Date.now() / 1000,\n");
@@ -3432,6 +3512,17 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    sleep_ms: (ms) => new Promise(r => setTimeout(r, ms)),\n");
     sb_add(&s, "    monotonic: () => (typeof performance !== 'undefined' ? performance.now() / 1000 : Date.now() / 1000),\n");
     sb_add(&s, "    clock: () => (typeof performance !== 'undefined' ? performance.now() / 1000 : Date.now() / 1000),\n");
+    sb_add(&s, "    format: (ts, fmt) => {\n");
+    sb_add(&s, "        const d = new Date((typeof ts === 'bigint' ? Number(ts) : ts) * 1000);\n");
+    sb_add(&s, "        const pad = (n, w=2) => String(n).padStart(w, '0');\n");
+    sb_add(&s, "        const Y = d.getUTCFullYear(), M = d.getUTCMonth()+1, D = d.getUTCDate();\n");
+    sb_add(&s, "        const H = d.getUTCHours(), m = d.getUTCMinutes(), S = d.getUTCSeconds();\n");
+    sb_add(&s, "        return (fmt || '%Y-%m-%d %H:%M:%S').replace(/%[YmdHMS]/g, t => ({\n");
+    sb_add(&s, "            '%Y': String(Y), '%m': pad(M), '%d': pad(D),\n");
+    sb_add(&s, "            '%H': pad(H), '%M': pad(m), '%S': pad(S),\n");
+    sb_add(&s, "        }[t]));\n");
+    sb_add(&s, "    },\n");
+    sb_add(&s, "    parse: (s, fmt) => Math.floor(Date.parse(s) / 1000),\n");
     sb_add(&s, "};\n");
     /* collections module: typed wrappers built on Map / Array. The VM
        represents these as plain maps tagged with _type, but the JS
@@ -3538,16 +3629,24 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    r.to_array = () => [...r];\n");
     sb_add(&s, "    return r;\n");
     sb_add(&s, "};\n");
-    /* Global helpers available unqualified in XS programs. */
-    sb_add(&s, "const sum = (arr) => { let t = 0; for (const v of arr) t = __xs_add(t, v); return t; };\n");
-    sb_add(&s, "const product = (arr) => { let t = 1; for (const v of arr) t = (typeof t === 'bigint' || typeof v === 'bigint') ? BigInt(t) * BigInt(v) : t * v; return t; };\n");
-    sb_add(&s, "const min = (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) < 0) r = flat[i]; return r; };\n");
-    sb_add(&s, "const max = (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) > 0) r = flat[i]; return r; };\n");
-    sb_add(&s, "const sorted = (arr, cmp) => { const a = [...arr]; a.sort(cmp || ((x, y) => __xs_cmp(x, y))); return a; };\n");
-    sb_add(&s, "const reversed = (arr) => [...arr].reverse();\n");
-    sb_add(&s, "const enumerate = (arr) => arr.map((v, i) => [i, v]);\n");
-    sb_add(&s, "const zip = (...arrs) => { const n = Math.min(...arrs.map(a => a.length)); const r = []; for (let i = 0; i < n; i++) r.push(arrs.map(a => a[i])); return r; };\n");
-    sb_add(&s, "const abs = (x) => typeof x === 'bigint' ? (x < 0n ? -x : x) : Math.abs(x);\n");
+    /* Global helpers available unqualified in XS programs. Set via
+       globalThis with a guard so user code can shadow these without
+       hitting the JS \"already declared\" error. */
+    sb_add(&s, "globalThis.sum ?\?= (arr) => { let t = 0; for (const v of arr) t = __xs_add(t, v); return t; };\n");
+    sb_add(&s, "globalThis.product ?\?= (arr) => { let t = 1; for (const v of arr) t = (typeof t === 'bigint' || typeof v === 'bigint') ? BigInt(t) * BigInt(v) : t * v; return t; };\n");
+    sb_add(&s, "globalThis.min ?\?= (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) < 0) r = flat[i]; return r; };\n");
+    sb_add(&s, "globalThis.max ?\?= (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) > 0) r = flat[i]; return r; };\n");
+    sb_add(&s, "globalThis.sorted ?\?= (arr, cmp) => { const a = [...arr]; a.sort(cmp || ((x, y) => __xs_cmp(x, y))); return a; };\n");
+    sb_add(&s, "globalThis.reversed ?\?= (arr) => [...arr].reverse();\n");
+    sb_add(&s, "globalThis.enumerate ?\?= (arr) => arr.map((v, i) => __xs_tuple([i, v]));\n");
+    sb_add(&s, "globalThis.zip ?\?= (...arrs) => { const n = Math.min(...arrs.map(a => a.length)); const r = []; for (let i = 0; i < n; i++) r.push(__xs_tuple(arrs.map(a => a[i]))); return r; };\n");
+    sb_add(&s, "globalThis.abs ?\?= (x) => typeof x === 'bigint' ? (x < 0n ? -x : x) : Math.abs(x);\n");
+    /* Tuples are arrays with a marker so __xs_repr can render them with
+       parens like the VM does. Defining as a property on the array is
+       cheap; subclassing Array breaks too many JS interop paths. */
+    sb_add(&s, "const __xs_tuple = (arr) => { Object.defineProperty(arr, '__xs_is_tuple', {value: true, enumerable: false}); return arr; };\n");
+    sb_add(&s, "const chr = (n) => String.fromCharCode(Number(n));\n");
+    sb_add(&s, "const ord = (s) => typeof s === 'string' && s.length > 0 ? s.codePointAt(0) : 0;\n");
     sb_add(&s, "const random = {\n");
     sb_add(&s, "    random: () => Math.random(),\n");
     sb_add(&s, "    int: (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1)),\n");
@@ -3560,7 +3659,7 @@ char *transpile_js(Node *program, const char *filename) {
     /* async module: thin polyfill over JS Promise. async is reserved
        in JS only at function-decl positions; using it as a variable
        name is fine. */
-    sb_add(&s, "const async = {\n");
+    sb_add(&s, "const __xs_async = {\n");
     sb_add(&s, "    all: (ps) => Promise.all(ps),\n");
     sb_add(&s, "    any: (ps) => Promise.any(ps),\n");
     sb_add(&s, "    race: (ps) => Promise.race(ps),\n");

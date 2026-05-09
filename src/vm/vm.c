@@ -2615,9 +2615,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 if (fields && VAL_TAG(fields) == XS_MAP) {
                     Value *inst = xs_map_new();
                     for (int j = 0; j < fields->map->cap; j++)
-                        if (fields->map->keys[j])
-                            map_set(inst->map, fields->map->keys[j],
-                                    value_incref(fields->map->vals[j]));
+                        if (fields->map->keys[j]) {
+                            Value *fv = fields->map->vals[j];
+                            /* mutable defaults are templates; clone per
+                               instance so two instances don't share. */
+                            Value *cv = (fv && (VAL_TAG(fv) == XS_ARRAY ||
+                                                VAL_TAG(fv) == XS_MAP))
+                                ? value_copy(fv) : value_incref(fv);
+                            map_set(inst->map, fields->map->keys[j], cv);
+                            if (fv && (VAL_TAG(fv) == XS_ARRAY || VAL_TAG(fv) == XS_MAP))
+                                value_decref(cv);
+                        }
                     Value *methods = map_get(callee->map, "__methods");
                     if (methods && VAL_TAG(methods) == XS_MAP)
                         for (int j = 0; j < methods->map->cap; j++)
@@ -3674,7 +3682,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                            strcmp(mc_name,"includes")==0) {
                     mc_result=(mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR&&map_get(mc_obj->map,mc_args[0]->s))
                         ? value_incref(XS_TRUE_VAL) : value_incref(XS_FALSE_VAL);
-                } else if (strcmp(mc_name,"get")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_STR) {
+                } else if ((strcmp(mc_name,"get")==0 || strcmp(mc_name,"get_or")==0)
+                           && mc_argc>=1 && VAL_TAG(mc_args[0])==XS_STR) {
                     Value *v=map_get(mc_obj->map,mc_args[0]->s);
                     mc_result=v?value_incref(v):(mc_argc>=2?value_incref(mc_args[1]):value_incref(XS_NULL_VAL));
                 } else if (strcmp(mc_name,"set")==0&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR) {
@@ -6748,9 +6757,18 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 Value *fields = map_get(cls_val->map, "__fields");
                 if (fields && VAL_TAG(fields) == XS_MAP) {
                     for (int j = 0; j < fields->map->cap; j++) {
-                        if (fields->map->keys[j])
-                            map_set(inst->map, fields->map->keys[j],
-                                    value_incref(fields->map->vals[j]));
+                        if (fields->map->keys[j]) {
+                            Value *fv = fields->map->vals[j];
+                            /* Mutable defaults must be cloned per instance
+                               so two instances don't share the same array
+                               or map. */
+                            Value *cv = (fv && (VAL_TAG(fv) == XS_ARRAY ||
+                                                VAL_TAG(fv) == XS_MAP))
+                                ? value_copy(fv) : value_incref(fv);
+                            map_set(inst->map, fields->map->keys[j], cv);
+                            if (fv && (VAL_TAG(fv) == XS_ARRAY || VAL_TAG(fv) == XS_MAP))
+                                value_decref(cv);
+                        }
                     }
                 }
                 Value *methods = map_get(cls_val->map, "__methods");

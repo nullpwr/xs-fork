@@ -1412,7 +1412,15 @@ tail_call_entry: ;
             char **keys = map_keys(cls->fields, &nkeys);
             for (int j = 0; j < nkeys; j++) {
                 Value *fv = map_get(cls->fields, keys[j]);
-                if (fv) map_set(inst->fields, keys[j], value_incref(fv));
+                if (fv) {
+                    /* Class-level field defaults are templates; mutable
+                       defaults (arrays, maps) must be cloned per instance
+                       so two instances don't accidentally share state. */
+                    Value *cv = (VAL_TAG(fv) == XS_ARRAY ||
+                                 VAL_TAG(fv) == XS_MAP) ? value_copy(fv) : value_incref(fv);
+                    map_set(inst->fields, keys[j], cv);
+                    if (VAL_TAG(fv) == XS_ARRAY || VAL_TAG(fv) == XS_MAP) value_decref(cv);
+                }
                 free(keys[j]);
             }
             free(keys);
@@ -3517,7 +3525,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_FALSE_VAL);
             return map_has(m,args[0]->s)?value_incref(XS_TRUE_VAL):value_incref(XS_FALSE_VAL);
         }
-        if (strcmp(method, "get") == 0) {
+        if (strcmp(method, "get") == 0 || strcmp(method, "get_or") == 0) {
             if (argc<1||VAL_TAG(args[0])!=XS_STR) return value_incref(XS_NULL_VAL);
             Value *v=map_get(m,args[0]->s);
             if (v) return value_incref(v);
