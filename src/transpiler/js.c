@@ -67,9 +67,17 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_LIT_BIGINT:
         sb_printf(s, "%sn", n->lit_bigint.bigint_str);
         break;
-    case NODE_LIT_FLOAT:
-        sb_printf(s, "%g", n->lit_float.fval);
+    case NODE_LIT_FLOAT: {
+        /* shortest round-trippable representation; %g rounds at 6 digits
+           and silently loses precision for things like Number.MAX_VALUE. */
+        char buf[64];
+        for (int prec = 1; prec <= 17; prec++) {
+            snprintf(buf, sizeof buf, "%.*g", prec, n->lit_float.fval);
+            double back; if (sscanf(buf, "%lf", &back) == 1 && back == n->lit_float.fval) break;
+        }
+        sb_add(s, buf);
         break;
+    }
     case NODE_LIT_DURATION:
         sb_printf(s, "%lld", (long long)n->lit_duration.ns);
         break;
@@ -443,9 +451,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             VAL_TAG(n->method_call.obj) == NODE_IDENT &&
             n->method_call.obj->ident.name &&
             strcmp(n->method_call.obj->ident.name, "super") == 0) {
-            sb_add(s, "super.");
-            sb_add(s, m);
-            sb_addc(s, '(');
+            /* in JS, super.init(args) inside a constructor must be super(args) */
+            if (strcmp(m, "init") == 0 || strcmp(m, "new") == 0)
+                sb_add(s, "super(");
+            else {
+                sb_add(s, "super.");
+                sb_add(s, m);
+                sb_addc(s, '(');
+            }
             for (int i = 0; i < nargs; i++) {
                 if (i) sb_add(s, ", ");
                 emit_expr(s, n->method_call.args.items[i], depth);
@@ -701,15 +714,15 @@ static void emit_expr(SB *s, Node *n, int depth) {
            lexicographic on stringified values, so [10, 2] sorts to
            [10, 2]. Force a numeric/string-aware comparator. */
         if (m && strcmp(m, "sort") == 0 && nargs == 0) {
-            sb_add(s, "[...");
+            sb_add(s, "((__a) => { __a.sort((a, b) => __xs_cmp(a, b)); return __a; })(");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, "].sort((a, b) => __xs_cmp(a, b))");
+            sb_addc(s, ')');
             break;
         }
         if (m && strcmp(m, "sort") == 0 && nargs == 1) {
-            sb_add(s, "[...");
+            sb_add(s, "((__a, __c) => { __a.sort(__c); return __a; })(");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, "].sort(");
+            sb_add(s, ", ");
             emit_expr(s, n->method_call.args.items[0], depth);
             sb_addc(s, ')');
             break;
@@ -2029,7 +2042,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         }
     }
         sb_indent(s, depth);
-        sb_add(s, "const ");
+        sb_add(s, "let ");
         if (n->let.name) sb_add(s, n->let.name);
         else if (n->let.pattern) emit_expr(s, n->let.pattern, depth);
         else sb_add(s, "_");
@@ -2863,8 +2876,11 @@ char *transpile_js(Node *program, const char *filename) {
        Struct values get the type name prefix so the JS output matches
        the VM's `Point { x: 3, y: 4 }` repr. */
     sb_add(&s, "    if (v && typeof v === 'object') {\n");
-    sb_add(&s, "        const keys = Object.keys(v);\n");
     sb_add(&s, "        const ctor = v.constructor && v.constructor.name;\n");
+    /* Collection wrappers (Set, Counter, Deque, Stack, OrderedMap, PriorityQueue)
+       expose method properties on the same object as the data. Filter out
+       functions so the repr shows only the data shape. */
+    sb_add(&s, "        const keys = Object.keys(v).filter(k => typeof v[k] !== 'function');\n");
     sb_add(&s, "        if (keys.length > 0) {\n");
     sb_add(&s, "            const parts = keys.map(k => k + \": \" + __xs_repr(v[k]));\n");
     sb_add(&s, "            const body = \"{ \" + parts.join(\", \") + \" }\";\n");
@@ -3162,6 +3178,18 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            case 'len': case 'size': case 'count': return o.size;\n");
     sb_add(&s, "            case 'is_empty': return o.size === 0;\n");
     sb_add(&s, "            case 'clear': o.clear(); return o;\n");
+    sb_add(&s, "            case 'clone': case 'copy': return new Map(o);\n");
+    sb_add(&s, "            case 'map': {\n");
+    sb_add(&s, "                const out = new Map();\n");
+    sb_add(&s, "                for (const [k, v] of o) out.set(k, args[0](k, v));\n");
+    sb_add(&s, "                return out;\n");
+    sb_add(&s, "            }\n");
+    sb_add(&s, "            case 'filter': {\n");
+    sb_add(&s, "                const out = new Map();\n");
+    sb_add(&s, "                for (const [k, v] of o) if (args[0](k, v)) out.set(k, v);\n");
+    sb_add(&s, "                return out;\n");
+    sb_add(&s, "            }\n");
+    sb_add(&s, "            case 'for_each': for (const [k, v] of o) args[0](k, v); return null;\n");
     sb_add(&s, "        }\n");
     sb_add(&s, "        throw new TypeError(\"no method '\" + m + \"' on map\");\n");
     sb_add(&s, "    }\n");
@@ -3238,6 +3266,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            case 'slice': return o.slice(args[0], args[1]);\n");
     sb_add(&s, "            case 'get': return o[args[0]] !== undefined ? o[args[0]] : (args.length >= 2 ? args[1] : null);\n");
     sb_add(&s, "            case 'to_array': return [...o];\n");
+    sb_add(&s, "            case 'clone': case 'copy': return [...o];\n");
     sb_add(&s, "        }\n");
     sb_add(&s, "    }\n");
     sb_add(&s, "    if (typeof o === 'string') {\n");
@@ -3324,6 +3353,8 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    else if (s.length >= 1 && \"<>=^\".indexOf(s[0]) >= 0) { align = s[0]; s = s.slice(1); }\n");
     sb_add(&s, "    let alt = false;\n");
     sb_add(&s, "    if (s[0] === '#') { alt = true; s = s.slice(1); }\n");
+    /* leading 0 means zero-fill (Python convention): treat as fill='0', align='>' */
+    sb_add(&s, "    if (s[0] === '0' && s.length > 1 && /\\d/.test(s[1])) { if (!align) { fill = '0'; align = '>'; } s = s.slice(1); }\n");
     sb_add(&s, "    let width = 0; let m = s.match(/^(\\d+)/);\n");
     sb_add(&s, "    if (m) { width = parseInt(m[1], 10); s = s.slice(m[0].length); }\n");
     sb_add(&s, "    let prec = -1; m = s.match(/^\\.(\\d+)/);\n");
@@ -3338,7 +3369,10 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    else if (ty === 'e') out = Number(v).toExponential(prec >= 0 ? prec : 6);\n");
     sb_add(&s, "    else if (ty === 'f') out = Number(v).toFixed(prec >= 0 ? prec : 6);\n");
     sb_add(&s, "    else if (ty === 'g' || ty === '') {\n");
-    sb_add(&s, "        out = (prec >= 0 && typeof v === 'number') ? Number(v).toPrecision(prec) : String(v);\n");
+    /* match the VM: a precision on a numeric value with no type code means
+       fixed decimals, not significant digits. */
+    sb_add(&s, "        if (prec >= 0 && typeof v === 'number') out = Number(v).toFixed(prec);\n");
+    sb_add(&s, "        else out = __xs_repr(v);\n");
     sb_add(&s, "    }\n");
     sb_add(&s, "    else out = String(v);\n");
     sb_add(&s, "    if (width > out.length) {\n");
@@ -3407,15 +3441,14 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "const collections = {\n");
     sb_add(&s, "    Set: (init) => {\n");
     sb_add(&s, "        const data = new Map();\n");
-    sb_add(&s, "        if (Array.isArray(init)) for (const v of init) data.set(__xs_repr(v), v);\n");
+    sb_add(&s, "        if (Array.isArray(init)) for (const v of init) data.set(__xs_repr(v), true);\n");
     sb_add(&s, "        return {\n");
     sb_add(&s, "            _type: 'Set', _data: data,\n");
     sb_add(&s, "            add(v) { data.set(__xs_repr(v), v); return this; },\n");
     sb_add(&s, "            contains(v) { return data.has(__xs_repr(v)); },\n");
     sb_add(&s, "            has(v) { return data.has(__xs_repr(v)); },\n");
     sb_add(&s, "            remove(v) { return data.delete(__xs_repr(v)); },\n");
-    sb_add(&s, "            len() { return data.size; },\n");
-    sb_add(&s, "            size() { return data.size; },\n");
+    sb_add(&s, "            len() { return data.size; },\n            size() { return data.size; },\n");
     sb_add(&s, "            is_empty() { return data.size === 0; },\n");
     sb_add(&s, "            to_array() { return [...data.values()]; },\n");
     sb_add(&s, "        };\n");
@@ -3434,7 +3467,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "                const arr = [...data.entries()].sort((a,b)=>b[1]-a[1]);\n");
     sb_add(&s, "                return n ? arr.slice(0, n) : arr;\n");
     sb_add(&s, "            },\n");
-    sb_add(&s, "            len() { return data.size; },\n");
+    sb_add(&s, "            len() { return data.size; },\n            size() { return data.size; },\n");
     sb_add(&s, "        };\n");
     sb_add(&s, "    },\n");
     sb_add(&s, "    Deque: (init) => {\n");
@@ -3447,7 +3480,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            pop_front() { return data.shift(); },\n");
     sb_add(&s, "            front() { return data[0]; },\n");
     sb_add(&s, "            back() { return data[data.length-1]; },\n");
-    sb_add(&s, "            len() { return data.length; },\n");
+    sb_add(&s, "            len() { return data.length; },\n            size() { return data.length; },\n");
     sb_add(&s, "            is_empty() { return data.length === 0; },\n");
     sb_add(&s, "        };\n");
     sb_add(&s, "    },\n");
@@ -3458,7 +3491,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            push(v) { data.push(v); return this; },\n");
     sb_add(&s, "            pop() { return data.pop(); },\n");
     sb_add(&s, "            peek() { return data[data.length-1]; },\n");
-    sb_add(&s, "            len() { return data.length; },\n");
+    sb_add(&s, "            len() { return data.length; },\n            size() { return data.length; },\n");
     sb_add(&s, "            is_empty() { return data.length === 0; },\n");
     sb_add(&s, "        };\n");
     sb_add(&s, "    },\n");
@@ -3474,7 +3507,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            has(k) { return data.has(k); }, contains(k) { return data.has(k); },\n");
     sb_add(&s, "            keys() { return [...data.keys()]; },\n");
     sb_add(&s, "            values() { return [...data.values()]; },\n");
-    sb_add(&s, "            len() { return data.size; },\n");
+    sb_add(&s, "            len() { return data.size; },\n            size() { return data.size; },\n");
     sb_add(&s, "        };\n");
     sb_add(&s, "    },\n");
     sb_add(&s, "    PriorityQueue: () => {\n");
@@ -3487,7 +3520,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            },\n");
     sb_add(&s, "            pop() { const e = data.shift(); return e ? e[0] : null; },\n");
     sb_add(&s, "            peek() { return data.length ? data[0][0] : null; },\n");
-    sb_add(&s, "            len() { return data.length; },\n");
+    sb_add(&s, "            len() { return data.length; },\n            size() { return data.length; },\n");
     sb_add(&s, "            is_empty() { return data.length === 0; },\n");
     sb_add(&s, "        };\n");
     sb_add(&s, "    },\n");
@@ -3505,6 +3538,16 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    r.to_array = () => [...r];\n");
     sb_add(&s, "    return r;\n");
     sb_add(&s, "};\n");
+    /* Global helpers available unqualified in XS programs. */
+    sb_add(&s, "const sum = (arr) => { let t = 0; for (const v of arr) t = __xs_add(t, v); return t; };\n");
+    sb_add(&s, "const product = (arr) => { let t = 1; for (const v of arr) t = (typeof t === 'bigint' || typeof v === 'bigint') ? BigInt(t) * BigInt(v) : t * v; return t; };\n");
+    sb_add(&s, "const min = (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) < 0) r = flat[i]; return r; };\n");
+    sb_add(&s, "const max = (...xs) => { const flat = xs.length === 1 && Array.isArray(xs[0]) ? xs[0] : xs; let r = flat[0]; for (let i = 1; i < flat.length; i++) if (__xs_cmp(flat[i], r) > 0) r = flat[i]; return r; };\n");
+    sb_add(&s, "const sorted = (arr, cmp) => { const a = [...arr]; a.sort(cmp || ((x, y) => __xs_cmp(x, y))); return a; };\n");
+    sb_add(&s, "const reversed = (arr) => [...arr].reverse();\n");
+    sb_add(&s, "const enumerate = (arr) => arr.map((v, i) => [i, v]);\n");
+    sb_add(&s, "const zip = (...arrs) => { const n = Math.min(...arrs.map(a => a.length)); const r = []; for (let i = 0; i < n; i++) r.push(arrs.map(a => a[i])); return r; };\n");
+    sb_add(&s, "const abs = (x) => typeof x === 'bigint' ? (x < 0n ? -x : x) : Math.abs(x);\n");
     sb_add(&s, "const random = {\n");
     sb_add(&s, "    random: () => Math.random(),\n");
     sb_add(&s, "    int: (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1)),\n");
@@ -3513,6 +3556,38 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    shuffle: (arr) => { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; },\n");
     sb_add(&s, "    sample: (arr, n) => { const a = [...arr]; const r = []; for (let i = 0; i < n && a.length; i++) { const j = Math.floor(Math.random() * a.length); r.push(a.splice(j, 1)[0]); } return r; },\n");
     sb_add(&s, "    seed: () => {},\n");
+    sb_add(&s, "};\n");
+    /* async module: thin polyfill over JS Promise. async is reserved
+       in JS only at function-decl positions; using it as a variable
+       name is fine. */
+    sb_add(&s, "const async = {\n");
+    sb_add(&s, "    all: (ps) => Promise.all(ps),\n");
+    sb_add(&s, "    any: (ps) => Promise.any(ps),\n");
+    sb_add(&s, "    race: (ps) => Promise.race(ps),\n");
+    sb_add(&s, "    settle: (ps) => Promise.allSettled(ps),\n");
+    sb_add(&s, "    sleep: (sec) => new Promise(r => setTimeout(r, sec * 1000)),\n");
+    sb_add(&s, "    delay: (sec, v) => new Promise(r => setTimeout(() => r(v), sec * 1000)),\n");
+    sb_add(&s, "    resolve: (v) => Promise.resolve(v),\n");
+    sb_add(&s, "    reject: (e) => Promise.reject(e),\n");
+    sb_add(&s, "};\n");
+    /* re module: thin wrapper over JS RegExp. compile returns an object
+       carrying the source pattern; match/find_all/replace/split take a
+       string + pattern (string or compiled). */
+    sb_add(&s, "const re = {\n");
+    sb_add(&s, "    compile: (pat, flags) => ({ _type: 'Regex', _src: pat, _flags: flags || '',\n");
+    sb_add(&s, "        match: (s) => { const m = new RegExp(pat, flags || '').exec(s); return m ? m[0] : null; },\n");
+    sb_add(&s, "        find: (s) => { const m = new RegExp(pat, flags || '').exec(s); return m ? m[0] : null; },\n");
+    sb_add(&s, "        find_all: (s) => [...s.matchAll(new RegExp(pat, (flags || '') + 'g'))].map(m => m[0]),\n");
+    sb_add(&s, "        test: (s) => new RegExp(pat, flags || '').test(s),\n");
+    sb_add(&s, "        replace: (s, r) => s.replace(new RegExp(pat, (flags || '') + 'g'), r),\n");
+    sb_add(&s, "        split: (s) => s.split(new RegExp(pat, flags || '')),\n");
+    sb_add(&s, "    }),\n");
+    sb_add(&s, "    match: (s, pat) => { const m = new RegExp(pat).exec(s); return m ? m[0] : null; },\n");
+    sb_add(&s, "    find: (s, pat) => { const m = new RegExp(pat).exec(s); return m ? m[0] : null; },\n");
+    sb_add(&s, "    find_all: (s, pat) => [...s.matchAll(new RegExp(pat, 'g'))].map(m => m[0]),\n");
+    sb_add(&s, "    test: (s, pat) => new RegExp(pat).test(s),\n");
+    sb_add(&s, "    replace: (s, pat, r) => s.replace(new RegExp(pat, 'g'), r),\n");
+    sb_add(&s, "    split: (s, pat) => s.split(new RegExp(pat)),\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_to_float = (v) => {\n");
     sb_add(&s, "    if (typeof v === 'bigint') return Number(v);\n");

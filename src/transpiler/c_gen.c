@@ -257,6 +257,7 @@ static int pick_overload_arity(const char *name, int argc) {
 
 /* track if we're inside an impl/actor method (self is a pointer) */
 static int in_method_body = 0;
+static const char *current_class_name = NULL;
 
 /* track which lambda we're currently emitting (for capture access) */
 static LambdaInfo *current_lambda = NULL;
@@ -1699,8 +1700,12 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else {
             /* check if receiver is a known struct with impl */
             const char *stype = NULL;
-            if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT)
-                stype = lookup_struct_var(n->method_call.obj->ident.name);
+            if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT) {
+                const char *rn = n->method_call.obj->ident.name;
+                stype = lookup_struct_var(rn);
+                if (!stype && current_class_name && strcmp(rn, "self") == 0)
+                    stype = current_class_name;
+            }
             if (stype) {
                 sb_printf(s, "%s_%s(", stype, meth);
                 emit_expr(s, n->method_call.obj, depth);
@@ -3368,6 +3373,8 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 }
                 sb_add(s, ") {\n");
                 in_method_body = 1;
+                const char *prev_cls = current_class_name;
+                current_class_name = n->impl_decl.type_name;
                 if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                     for (int si = 0; si < m->fn_decl.body->block.stmts.len; si++)
                         emit_stmt(s, m->fn_decl.body->block.stmts.items[si], depth + 1);
@@ -3384,6 +3391,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     sb_indent(s, depth + 1);
                     sb_add(s, "return XS_NULL;\n");
                 }
+                current_class_name = prev_cls;
                 in_method_body = 0;
                 sb_indent(s, depth);
                 sb_add(s, "}\n\n");
@@ -3488,6 +3496,8 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     else sb_add(s, "_");
                 }
                 sb_add(s, ") {\n");
+                const char *prev_cls = current_class_name;
+                current_class_name = n->class_decl.name;
                 if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                     emit_block_body(s, m->fn_decl.body, depth + 1);
                     if (m->fn_decl.body->block.expr) {
@@ -3497,6 +3507,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                         sb_add(s, ";\n");
                     }
                 }
+                current_class_name = prev_cls;
                 sb_indent(s, depth + 1);
                 sb_add(s, "return XS_NULL;\n");
                 sb_indent(s, depth);
@@ -5004,9 +5015,10 @@ char *transpile_c(Node *program, const char *filename) {
                 sb_printf(&s, "static xs_val %s_%s(%s_state *self",
                           aname, m->fn_decl.name, aname);
                 for (int p = 0; p < m->fn_decl.params.len; p++) {
+                    const char *pn = m->fn_decl.params.items[p].name;
+                    if (pn && strcmp(pn, "self") == 0) continue;
                     sb_add(&s, ", xs_val ");
-                    sb_add(&s, m->fn_decl.params.items[p].name ?
-                           m->fn_decl.params.items[p].name : "_");
+                    sb_add(&s, pn ? pn : "_");
                 }
                 sb_add(&s, ") {\n");
                 in_method_body = 1;

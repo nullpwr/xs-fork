@@ -1455,10 +1455,37 @@ static Node *parse_primary(Parser *p) {
                 pn->pat_ident.mutable = 1;
                 pm.pattern = pn;
             }
+            /* optional type annotation: |x: int| — skip the type expr */
+            if (pp_match(p, TK_COLON)) {
+                int depth = 0;
+                while (!pp_at_end(p)) {
+                    Token *tt = pp_peek(p, 0);
+                    if (depth == 0 && (tt->kind == TK_COMMA || tt->kind == TK_PIPE)) break;
+                    if (tt->kind == TK_LT || tt->kind == TK_LBRACKET ||
+                        tt->kind == TK_LPAREN) depth++;
+                    else if (tt->kind == TK_GT || tt->kind == TK_RBRACKET ||
+                             tt->kind == TK_RPAREN) depth--;
+                    pp_advance(p);
+                }
+            }
             paramlist_push(&pl, pm);
             if (!pp_match(p, TK_COMMA)) break;
         }
         pp_expect(p, TK_PIPE, "expected '|' after lambda params");
+        /* optional return type: |x| -> int { ... } — skip it */
+        if (pp_match(p, TK_ARROW)) {
+            int depth = 0;
+            while (!pp_at_end(p)) {
+                Token *tt = pp_peek(p, 0);
+                if (depth == 0 && (tt->kind == TK_LBRACE)) break;
+                if (depth == 0 && tt->kind == TK_NEWLINE) break;
+                if (tt->kind == TK_LT || tt->kind == TK_LBRACKET ||
+                    tt->kind == TK_LPAREN) depth++;
+                else if (tt->kind == TK_GT || tt->kind == TK_RBRACKET ||
+                         tt->kind == TK_RPAREN) depth--;
+                pp_advance(p);
+            }
+        }
         Node *body;
         if (pp_check(p, TK_LBRACE)) body = parse_block(p);
         else                          body = parse_expr(p, 0);
@@ -3670,6 +3697,16 @@ static Node *parse_impl_decl(Parser *p) {
     char *trait_name = NULL;
     Span span = type_tok->span;
 
+    /* skip generic args on the type name itself: impl<T> Box<T> { ... } */
+    if (pp_check(p, TK_LT)) {
+        int d=1; pp_advance(p);
+        while (!pp_at_end(p)&&d>0){
+            if(pp_peek(p,0)->kind==TK_LT) d++;
+            else if(pp_peek(p,0)->kind==TK_GT) d--;
+            pp_advance(p);
+        }
+    }
+
     /* optional 'for Type' (impl Trait for Type) */
     if (pp_check(p, TK_FOR) || pp_check(p, TK_FROM) ||
         (pp_peek(p,0)->kind == TK_IDENT &&
@@ -3678,6 +3715,15 @@ static Node *parse_impl_decl(Parser *p) {
         trait_name = type_name;
         Token *tn = pp_expect(p, TK_IDENT, "expected type name after 'for'");
         type_name = xs_strdup(tn->sval ? tn->sval : "");
+        /* generic args on the for-type: impl Show for Box<T> */
+        if (pp_check(p, TK_LT)) {
+            int d=1; pp_advance(p);
+            while (!pp_at_end(p)&&d>0){
+                if(pp_peek(p,0)->kind==TK_LT) d++;
+                else if(pp_peek(p,0)->kind==TK_GT) d--;
+                pp_advance(p);
+            }
+        }
     }
 
     pp_expect(p, TK_LBRACE, "expected '{'");

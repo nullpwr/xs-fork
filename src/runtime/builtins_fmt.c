@@ -180,7 +180,7 @@ static Value *native_fmt_pad_left(Interp *ig, Value **a, int n) {
     if (n < 2) return n > 0 ? value_incref(a[0]) : xs_str("");
     const char *s = (VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "";
     int width = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
-    char fill = (n >= 3 && VAL_TAG(a[2]) == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
+    char fill = (n >= 3 && (VAL_TAG(a[2]) == XS_STR || VAL_TAG(a[2]) == XS_CHAR) && a[2]->s && a[2]->s[0]) ? a[2]->s[0] : ' ';
     int slen = (int)strlen(s);
     if (slen >= width) return xs_str(s);
     char *r = xs_malloc(width + 1);
@@ -195,7 +195,7 @@ static Value *native_fmt_pad_right(Interp *ig, Value **a, int n) {
     if (n < 2) return n > 0 ? value_incref(a[0]) : xs_str("");
     const char *s = (VAL_TAG(a[0]) == XS_STR) ? a[0]->s : "";
     int width = (VAL_TAG(a[1]) == XS_INT) ? (int)VAL_INT(a[1]) : 0;
-    char fill = (n >= 3 && VAL_TAG(a[2]) == XS_STR && a[2]->s[0]) ? a[2]->s[0] : ' ';
+    char fill = (n >= 3 && (VAL_TAG(a[2]) == XS_STR || VAL_TAG(a[2]) == XS_CHAR) && a[2]->s && a[2]->s[0]) ? a[2]->s[0] : ' ';
     int slen = (int)strlen(s);
     if (slen >= width) return xs_str(s);
     char *r = xs_malloc(width + 1);

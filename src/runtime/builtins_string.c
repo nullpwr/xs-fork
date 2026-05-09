@@ -14,7 +14,7 @@ static Value *native_str_pad_left(Interp *i, Value **a, int n) {
     (void)i;
     if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n>=3 && (VAL_TAG(a[2])==XS_STR || VAL_TAG(a[2])==XS_CHAR) && a[2]->s && a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     char *r=xs_malloc(width+1);
@@ -27,7 +27,7 @@ static Value *native_str_pad_right(Interp *i, Value **a, int n) {
     (void)i;
     if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n>=3 && (VAL_TAG(a[2])==XS_STR || VAL_TAG(a[2])==XS_CHAR) && a[2]->s && a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     char *r=xs_malloc(width+1);
@@ -39,7 +39,7 @@ static Value *native_str_center(Interp *i, Value **a, int n) {
     (void)i;
     if (n<2||VAL_TAG(a[0])!=XS_STR) return n>0?value_incref(a[0]):value_incref(XS_NULL_VAL);
     const char *s=a[0]->s; int width=(int)VAL_INT(a[1]); char fill=' ';
-    if (n>=3&&VAL_TAG(a[2])==XS_STR&&a[2]->s[0]) fill=a[2]->s[0];
+    if (n>=3 && (VAL_TAG(a[2])==XS_STR || VAL_TAG(a[2])==XS_CHAR) && a[2]->s && a[2]->s[0]) fill=a[2]->s[0];
     int slen=(int)strlen(s);
     if (slen>=width) return value_incref(a[0]);
     int pad=width-slen; int lpad=pad/2; int rpad=pad-lpad;

@@ -3548,6 +3548,24 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 Value *_gen_type = map_get(mc_obj->map, "__type");
                 if (_gen_type && VAL_TAG(_gen_type) == XS_STR &&
                     strcmp(_gen_type->s, "generator") == 0 &&
+                    (strcmp(mc_name, "to_array") == 0 ||
+                     strcmp(mc_name, "collect") == 0 ||
+                     strcmp(mc_name, "to_list") == 0)) {
+                    Value *yields = map_get(mc_obj->map, "_yields");
+                    Value *idx_v  = map_get(mc_obj->map, "_index");
+                    int idx = idx_v && VAL_TAG(idx_v) == XS_INT ? (int)VAL_INT(idx_v) : 0;
+                    Value *arr = xs_array_new();
+                    if (yields && VAL_TAG(yields) == XS_ARRAY) {
+                        for (int yi = idx; yi < yields->arr->len; yi++)
+                            array_push(arr->arr, value_incref(yields->arr->items[yi]));
+                        Value *new_idx = xs_int(yields->arr->len);
+                        map_set(mc_obj->map, "_index", new_idx); value_decref(new_idx);
+                    }
+                    Value *dv = value_incref(XS_TRUE_VAL);
+                    map_set(mc_obj->map, "_done", dv); value_decref(dv);
+                    mc_result = arr;
+                } else if (_gen_type && VAL_TAG(_gen_type) == XS_STR &&
+                    strcmp(_gen_type->s, "generator") == 0 &&
                     strcmp(mc_name, "next") == 0) {
                     Value *yields = map_get(mc_obj->map, "_yields");
                     Value *idx_v  = map_get(mc_obj->map, "_index");
@@ -4284,7 +4302,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     mc_result=xs_int(cnt);
                 } else if (strcmp(mc_name,"pad_left")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
                     int64_t n2=VAL_INT(mc_args[0]); char ch=' ';
-                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                    if(mc_argc>=2 && (VAL_TAG(mc_args[1])==XS_STR || VAL_TAG(mc_args[1])==XS_CHAR) && mc_args[1]->s && mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -4295,7 +4313,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 } else if (strcmp(mc_name,"pad_right")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
                     int64_t n2=VAL_INT(mc_args[0]); char ch=' ';
-                    if(mc_argc>=2&&VAL_TAG(mc_args[1])==XS_STR&&mc_args[1]->s[0]) ch=mc_args[1]->s[0];
+                    if(mc_argc>=2 && (VAL_TAG(mc_args[1])==XS_STR || VAL_TAG(mc_args[1])==XS_CHAR) && mc_args[1]->s && mc_args[1]->s[0]) ch=mc_args[1]->s[0];
                     if(n2<=(int64_t)slen) mc_result=xs_str(s);
                     else{
                         char *buf=xs_malloc((size_t)n2+1);
@@ -4330,13 +4348,13 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                         buf[wpos]='\0'; mc_result=xs_str(buf); free(buf);
                     } else mc_result=value_incref(XS_NULL_VAL);
-                } else if (strcmp(mc_name,"trim_start")==0||strcmp(mc_name,"ltrim")==0) {
+                } else if (strcmp(mc_name,"trim_start")==0||strcmp(mc_name,"ltrim")==0||strcmp(mc_name,"trim_left")==0) {
                     const char *cs = (mc_argc > 0 && VAL_TAG(mc_args[0]) == XS_STR) ? mc_args[0]->s : NULL;
                     const char *p2 = s;
                     if (cs) while (*p2 && strchr(cs, *p2)) p2++;
                     else    while (*p2==' '||*p2=='\t'||*p2=='\n'||*p2=='\r') p2++;
                     mc_result = xs_str(p2);
-                } else if (strcmp(mc_name,"trim_end")==0||strcmp(mc_name,"rtrim")==0) {
+                } else if (strcmp(mc_name,"trim_end")==0||strcmp(mc_name,"rtrim")==0||strcmp(mc_name,"trim_right")==0) {
                     const char *cs = (mc_argc > 0 && VAL_TAG(mc_args[0]) == XS_STR) ? mc_args[0]->s : NULL;
                     char *r = xs_strdup(s); int rlen = (int)strlen(r);
                     if (cs) while (rlen > 0 && strchr(cs, r[rlen-1])) rlen--;
@@ -4611,6 +4629,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"init")==0) {
                     Value *r=xs_array_new();
                     for(int j=0;j+1<mc_obj->arr->len;j++) array_push(r->arr,value_incref(mc_obj->arr->items[j]));
+                    mc_result=r;
+                } else if (strcmp(mc_name,"clone")==0||strcmp(mc_name,"copy")==0) {
+                    Value *r=xs_array_new();
+                    for(int j=0;j<mc_obj->arr->len;j++) array_push(r->arr,value_incref(mc_obj->arr->items[j]));
                     mc_result=r;
                 }
                 else if (strcmp(mc_name,"get")==0) {
@@ -5402,6 +5424,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         else snprintf(buf,sizeof(buf),"%g",mc_obj->f);
                         mc_result=xs_str(buf);
                     }
+                } else if (strcmp(mc_name,"to_float")==0||strcmp(mc_name,"as_float")==0) {
+                    mc_result = xs_float(num_f);
+                } else if (strcmp(mc_name,"to_int")==0||strcmp(mc_name,"as_int")==0) {
+                    mc_result = xs_int(num_i);
                 } else if (strcmp(mc_name,"to_char")==0) {
                     char buf[2]={(char)(num_i&0xFF),0};
                     mc_result=xs_str(buf);
@@ -5458,13 +5484,31 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 else if (strcmp(mc_name,"to_array")==0 || strcmp(mc_name,"collect")==0) {
                     Value *arr = xs_array_new();
-                    int64_t stop = rr->inclusive ? rr->end + 1 : rr->end;
-                    for (int64_t v = rr->start; v < stop; v++) {
-                        Value *iv = xs_int(v);
-                        array_push(arr->arr, iv);
-                        value_decref(iv);
+                    int64_t step = rr->step ? rr->step : 1;
+                    if (step > 0) {
+                        int64_t stop = rr->inclusive ? rr->end + 1 : rr->end;
+                        for (int64_t v = rr->start; v < stop; v += step) {
+                            Value *iv = xs_int(v);
+                            array_push(arr->arr, iv);
+                            value_decref(iv);
+                        }
+                    } else if (step < 0) {
+                        int64_t stop = rr->inclusive ? rr->end - 1 : rr->end;
+                        for (int64_t v = rr->start; v > stop; v += step) {
+                            Value *iv = xs_int(v);
+                            array_push(arr->arr, iv);
+                            value_decref(iv);
+                        }
                     }
                     mc_result = arr;
+                }
+                else if (strcmp(mc_name,"step")==0) {
+                    if (mc_argc>=1 && VAL_TAG(mc_args[0])==XS_INT) {
+                        Value *r2 = xs_range_step(rr->start, rr->end,
+                                                  rr->inclusive,
+                                                  VAL_INT(mc_args[0]));
+                        mc_result = r2;
+                    } else mc_result = xs_int(rr->step ? rr->step : 1);
                 }
                 else { mc_result = value_incref(XS_NULL_VAL); mc_unknown=1; }
             }

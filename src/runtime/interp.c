@@ -1959,7 +1959,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return value_incref(obj);
         /* trim_start / ltrim: optional char-set arg trims those chars
            instead of whitespace. */
-        if (strcmp(method, "trim_start") == 0 || strcmp(method, "ltrim") == 0) {
+        if (strcmp(method, "trim_start") == 0 || strcmp(method, "ltrim") == 0 || strcmp(method, "trim_left") == 0) {
             const char *cs = (argc > 0 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : NULL;
             int start = 0;
             if (cs) {
@@ -1970,7 +1970,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             return xs_str(s+start);
         }
         /* trim_end / rtrim: same convention */
-        if (strcmp(method, "trim_end") == 0 || strcmp(method, "rtrim") == 0) {
+        if (strcmp(method, "trim_end") == 0 || strcmp(method, "rtrim") == 0 || strcmp(method, "trim_right") == 0) {
             const char *cs = (argc > 0 && VAL_TAG(args[0]) == XS_STR) ? args[0]->s : NULL;
             int end = slen - 1;
             if (cs) {
@@ -2033,7 +2033,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         /* pad_left / lpad */
         if (strcmp(method, "pad_left") == 0 || strcmp(method, "lpad") == 0 || strcmp(method, "pad_start") == 0) {
             int width=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
-            char ch=(argc>1&&VAL_TAG(args[1])==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
+            char ch=(argc>1 && (VAL_TAG(args[1])==XS_STR || VAL_TAG(args[1])==XS_CHAR) && args[1]->s && args[1]->s[0])?args[1]->s[0]:' ';
             if (width<=slen) return value_incref(obj);
             int pad=width-slen;
             char *r=xs_malloc(width+1);
@@ -2044,7 +2044,7 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         /* pad_right / rpad */
         if (strcmp(method, "pad_right") == 0 || strcmp(method, "rpad") == 0 || strcmp(method, "pad_end") == 0) {
             int width=(argc>0&&VAL_TAG(args[0])==XS_INT)?(int)VAL_INT(args[0]):slen;
-            char ch=(argc>1&&VAL_TAG(args[1])==XS_STR&&args[1]->s[0])?args[1]->s[0]:' ';
+            char ch=(argc>1 && (VAL_TAG(args[1])==XS_STR || VAL_TAG(args[1])==XS_CHAR) && args[1]->s && args[1]->s[0])?args[1]->s[0]:' ';
             if (width<=slen) return value_incref(obj);
             int pad=width-slen;
             char *r=xs_malloc(width+1);
@@ -3299,6 +3299,27 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
         {
             Value *ct = map_get(m, "__type");
             if (ct && VAL_TAG(ct) == XS_STR && strcmp(ct->s, "generator") == 0) {
+                if (strcmp(method, "to_array") == 0 ||
+                    strcmp(method, "collect") == 0 ||
+                    strcmp(method, "to_list") == 0) {
+                    /* eager-cached generators (WASM, VM) keep _yields; copy the
+                     * unconsumed tail. The lazy worker-thread path doesn't
+                     * pre-populate _yields, so callers there should iterate
+                     * via for-in. */
+                    Value *yields = map_get(m, "_yields");
+                    if (yields && VAL_TAG(yields) == XS_ARRAY) {
+                        Value *idx_v  = map_get(m, "_index");
+                        int idx = idx_v && VAL_TAG(idx_v) == XS_INT ? (int)VAL_INT(idx_v) : 0;
+                        Value *arr = xs_array_new();
+                        for (int yi = idx; yi < yields->arr->len; yi++)
+                            array_push(arr->arr, value_incref(yields->arr->items[yi]));
+                        Value *new_idx = xs_int(yields->arr->len);
+                        map_set(m, "_index", new_idx); value_decref(new_idx);
+                        Value *dv = value_incref(XS_TRUE_VAL);
+                        map_set(m, "_done", dv); value_decref(dv);
+                        return arr;
+                    }
+                }
                 if (strcmp(method, "next") == 0) {
                     Value *yields = map_get(m, "_yields");
                     Value *idx_v  = map_get(m, "_index");
@@ -5213,9 +5234,16 @@ static void list_comp_recurse(Interp *i, Node *n, Value *result, int cl) {
         range_arr = xs_array_new();
         int64_t start = iter_val->range->start;
         int64_t end = iter_val->range->end;
-        if (iter_val->range->inclusive) end++;
-        for (int64_t ri = start; ri < end; ri++)
-            array_push(range_arr->arr, xs_int(ri));
+        int64_t step = iter_val->range->step ? iter_val->range->step : 1;
+        if (step > 0) {
+            int64_t e = iter_val->range->inclusive ? end + 1 : end;
+            for (int64_t ri = start; ri < e; ri += step)
+                array_push(range_arr->arr, xs_int(ri));
+        } else if (step < 0) {
+            int64_t e = iter_val->range->inclusive ? end - 1 : end;
+            for (int64_t ri = start; ri > e; ri += step)
+                array_push(range_arr->arr, xs_int(ri));
+        }
         iter_len = range_arr->arr->len;
         iter_items = range_arr->arr->items;
     } else if (VAL_TAG(iter_val) == XS_MAP || VAL_TAG(iter_val) == XS_MODULE) {
