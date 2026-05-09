@@ -545,6 +545,13 @@ static void prescan_stmts(Node *program) {
                 if (find_impl_type(sname))
                     register_struct_var(st->let.name, sname);
             }
+            /* register let x = ClassName(...) */
+            if (VAL_TAG(val) == NODE_CALL && val->call.callee &&
+                VAL_TAG(val->call.callee) == NODE_IDENT) {
+                const char *cname = val->call.callee->ident.name;
+                if (is_class(cname))
+                    register_struct_var(st->let.name, cname);
+            }
             /* register let x = y.method(...) where y is a known struct var */
             if (VAL_TAG(val) == NODE_METHOD_CALL && val->method_call.obj &&
                 VAL_TAG(val->method_call.obj) == NODE_IDENT) {
@@ -1126,6 +1133,15 @@ static void emit_expr(SB *s, Node *n, int depth) {
         const char *actor_type = NULL;
         if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT)
             actor_type = lookup_actor_var(n->method_call.obj->ident.name);
+        const char *mod_name = NULL;
+        if (n->method_call.obj && VAL_TAG(n->method_call.obj) == NODE_IDENT) {
+            const char *on = n->method_call.obj->ident.name;
+            if (strcmp(on, "math") == 0 || strcmp(on, "string") == 0 ||
+                strcmp(on, "json") == 0 || strcmp(on, "time") == 0 ||
+                strcmp(on, "random") == 0 || strcmp(on, "os") == 0 ||
+                strcmp(on, "fmt") == 0)
+                mod_name = on;
+        }
         if (actor_type) {
             /* actor method dispatch */
             sb_printf(s, "%s_%s(&%s_state", actor_type, meth,
@@ -1135,6 +1151,47 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 emit_expr(s, n->method_call.args.items[i], depth);
             }
             sb_addc(s, ')');
+        } else if (mod_name && strcmp(mod_name, "json") == 0) {
+            const char *fn = NULL;
+            if (strcmp(meth, "stringify") == 0 || strcmp(meth, "encode") == 0 || strcmp(meth, "dumps") == 0) fn = "xs_json_stringify";
+            else if (strcmp(meth, "parse") == 0 || strcmp(meth, "decode") == 0 || strcmp(meth, "loads") == 0) fn = "xs_json_parse";
+            if (fn) {
+                sb_printf(s, "%s(", fn);
+                for (int i = 0; i < n->method_call.args.len; i++) { if (i) sb_add(s, ", "); emit_expr(s, n->method_call.args.items[i], depth); }
+                sb_addc(s, ')');
+            } else {
+                sb_printf(s, "XS_NULL /* json.%s */", meth);
+            }
+        } else if (mod_name && strcmp(mod_name, "math") == 0) {
+            const char *fn = NULL;
+            if (strcmp(meth, "floor") == 0) fn = "xs_num_floor";
+            else if (strcmp(meth, "ceil") == 0) fn = "xs_num_ceil";
+            else if (strcmp(meth, "round") == 0) fn = "xs_num_round";
+            else if (strcmp(meth, "abs") == 0) fn = "xs_num_abs";
+            else if (strcmp(meth, "sqrt") == 0) fn = "xs_math_sqrt";
+            else if (strcmp(meth, "pow") == 0) fn = "xs_math_pow";
+            else if (strcmp(meth, "min") == 0) fn = "xs_math_min";
+            else if (strcmp(meth, "max") == 0) fn = "xs_math_max";
+            else if (strcmp(meth, "log") == 0) fn = "xs_math_log";
+            else if (strcmp(meth, "exp") == 0) fn = "xs_math_exp";
+            else if (strcmp(meth, "sin") == 0) fn = "xs_math_sin";
+            else if (strcmp(meth, "cos") == 0) fn = "xs_math_cos";
+            else if (strcmp(meth, "tan") == 0) fn = "xs_math_tan";
+            if (fn) {
+                if (strcmp(meth, "min") == 0 || strcmp(meth, "max") == 0) {
+                    sb_printf(s, "%s(%d", fn, n->method_call.args.len);
+                    for (int i = 0; i < n->method_call.args.len; i++) { sb_add(s, ", "); emit_expr(s, n->method_call.args.items[i], depth); }
+                    sb_addc(s, ')');
+                } else {
+                    sb_printf(s, "%s(", fn);
+                    for (int i = 0; i < n->method_call.args.len; i++) { if (i) sb_add(s, ", "); emit_expr(s, n->method_call.args.items[i], depth); }
+                    sb_addc(s, ')');
+                }
+            } else {
+                sb_add(s, "XS_NULL /* unhandled math.");
+                sb_add(s, meth);
+                sb_add(s, " */");
+            }
         } else if (strcmp(meth, "send") == 0) {
             sb_add(s, "xs_channel_send(");
             emit_expr(s, n->method_call.obj, depth);
@@ -1158,6 +1215,150 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_channel_is_full(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "sum") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ double __t_%d = 0; int __any_%d = 0;\n", mid, mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) { __any_%d=1; __t_%d += xs_to_f64(__a_%d->items[__i]); }\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth);
+            sb_printf(s, "(__any_%d && __t_%d == (double)(long long)__t_%d) ? XS_INT((long long)__t_%d) : XS_FLOAT(__t_%d); })", mid, mid, mid, mid, mid);
+        } else if (strcmp(meth, "product") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ double __t_%d = 1;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) __t_%d *= xs_to_f64(__a_%d->items[__i]);\n", mid, mid, mid, mid);
+            sb_indent(s, depth);
+            sb_printf(s, "(__t_%d == (double)(long long)__t_%d) ? XS_INT((long long)__t_%d) : XS_FLOAT(__t_%d); })", mid, mid, mid, mid);
+        } else if (strcmp(meth, "avg") == 0 || strcmp(meth, "mean") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ double __t_%d = 0;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) __t_%d += xs_to_f64(__a_%d->items[__i]);\n", mid, mid, mid, mid);
+            sb_indent(s, depth);
+            sb_printf(s, "(__a_%d && __a_%d->len > 0) ? XS_FLOAT(__t_%d / __a_%d->len) : XS_FLOAT(0); })", mid, mid, mid, mid);
+        } else if (strcmp(meth, "max") == 0 && n->method_call.args.len == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = XS_NULL;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) {\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (__r_%d.tag == 4 || xs_cmp(__a_%d->items[__i], __r_%d) > 0) __r_%d = __a_%d->items[__i];\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth);
+            sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "min") == 0 && n->method_call.args.len == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = XS_NULL;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) {\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (__r_%d.tag == 4 || xs_cmp(__a_%d->items[__i], __r_%d) < 0) __r_%d = __a_%d->items[__i];\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth);
+            sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "take") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "long long __n_%d = ", mid);
+            if (n->method_call.args.len > 0) { sb_add(s, "xs_to_f64("); emit_expr(s, n->method_call.args.items[0], depth); sb_add(s, ")"); }
+            else sb_add(s, "0");
+            sb_add(s, ";\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len && __i<__n_%d; __i++) xs_arr_push(__r_%d, __a_%d->items[__i]);\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "drop") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "long long __n_%d = ", mid);
+            if (n->method_call.args.len > 0) { sb_add(s, "xs_to_f64("); emit_expr(s, n->method_call.args.items[0], depth); sb_add(s, ")"); }
+            else sb_add(s, "0");
+            sb_add(s, ";\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=__n_%d; __i<__a_%d->len; __i++) if (__i>=0) xs_arr_push(__r_%d, __a_%d->items[__i]);\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "unique") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) {\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "int __dup = 0;\n");
+            sb_indent(s, depth+2);
+            sb_printf(s, "xs_arr *__rr = (xs_arr*)__r_%d.p;\n", mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (__rr) for (int __j=0; __j<__rr->len && !__dup; __j++) if (xs_eq(__rr->items[__j], __a_%d->items[__i])) __dup = 1;\n", mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (!__dup) xs_arr_push(__r_%d, __a_%d->items[__i]);\n", mid, mid);
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "enumerate") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i<__a_%d->len; __i++) {\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "xs_val __t = xs_array(2, XS_INT(__i), __a_%d->items[__i]); xs_arr_push(__r_%d, __t);\n", mid, mid);
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "first") == 0 || strcmp(meth, "head") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "__a_%d && __a_%d->len > 0 ? __a_%d->items[0] : XS_NULL; })", mid, mid, mid);
+        } else if (strcmp(meth, "last") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "__a_%d && __a_%d->len > 0 ? __a_%d->items[__a_%d->len-1] : XS_NULL; })", mid, mid, mid, mid);
+        } else if (strcmp(meth, "tail") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=1; __i<__a_%d->len; __i++) xs_arr_push(__r_%d, __a_%d->items[__i]);\n", mid, mid, mid, mid);
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
+        } else if (strcmp(meth, "init") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "xs_arr *__a_%d = (xs_arr*)(", mid);
+            emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__a_%d) for (int __i=0; __i+1<__a_%d->len; __i++) xs_arr_push(__r_%d, __a_%d->items[__i]);\n", mid, mid, mid, mid);
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
         } else if (strcmp(meth, "push") == 0) {
             sb_add(s, "xs_arr_push(");
             emit_expr(s, n->method_call.obj, depth);
@@ -1171,6 +1372,30 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_addc(s, ')');
         } else if (strcmp(meth, "has") == 0) {
             sb_add(s, "xs_map_has(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+            else sb_add(s, "XS_NULL");
+            sb_addc(s, ')');
+        } else if (strcmp(meth, "get") == 0) {
+            sb_add(s, "xs_index(");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+            else sb_add(s, "XS_NULL");
+            sb_addc(s, ')');
+        } else if (strcmp(meth, "set") == 0 || strcmp(meth, "put") == 0) {
+            sb_add(s, "xs_map_put(&");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, ", ");
+            if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "XS_NULL");
+            sb_addc(s, ')');
+        } else if (strcmp(meth, "delete") == 0 || strcmp(meth, "remove") == 0) {
+            sb_add(s, "xs_map_delete(&");
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, ", ");
             if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
@@ -1197,6 +1422,10 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, ", ");
             if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
             else sb_add(s, "XS_STR(\"\")");
+            sb_addc(s, ')');
+        } else if (strcmp(meth, "parse_int") == 0) {
+            sb_add(s, "xs_conv_to_int(");
+            emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
         } else if (strcmp(meth, "parse_float") == 0) {
             sb_add(s, "xs_str_parse_float(");
@@ -1278,6 +1507,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_str_chars(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "bytes") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __s_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; xs_val __r_%d = xs_array(0);\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__s_%d.tag == 2 && __s_%d.s) for (const unsigned char *__p = (const unsigned char*)__s_%d.s; *__p; __p++) xs_arr_push(__r_%d, XS_INT(*__p));\n", mid, mid, mid, mid);
+            sb_indent(s, depth); sb_printf(s, "__r_%d; })", mid);
         } else if (strcmp(meth, "starts_with") == 0 || strcmp(meth, "startsWith") == 0) {
             sb_add(s, "xs_str_starts_with(");
             emit_expr(s, n->method_call.obj, depth);
@@ -1379,7 +1616,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, "; xs_iter_next_val(&__it_n); })");
         } else if (strcmp(meth, "map") == 0 || strcmp(meth, "filter") == 0 ||
-                   strcmp(meth, "reduce") == 0 || strcmp(meth, "any") == 0 ||
+                   strcmp(meth, "reduce") == 0 || strcmp(meth, "fold") == 0 ||
+                   strcmp(meth, "any") == 0 ||
                    strcmp(meth, "all") == 0) {
             /* array method with callback: use xs_call */
             int mid = defer_label_counter++;
@@ -1407,15 +1645,26 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_indent(s, depth+2); sb_printf(s, "if (xs_truthy(xs_call(__fn_%d, &__a, 1))) xs_arr_push(__am_%d, __a);\n", mid, mid);
                 sb_indent(s, depth+1); sb_add(s, "}\n");
                 sb_indent(s, depth); sb_printf(s, "__am_%d; })", mid);
-            } else if (strcmp(meth, "reduce") == 0) {
+            } else if (strcmp(meth, "reduce") == 0 || strcmp(meth, "fold") == 0) {
+                /* reduce uses (fn, init); fold uses (init, fn). Pick
+                   the callable slot for fn and the other for init -- the
+                   VM/interp do the same dynamic dispatch, so the C
+                   shape stays consistent regardless of which name was
+                   used. With only one arg, that arg is the function. */
+                int is_fold = strcmp(meth, "fold") == 0;
+                int fn_arg  = is_fold ? 1 : 0;
+                int init_arg = is_fold ? 0 : 1;
                 sb_printf(s, "({ xs_val __acc_%d = ", mid);
-                if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+                if (n->method_call.args.len > init_arg)
+                    emit_expr(s, n->method_call.args.items[init_arg], depth);
                 else sb_add(s, "XS_INT(0)");
                 sb_add(s, ";\n");
                 sb_indent(s, depth+1); sb_printf(s, "xs_arr *__src_%d = (xs_arr*)(", mid);
                 emit_expr(s, n->method_call.obj, depth); sb_printf(s, ").p;\n");
                 sb_indent(s, depth+1); sb_printf(s, "xs_val __fn_%d = ", mid);
-                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                if (n->method_call.args.len > fn_arg)
+                    emit_expr(s, n->method_call.args.items[fn_arg], depth);
+                else sb_add(s, "XS_NULL");
                 sb_add(s, ";\n");
                 sb_indent(s, depth+1); sb_printf(s, "for (int __i=0; __src_%d && __i < __src_%d->len; __i++) {\n", mid, mid);
                 sb_indent(s, depth+2); sb_printf(s, "xs_val __ra[2] = { __acc_%d, __src_%d->items[__i] };\n", mid, mid);
@@ -1512,6 +1761,15 @@ static void emit_expr(SB *s, Node *n, int depth) {
             strcmp(n->field.obj->ident.name, "self") == 0) {
             /* actor method: self is a struct pointer */
             sb_printf(s, "self->%s", n->field.name);
+        } else if (n->field.obj && VAL_TAG(n->field.obj) == NODE_IDENT &&
+                   strcmp(n->field.obj->ident.name, "math") == 0) {
+            const char *fn = n->field.name;
+            if (strcmp(fn, "pi") == 0)        sb_add(s, "XS_FLOAT(3.141592653589793)");
+            else if (strcmp(fn, "e") == 0)    sb_add(s, "XS_FLOAT(2.718281828459045)");
+            else if (strcmp(fn, "tau") == 0)  sb_add(s, "XS_FLOAT(6.283185307179586)");
+            else if (strcmp(fn, "inf") == 0)  sb_add(s, "XS_FLOAT(1.0/0.0)");
+            else if (strcmp(fn, "nan") == 0)  sb_add(s, "XS_FLOAT(0.0/0.0)");
+            else sb_printf(s, "XS_NULL /* math.%s */", fn);
         } else {
             /* struct/map fields or tuple indices */
             sb_printf(s, "xs_index(");
@@ -3642,14 +3900,22 @@ char *transpile_c(Node *program, const char *filename) {
         "        }\n"
         "    }\n"
         "    if (!found) snprintf(buf, 64, \"%.17g\", f);\n"
+        "    /* float repr should always look like a float; if the shortest\n"
+        "       round-trip dropped the fractional part (e.g. 4.0 -> \"4\"),\n"
+        "       paste back a trailing .0 so it's distinguishable from int. */\n"
+        "    if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E') &&\n"
+        "        !strchr(buf, 'N') && !strchr(buf, 'I')) {\n"
+        "        size_t bl = strlen(buf);\n"
+        "        if (bl + 2 < 64) { buf[bl] = '.'; buf[bl+1] = '0'; buf[bl+2] = 0; }\n"
+        "    }\n"
         "    return buf;\n"
         "}\n\n"
         "static const char *xs_to_str(xs_val v);\n"
         "/* uses rotating buffers to avoid clobbering on recursive/nested calls */\n"
         "static const char *xs_to_str(xs_val v) {\n"
-        "    static char bufs[8][4096];\n"
+        "    static char bufs[256][4096];\n"
         "    static int buf_idx = 0;\n"
-        "    char *buf = bufs[buf_idx++ & 7];\n"
+        "    char *buf = bufs[buf_idx++ & 255];\n"
         "    switch (v.tag) {\n"
         "        case 0: snprintf(buf, 4096, \"%lld\", (long long)v.i); return buf;\n"
         "        case 1: snprintf(buf, 4096, \"%s\", xs_format_float(v.f)); return buf;\n"
@@ -4017,6 +4283,22 @@ char *transpile_c(Node *program, const char *filename) {
         "    for (int i = 0; i < m->len; i++)\n"
         "        if (strcmp(m->keys[i], ks) == 0) return XS_BOOL(1);\n"
         "    return XS_BOOL(0);\n"
+        "}\n"
+        "static xs_val xs_map_delete(xs_val *map, xs_val key) {\n"
+        "    if (!map || map->tag != 6 || !map->p) return XS_BOOL(0);\n"
+        "    xs_hmap *m = (xs_hmap*)map->p;\n"
+        "    const char *ks = key.tag == 2 ? key.s : xs_to_str(key);\n"
+        "    for (int i = 0; i < m->len; i++) {\n"
+        "        if (strcmp(m->keys[i], ks) == 0) {\n"
+        "            for (int j = i + 1; j < m->len; j++) {\n"
+        "                m->keys[j-1] = m->keys[j];\n"
+        "                m->vals[j-1] = m->vals[j];\n"
+        "            }\n"
+        "            m->len--;\n"
+        "            return XS_BOOL(1);\n"
+        "        }\n"
+        "    }\n"
+        "    return XS_BOOL(0);\n"
         "}\n\n"
         "static xs_val xs_len(xs_val v) {\n"
         "    if (v.tag == 5 && v.p) return XS_INT(((xs_arr*)v.p)->len);\n"
@@ -4171,6 +4453,14 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "/* extra collection helpers used by .method() lowering */\n"
         "static xs_val xs_arr_reverse(xs_val v) {\n"
+        "    if (v.tag == 2) {\n"
+        "        const char *src = v.s ? v.s : \"\";\n"
+        "        size_t n = strlen(src);\n"
+        "        char *r = (char*)malloc(n + 1);\n"
+        "        for (size_t i = 0; i < n; i++) r[i] = src[n - 1 - i];\n"
+        "        r[n] = 0;\n"
+        "        return XS_STR(r);\n"
+        "    }\n"
         "    if (v.tag != 5 || !v.p) return v;\n"
         "    xs_arr *a = (xs_arr*)v.p;\n"
         "    for (int i = 0, j = a->len - 1; i < j; i++, j--) {\n"
@@ -4179,6 +4469,18 @@ char *transpile_c(Node *program, const char *filename) {
         "    return v;\n"
         "}\n\n"
         "static xs_val xs_arr_clone(xs_val v) {\n"
+        "    if (v.tag == 6 && v.p) {\n"
+        "        xs_hmap *sm = (xs_hmap*)v.p;\n"
+        "        xs_hmap *rm = (xs_hmap*)malloc(sizeof(xs_hmap));\n"
+        "        rm->len = sm->len; rm->cap = sm->cap > 4 ? sm->cap : 4;\n"
+        "        rm->keys = (char**)malloc(sizeof(char*) * rm->cap);\n"
+        "        rm->vals = (xs_val*)malloc(sizeof(xs_val) * rm->cap);\n"
+        "        for (int i = 0; i < sm->len; i++) {\n"
+        "            rm->keys[i] = strdup(sm->keys[i]);\n"
+        "            rm->vals[i] = sm->vals[i];\n"
+        "        }\n"
+        "        return (xs_val){.tag=6, .p=rm};\n"
+        "    }\n"
         "    if (v.tag != 5 || !v.p) return v;\n"
         "    xs_arr *src = (xs_arr*)v.p;\n"
         "    xs_arr *r = (xs_arr*)malloc(sizeof(xs_arr));\n"
@@ -4450,6 +4752,34 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (v.tag == 0) return v;\n"
         "    if (v.tag == 1) return XS_FLOAT(round(v.f));\n"
         "    return v;\n"
+        "}\n"
+        "static double xs_to_f64(xs_val v);\n"
+        "static xs_val xs_math_sqrt(xs_val v) { return XS_FLOAT(sqrt(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_pow(xs_val a, xs_val b) { return XS_FLOAT(pow(xs_to_f64(a), xs_to_f64(b))); }\n"
+        "static xs_val xs_math_log(xs_val v) { return XS_FLOAT(log(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_exp(xs_val v) { return XS_FLOAT(exp(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_sin(xs_val v) { return XS_FLOAT(sin(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_cos(xs_val v) { return XS_FLOAT(cos(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_tan(xs_val v) { return XS_FLOAT(tan(xs_to_f64(v))); }\n"
+        "static xs_val xs_math_min(int n, ...) {\n"
+        "    if (n <= 0) return XS_NULL;\n"
+        "    va_list ap; va_start(ap, n);\n"
+        "    xs_val best = va_arg(ap, xs_val);\n"
+        "    for (int i = 1; i < n; i++) {\n"
+        "        xs_val v = va_arg(ap, xs_val);\n"
+        "        if (xs_cmp(v, best) < 0) best = v;\n"
+        "    }\n"
+        "    va_end(ap); return best;\n"
+        "}\n"
+        "static xs_val xs_math_max(int n, ...) {\n"
+        "    if (n <= 0) return XS_NULL;\n"
+        "    va_list ap; va_start(ap, n);\n"
+        "    xs_val best = va_arg(ap, xs_val);\n"
+        "    for (int i = 1; i < n; i++) {\n"
+        "        xs_val v = va_arg(ap, xs_val);\n"
+        "        if (xs_cmp(v, best) > 0) best = v;\n"
+        "    }\n"
+        "    va_end(ap); return best;\n"
         "}\n\n"
         "/* range methods: a range is just an array, so start/end peek */\n"
         "static xs_val xs_range_start(xs_val v) {\n"
@@ -4531,6 +4861,92 @@ char *transpile_c(Node *program, const char *filename) {
         "    __xs_json_emit(v, &buf, &pos, &cap);\n"
         "    __xs_json_grow(&buf, &cap, pos + 1); buf[pos] = 0;\n"
         "    return XS_STR(buf);\n"
+        "}\n\n"
+        "static void __xs_json_skip(const char **p) { while (**p == ' ' || **p == '\\t' || **p == '\\n' || **p == '\\r') (*p)++; }\n"
+        "static xs_val __xs_json_read(const char **p);\n"
+        "static xs_val __xs_json_read_str(const char **p) {\n"
+        "    if (**p != '\"') return XS_NULL;\n"
+        "    (*p)++;\n"
+        "    size_t cap = 32, len = 0;\n"
+        "    char *buf = (char*)malloc(cap);\n"
+        "    while (**p && **p != '\"') {\n"
+        "        char c = **p;\n"
+        "        if (c == '\\\\') {\n"
+        "            (*p)++;\n"
+        "            char e = **p;\n"
+        "            if (e == 'n') c = '\\n';\n"
+        "            else if (e == 't') c = '\\t';\n"
+        "            else if (e == 'r') c = '\\r';\n"
+        "            else if (e == '\"') c = '\"';\n"
+        "            else if (e == '\\\\') c = '\\\\';\n"
+        "            else if (e == '/') c = '/';\n"
+        "            else c = e;\n"
+        "        }\n"
+        "        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }\n"
+        "        buf[len++] = c;\n"
+        "        (*p)++;\n"
+        "    }\n"
+        "    if (**p == '\"') (*p)++;\n"
+        "    buf[len] = 0;\n"
+        "    return XS_STR(buf);\n"
+        "}\n"
+        "static xs_val __xs_json_read(const char **p) {\n"
+        "    __xs_json_skip(p);\n"
+        "    char c = **p;\n"
+        "    if (c == '\"') return __xs_json_read_str(p);\n"
+        "    if (c == 't') { if (strncmp(*p, \"true\", 4) == 0) { *p += 4; return (xs_val){.tag=3, .b=1}; } }\n"
+        "    if (c == 'f') { if (strncmp(*p, \"false\", 5) == 0) { *p += 5; return (xs_val){.tag=3, .b=0}; } }\n"
+        "    if (c == 'n') { if (strncmp(*p, \"null\", 4) == 0) { *p += 4; return XS_NULL; } }\n"
+        "    if (c == '[') {\n"
+        "        (*p)++;\n"
+        "        xs_val arr = xs_array(0);\n"
+        "        __xs_json_skip(p);\n"
+        "        if (**p == ']') { (*p)++; return arr; }\n"
+        "        for (;;) {\n"
+        "            xs_arr_push(arr, __xs_json_read(p));\n"
+        "            __xs_json_skip(p);\n"
+        "            if (**p == ',') { (*p)++; continue; }\n"
+        "            if (**p == ']') { (*p)++; break; }\n"
+        "            break;\n"
+        "        }\n"
+        "        return arr;\n"
+        "    }\n"
+        "    if (c == '{') {\n"
+        "        (*p)++;\n"
+        "        xs_val m = xs_map(0);\n"
+        "        __xs_json_skip(p);\n"
+        "        if (**p == '}') { (*p)++; return m; }\n"
+        "        for (;;) {\n"
+        "            __xs_json_skip(p);\n"
+        "            xs_val k = __xs_json_read_str(p);\n"
+        "            __xs_json_skip(p);\n"
+        "            if (**p == ':') (*p)++;\n"
+        "            xs_val v = __xs_json_read(p);\n"
+        "            xs_map_put(&m, k, v);\n"
+        "            __xs_json_skip(p);\n"
+        "            if (**p == ',') { (*p)++; continue; }\n"
+        "            if (**p == '}') { (*p)++; break; }\n"
+        "            break;\n"
+        "        }\n"
+        "        return m;\n"
+        "    }\n"
+        "    if (c == '-' || (c >= '0' && c <= '9')) {\n"
+        "        const char *start = *p;\n"
+        "        if (**p == '-') (*p)++;\n"
+        "        int is_float = 0;\n"
+        "        while ((**p >= '0' && **p <= '9') || **p == '.' || **p == 'e' || **p == 'E' || **p == '+' || **p == '-') {\n"
+        "            if (**p == '.' || **p == 'e' || **p == 'E') is_float = 1;\n"
+        "            (*p)++;\n"
+        "        }\n"
+        "        if (is_float) return XS_FLOAT(strtod(start, NULL));\n"
+        "        return XS_INT(strtoll(start, NULL, 10));\n"
+        "    }\n"
+        "    return XS_NULL;\n"
+        "}\n"
+        "static xs_val xs_json_parse(xs_val s) {\n"
+        "    if (s.tag != 2 || !s.s) return XS_NULL;\n"
+        "    const char *p = s.s;\n"
+        "    return __xs_json_read(&p);\n"
         "}\n\n"
     );
 

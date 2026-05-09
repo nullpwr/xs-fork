@@ -193,10 +193,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_BINOP: {
         const char *op = n->binop.op;
         if (strcmp(op, "++") == 0) {
-            /* string concat -> + */
-            sb_addc(s, '(');
+            /* ++ in XS is concat: array + array -> array, string +
+               string -> string, map + map -> merge. JS's bare `+`
+               only does string concat correctly; arrays under `+`
+               coerce to comma-joined strings. Route through a helper
+               that picks the right shape. */
+            sb_add(s, "__xs_concat(");
             emit_expr(s, n->binop.left, depth);
-            sb_add(s, " + ");
+            sb_add(s, ", ");
             emit_expr(s, n->binop.right, depth);
             sb_addc(s, ')');
         } else if (strcmp(op, "//") == 0) {
@@ -327,10 +331,12 @@ static void emit_expr(SB *s, Node *n, int depth) {
     }
     case NODE_UNARY: {
         const char *op = n->unary.op;
-        if (strcmp(op, "not") == 0) {
-            sb_add(s, "(!");
+        if (strcmp(op, "not") == 0 || strcmp(op, "!") == 0) {
+            /* XS truthiness differs from JS: [], {}, "" are falsy in
+               XS but truthy in JS. Route through __xs_truthy. */
+            sb_add(s, "(!__xs_truthy(");
             emit_expr(s, n->unary.expr, depth);
-            sb_addc(s, ')');
+            sb_add(s, "))");
         } else if (n->unary.prefix) {
             sb_add(s, op);
             emit_expr(s, n->unary.expr, depth);
@@ -353,7 +359,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else if (is_callee_name(n->call.callee, "float")) {
             sb_add(s, "__xs_to_float((");
         } else if (is_callee_name(n->call.callee, "type")) {
-            sb_add(s, "typeof(");
+            /* XS type names differ from JS typeof: int / float / str /
+               array / map / null / bool. Route through __xs_type. */
+            sb_add(s, "__xs_type(");
         } else if (is_callee_name(n->call.callee, "len")) {
             sb_add(s, "__xs_len(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
@@ -805,6 +813,27 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_INDEX:
+        /* arr[a..b] / arr[a..=b] are range-slice operations, not key
+           lookups. Lower them to .slice() directly so the JS Array
+           method actually runs instead of __xs_idx receiving the
+           materialised range Array (which then index-fails). */
+        if (n->index.index && VAL_TAG(n->index.index) == NODE_RANGE) {
+            Node *r = n->index.index;
+            sb_add(s, "(");
+            emit_expr(s, n->index.obj, depth);
+            sb_add(s, ").slice(");
+            if (r->range.start) emit_expr(s, r->range.start, depth);
+            else sb_add(s, "0");
+            sb_add(s, ", ");
+            if (r->range.end) {
+                emit_expr(s, r->range.end, depth);
+                if (r->range.inclusive) sb_add(s, " + 1");
+            } else {
+                sb_add(s, "undefined");
+            }
+            sb_addc(s, ')');
+            break;
+        }
         sb_add(s, "__xs_idx(");
         emit_expr(s, n->index.obj, depth);
         sb_add(s, ", ");
@@ -927,7 +956,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         /* if used as expression -> IIFE */
         sb_add(s, "(() => { ");
         sb_add(s, "if (");
-        emit_expr(s, n->if_expr.cond, depth);
+        sb_add(s, "__xs_truthy("); emit_expr(s, n->if_expr.cond, depth); sb_addc(s, ')');
         sb_add(s, ") ");
         if (n->if_expr.then && VAL_TAG(n->if_expr.then) == NODE_BLOCK) {
             sb_add(s, "{\n");
@@ -947,7 +976,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         for (int i = 0; i < n->if_expr.elif_conds.len; i++) {
             sb_add(s, " else if (");
-            emit_expr(s, n->if_expr.elif_conds.items[i], depth);
+            sb_add(s, "__xs_truthy("); emit_expr(s, n->if_expr.elif_conds.items[i], depth); sb_addc(s, ')');
             sb_add(s, ") ");
             Node *et = n->if_expr.elif_thens.items[i];
             if (et && VAL_TAG(et) == NODE_BLOCK) {
@@ -1594,7 +1623,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "(function() { ");
         if (n->while_loop.label) sb_printf(s, "%s: ", n->while_loop.label);
         sb_add(s, "while (");
-        emit_expr(s, n->while_loop.cond, depth);
+        sb_add(s, "__xs_truthy("); emit_expr(s, n->while_loop.cond, depth); sb_addc(s, ')');
         sb_add(s, ") {\n");
         if (n->while_loop.body) {
             emit_block_body(s, n->while_loop.body, depth + 1);
@@ -2135,7 +2164,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     case NODE_IF: {
         sb_indent(s, depth);
         sb_add(s, "if (");
-        emit_expr(s, n->if_expr.cond, depth);
+        sb_add(s, "__xs_truthy("); emit_expr(s, n->if_expr.cond, depth); sb_addc(s, ')');
         sb_add(s, ") {\n");
         if (n->if_expr.then) {
             emit_block_body(s, n->if_expr.then, depth + 1);
@@ -2149,7 +2178,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_addc(s, '}');
         for (int i = 0; i < n->if_expr.elif_conds.len; i++) {
             sb_add(s, " else if (");
-            emit_expr(s, n->if_expr.elif_conds.items[i], depth);
+            sb_add(s, "__xs_truthy("); emit_expr(s, n->if_expr.elif_conds.items[i], depth); sb_addc(s, ')');
             sb_add(s, ") {\n");
             Node *et = n->if_expr.elif_thens.items[i];
             emit_block_body(s, et, depth + 1);
@@ -2180,7 +2209,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         if (n->while_loop.label) sb_printf(s, "%s: ", n->while_loop.label);
         sb_add(s, "while (");
-        emit_expr(s, n->while_loop.cond, depth);
+        sb_add(s, "__xs_truthy("); emit_expr(s, n->while_loop.cond, depth); sb_addc(s, ')');
         sb_add(s, ") {\n");
         if (n->while_loop.body) {
             emit_block_body(s, n->while_loop.body, depth + 1);
@@ -2967,6 +2996,54 @@ char *transpile_js(Node *program, const char *filename) {
     /* String helpers covering XS method names that don't have a 1:1 JS
        equivalent. Dispatched from emit NODE_METHOD_CALL when the receiver
        can't be statically narrowed. */
+    /* XS truthiness: 0 / "" / [] / {} / null are all falsy. JS treats
+       arrays / objects / "" differently, so route through this helper
+       whenever the runtime needs the XS rules. */
+    sb_add(&s, "const __xs_truthy = (v) => {\n");
+    sb_add(&s, "    if (v === null || v === undefined || v === false) return false;\n");
+    sb_add(&s, "    if (v === 0 || v === 0n) return false;\n");
+    sb_add(&s, "    if (typeof v === 'string') return v.length > 0;\n");
+    sb_add(&s, "    if (Array.isArray(v)) return v.length > 0;\n");
+    sb_add(&s, "    if (v instanceof Map) return v.size > 0;\n");
+    sb_add(&s, "    if (v instanceof Set) return v.size > 0;\n");
+    sb_add(&s, "    if (typeof v === 'object') {\n");
+    sb_add(&s, "        if (typeof v.tag === 'string') return true;\n");
+    sb_add(&s, "        for (const _k in v) return true; return false;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return true;\n");
+    sb_add(&s, "};\n");
+    /* type(v) -- XS reports semantic names (int/float/str/array/map/
+       null/bool), not JS typeof results. */
+    sb_add(&s, "const __xs_type = (v) => {\n");
+    sb_add(&s, "    if (v === null || v === undefined) return 'null';\n");
+    sb_add(&s, "    if (typeof v === 'boolean') return 'bool';\n");
+    sb_add(&s, "    if (typeof v === 'string') return 'str';\n");
+    sb_add(&s, "    if (typeof v === 'bigint') return 'int';\n");
+    sb_add(&s, "    if (typeof v === 'number') return Number.isInteger(v) ? 'int' : 'float';\n");
+    sb_add(&s, "    if (Array.isArray(v)) return 'array';\n");
+    sb_add(&s, "    if (v instanceof Map) return 'map';\n");
+    sb_add(&s, "    if (v && typeof v === 'object' && typeof v.tag === 'string') return 'enum';\n");
+    sb_add(&s, "    if (v && typeof v === 'object') {\n");
+    sb_add(&s, "        const ctor = v.constructor && v.constructor.name;\n");
+    sb_add(&s, "        return ctor && ctor !== 'Object' ? ctor : 'map';\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (typeof v === 'function') return 'fn';\n");
+    sb_add(&s, "    return 'unknown';\n");
+    sb_add(&s, "};\n");
+    /* ++ concat: arrays -> concat array, strings -> string, plain
+       maps -> merged map. Anything else -> stringified concat. */
+    sb_add(&s, "const __xs_concat = (a, b) => {\n");
+    sb_add(&s, "    if (Array.isArray(a) && Array.isArray(b)) return a.concat(b);\n");
+    sb_add(&s, "    if (typeof a === 'string' || typeof b === 'string') return __xs_repr(a) + __xs_repr(b);\n");
+    sb_add(&s, "    if (a instanceof Map && b instanceof Map) {\n");
+    sb_add(&s, "        const out = new Map(a); for (const [k, v] of b) out.set(k, v); return out;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (a && b && typeof a === 'object' && typeof b === 'object' && \n");
+    sb_add(&s, "        !Array.isArray(a) && !Array.isArray(b) && !a.tag && !b.tag) {\n");
+    sb_add(&s, "        return Object.assign({}, a, b);\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return __xs_repr(a) + __xs_repr(b);\n");
+    sb_add(&s, "};\n");
     sb_add(&s, "const __xs_chars = (s) => [...String(s)];\n");
     sb_add(&s, "const __xs_str_reverse = (s) => [...String(s)].reverse().join('');\n");
     sb_add(&s, "const __xs_contains = (a, b) => {\n");
