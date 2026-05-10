@@ -603,37 +603,44 @@ static void emit_expr(SB *s, Node *n, int depth) {
             break;
         }
         if (m && strcmp(m, "upper") == 0 && nargs == 0) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").toUpperCase()");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.upper === 'function') return __o.upper();");
+            sb_add(s, " return String(__o).toUpperCase(); })()");
             break;
         }
         if (m && strcmp(m, "lower") == 0 && nargs == 0) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").toLowerCase()");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.lower === 'function') return __o.lower();");
+            sb_add(s, " return String(__o).toLowerCase(); })()");
             break;
         }
         if (m && strcmp(m, "trim") == 0 && nargs == 0) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").trim()");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.trim === 'function') return __o.trim();");
+            sb_add(s, " return String(__o).trim(); })()");
             break;
         }
         if (m && strcmp(m, "starts_with") == 0 && nargs == 1) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").startsWith(");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.starts_with === 'function') return __o.starts_with(");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_addc(s, ')');
+            sb_add(s, "); return String(__o).startsWith(String(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ")); })()");
             break;
         }
         if (m && strcmp(m, "ends_with") == 0 && nargs == 1) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").endsWith(");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.ends_with === 'function') return __o.ends_with(");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_addc(s, ')');
+            sb_add(s, "); return String(__o).endsWith(String(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ")); })()");
             break;
         }
         if (m && strcmp(m, "is_a") == 0 && nargs == 1) {
@@ -650,21 +657,27 @@ static void emit_expr(SB *s, Node *n, int depth) {
            Python's str.replace behaviour); JS String.prototype.replace does
            the same when called with a string needle. */
         if (m && strcmp(m, "split") == 0 && nargs == 1) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").split(");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.split === 'function') return __o.split(");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_addc(s, ')');
+            sb_add(s, "); return String(__o).split(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, "); })()");
             break;
         }
         if (m && strcmp(m, "replace") == 0 && nargs == 2) {
-            sb_add(s, "String(");
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ").split(");
+            sb_add(s, "; if (typeof __o !== 'string' && __o && typeof __o.replace === 'function') return __o.replace(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[1], depth);
+            sb_add(s, "); return String(__o).split(");
             emit_expr(s, n->method_call.args.items[0], depth);
             sb_add(s, ").join(");
             emit_expr(s, n->method_call.args.items[1], depth);
-            sb_addc(s, ')');
+            sb_add(s, "); })()");
             break;
         }
         if (m && strcmp(m, "repeat") == 0 && nargs == 1) {
@@ -672,7 +685,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, "; const __n = ");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_add(s, "; if (typeof __o === 'string') return __o.repeat(__n < 0 ? 0 : __n); if (Array.isArray(__o)) { const r = []; for (let i = 0; i < __n; i++) for (const x of __o) r.push(x); return r; } return __o; })()");
+            sb_add(s, "; if (typeof __o === 'string') return __o.repeat(__n < 0 ? 0 : __n); if (Array.isArray(__o)) { const r = []; for (let i = 0; i < __n; i++) for (const x of __o) r.push(x); return r; }");
+            sb_add(s, " if (__o && typeof __o.repeat === 'function') return __o.repeat(__n);");
+            sb_add(s, " return __o; })()");
             break;
         }
         if (m && strcmp(m, "join") == 0 && nargs == 1) {
@@ -684,10 +699,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         if (m && strcmp(m, "reverse") == 0 && nargs == 0) {
             /* polymorphic: array .reverse() mutates and returns,
-               string needs codepoint-aware reversal */
+               string needs codepoint-aware reversal. Defer to a
+               user-defined .reverse() method first. */
             sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, "; return typeof __o === 'string' ? __xs_str_reverse(__o) : [...__o].reverse(); })()");
+            sb_add(s, "; if (typeof __o === 'string') return __xs_str_reverse(__o);");
+            sb_add(s, " if (Array.isArray(__o)) return [...__o].reverse();");
+            sb_add(s, " if (__o && typeof __o.reverse === 'function') return __o.reverse();");
+            sb_add(s, " return __o; })()");
             break;
         }
         /* Method calls forwarded as-is to the JS receiver. The argument
@@ -724,22 +743,38 @@ static void emit_expr(SB *s, Node *n, int depth) {
            figure out which slot is the lambda. We inline a callable
            check at runtime so both orderings transpile correctly. */
         if (m && (strcmp(m, "reduce") == 0 || strcmp(m, "fold") == 0) && nargs == 2) {
-            sb_add(s, "(() => { const __a0 = ");
+            sb_add(s, "(() => { const __o = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; if (!Array.isArray(__o) && __o && typeof __o.");
+            sb_add(s, m);
+            sb_add(s, " === 'function') return __o.");
+            sb_add(s, m);
+            sb_add(s, "(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, ", ");
+            emit_expr(s, n->method_call.args.items[1], depth);
+            sb_add(s, "); ");
+            sb_add(s, "const __a0 = ");
             emit_expr(s, n->method_call.args.items[0], depth);
             sb_add(s, "; const __a1 = ");
             emit_expr(s, n->method_call.args.items[1], depth);
             sb_add(s, "; const __fn = typeof __a0 === 'function' ? __a0 : __a1; "
-                      "const __init = typeof __a0 === 'function' ? __a1 : __a0; return ");
-            emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ".reduce(__fn, __init); })()");
+                      "const __init = typeof __a0 === 'function' ? __a1 : __a0; return __o.reduce(__fn, __init); })()");
             break;
         }
         /* arr.reduce(fn) (no init) -> JS .reduce(fn) */
         if (m && (strcmp(m, "reduce") == 0 || strcmp(m, "fold") == 0) && nargs == 1) {
+            sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, ".reduce(");
+            sb_add(s, "; if (!Array.isArray(__o) && __o && typeof __o.");
+            sb_add(s, m);
+            sb_add(s, " === 'function') return __o.");
+            sb_add(s, m);
+            sb_add(s, "(");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_addc(s, ')');
+            sb_add(s, "); return __o.reduce(");
+            emit_expr(s, n->method_call.args.items[0], depth);
+            sb_add(s, "); })()");
             break;
         }
         /* sort with no args sorts numerically; JS default sort is
@@ -761,17 +796,23 @@ static void emit_expr(SB *s, Node *n, int depth) {
         }
         /* `arr.keys()` on a Map -> [...m.keys()]; on an array, return
            the index array. Default JS .keys() returns an iterator, not
-           an array, which doesn't compare equal to [1,2,3]. */
+           an array, which doesn't compare equal to [1,2,3]. Defer to
+           a user-defined .keys() if one exists (class instance with a
+           method). */
         if (m && strcmp(m, "keys") == 0 && nargs == 0) {
             sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, "; if (__o instanceof Map) return [...__o.keys()]; if (Array.isArray(__o)) return [...__o.keys()]; return Object.keys(__o); })()");
+            sb_add(s, "; if (__o instanceof Map) return [...__o.keys()]; if (Array.isArray(__o)) return [...__o.keys()]; ");
+            sb_add(s, "if (typeof __o.keys === 'function') return __o.keys(); ");
+            sb_add(s, "return Object.keys(__o); })()");
             break;
         }
         if (m && strcmp(m, "values") == 0 && nargs == 0) {
             sb_add(s, "(() => { const __o = ");
             emit_expr(s, n->method_call.obj, depth);
-            sb_add(s, "; if (__o instanceof Map) return [...__o.values()]; if (Array.isArray(__o)) return [...__o]; return Object.values(__o); })()");
+            sb_add(s, "; if (__o instanceof Map) return [...__o.values()]; if (Array.isArray(__o)) return [...__o]; ");
+            sb_add(s, "if (typeof __o.values === 'function') return __o.values(); ");
+            sb_add(s, "return Object.values(__o); })()");
             break;
         }
         if (m && strcmp(m, "get") == 0 && nargs >= 1) {
@@ -803,7 +844,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, "; const __k = ");
             emit_expr(s, n->method_call.args.items[0], depth);
-            sb_add(s, "; if (__o instanceof Map) return __o.has(__k); return Object.prototype.hasOwnProperty.call(__o, __k); })()");
+            sb_add(s, "; if (__o instanceof Map) return __o.has(__k); ");
+            sb_add(s, "if (typeof __o.has === 'function') return __o.has(__k); ");
+            sb_add(s, "return Object.prototype.hasOwnProperty.call(__o, __k); })()");
             break;
         }
         /* `.to_str()` is the XS spelling. Route through __xs_repr so
@@ -1665,8 +1708,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
         emit_expr(s, n->expr_stmt.expr, depth);
         break;
     case NODE_WHILE:
-        /* while-as-expression -> IIFE */
-        sb_add(s, "(function() { ");
+        /* while-as-expression -> IIFE (arrow preserves enclosing this) */
+        sb_add(s, "(() => { ");
         if (n->while_loop.label) sb_printf(s, "%s: ", n->while_loop.label);
         sb_add(s, "while (");
         sb_add(s, "__xs_truthy("); emit_expr(s, n->while_loop.cond, depth); sb_addc(s, ')');
@@ -3042,8 +3085,8 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    if (typeof o === 'number' || typeof o === 'bigint' || typeof o === 'boolean')\n");
     sb_add(&s, "        throw __xs_err('type error', 'cannot index ' + typeof o);\n");
     sb_add(&s, "    if ((Array.isArray(o) || typeof o === \"string\") && typeof i === \"number\" && i < 0) i = o.length + i;\n");
-    sb_add(&s, "    if (o instanceof Map) return o.get(i);\n");
-    sb_add(&s, "    return o[i];\n");
+    sb_add(&s, "    if (o instanceof Map) { const r = o.get(i); return r === undefined ? null : r; }\n");
+    sb_add(&s, "    const r = o[i]; return r === undefined ? null : r;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_setidx = (o, i, v) => {\n");
     sb_add(&s, "    if (Array.isArray(o) && typeof i === \"number\" && i < 0) i = o.length + i;\n");
@@ -3393,7 +3436,18 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            case 'ends_with': return o.endsWith(String(args[0]));\n");
     sb_add(&s, "            case 'replace': case 'replace_all': {\n");
     sb_add(&s, "                const from = String(args[0]); const to = String(args[1] ?? '');\n");
+    /* optional 3rd arg caps replacements, matching the VM/interp */
+    sb_add(&s, "                if (args.length >= 3 && typeof args[2] === 'number') {\n");
+    sb_add(&s, "                    let n = Math.max(0, args[2]); let r = o;\n");
+    sb_add(&s, "                    while (n-- > 0) { const i = r.indexOf(from); if (i < 0) break; r = r.slice(0, i) + to + r.slice(i + from.length); }\n");
+    sb_add(&s, "                    return r;\n");
+    sb_add(&s, "                }\n");
     sb_add(&s, "                return o.split(from).join(to);\n");
+    sb_add(&s, "            }\n");
+    sb_add(&s, "            case 'replace_first': case 'replace_one': {\n");
+    sb_add(&s, "                const from = String(args[0]); const to = String(args[1] ?? '');\n");
+    sb_add(&s, "                const idx = o.indexOf(from);\n");
+    sb_add(&s, "                return idx < 0 ? o : o.slice(0, idx) + to + o.slice(idx + from.length);\n");
     sb_add(&s, "            }\n");
     sb_add(&s, "            case 'trim': return o.trim();\n");
     sb_add(&s, "            case 'trim_start': case 'trim_left': return o.trimStart();\n");

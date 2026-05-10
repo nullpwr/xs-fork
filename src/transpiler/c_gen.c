@@ -1602,6 +1602,51 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_arr_flatten(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "last_index_of") == 0 || strcmp(meth, "rfind") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __lo_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; xs_val __ln_%d = ", mid);
+            if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+            else sb_add(s, "XS_NULL");
+            sb_printf(s, "; long long __lr_%d = -1;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__lo_%d.tag == 2 && __lo_%d.s && __ln_%d.tag == 2 && __ln_%d.s && __ln_%d.s[0]) {\n",
+                      mid, mid, mid, mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "size_t __sl = strlen(__lo_%d.s); size_t __nl = strlen(__ln_%d.s);\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (__nl <= __sl) for (size_t __i = __sl - __nl + 1; __i-- > 0; ) {\n", 0);
+            sb_indent(s, depth+3);
+            sb_printf(s, "if (memcmp(__lo_%d.s + __i, __ln_%d.s, __nl) == 0) { __lr_%d = (long long)__i; break; }\n", mid, mid, mid);
+            sb_indent(s, depth+2); sb_add(s, "}\n");
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth); sb_printf(s, "XS_INT(__lr_%d); })", mid);
+        } else if (strcmp(meth, "replace_first") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __ro_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; xs_val __rn_%d = ", mid);
+            if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+            else sb_add(s, "XS_NULL");
+            sb_printf(s, "; xs_val __rr_%d = ", mid);
+            if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "XS_STR(\"\")");
+            sb_printf(s, "; xs_val __rresult = __ro_%d;\n", mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__ro_%d.tag == 2 && __ro_%d.s && __rn_%d.tag == 2 && __rn_%d.s && __rr_%d.tag == 2 && __rr_%d.s) {\n",
+                      mid, mid, mid, mid, mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "const char *__src = __ro_%d.s; const char *__nd = __rn_%d.s; const char *__rp = __rr_%d.s;\n", mid, mid, mid);
+            sb_indent(s, depth+2);
+            sb_add(s, "size_t __nl = strlen(__nd); const char *__hit = strstr(__src, __nd);\n");
+            sb_indent(s, depth+2);
+            sb_add(s, "if (__hit) { size_t __pre = __hit - __src; size_t __rl = strlen(__rp); size_t __sl = strlen(__src); ");
+            sb_add(s, "char *__buf = (char*)malloc(__sl - __nl + __rl + 1); memcpy(__buf, __src, __pre); ");
+            sb_add(s, "memcpy(__buf + __pre, __rp, __rl); strcpy(__buf + __pre + __rl, __hit + __nl); ");
+            sb_add(s, "__rresult = XS_STR(__buf); }\n");
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth); sb_add(s, "__rresult; })");
         } else if (strcmp(meth, "find_index") == 0 || strcmp(meth, "findIndex") == 0) {
             int mid = defer_label_counter++;
             sb_printf(s, "({ xs_val __ai_%d = ", mid);
@@ -1661,10 +1706,69 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_arr_is_empty(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "pad_left") == 0 || strcmp(meth, "lpad") == 0 ||
+                   strcmp(meth, "pad_start") == 0 ||
+                   strcmp(meth, "pad_right") == 0 || strcmp(meth, "rpad") == 0 ||
+                   strcmp(meth, "pad_end") == 0) {
+            int is_left = strcmp(meth, "pad_left") == 0 || strcmp(meth, "lpad") == 0 ||
+                          strcmp(meth, "pad_start") == 0;
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __ps_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; long long __pw_%d = ", mid);
+            if (n->method_call.args.len > 0) {
+                sb_add(s, "(long long)xs_to_f64(");
+                emit_expr(s, n->method_call.args.items[0], depth);
+                sb_addc(s, ')');
+            } else sb_add(s, "0");
+            sb_printf(s, "; xs_val __pf_%d = ", mid);
+            if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "XS_STR(\" \")");
+            sb_printf(s, "; xs_val __pr_%d = __ps_%d;\n", mid, mid);
+            sb_indent(s, depth+1);
+            sb_printf(s, "if (__ps_%d.tag == 2 && __ps_%d.s) {\n", mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "char __fc_%d = ' ';\n", mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if (__pf_%d.tag == 2 && __pf_%d.s && __pf_%d.s[0]) __fc_%d = __pf_%d.s[0];\n", mid, mid, mid, mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "else if (__pf_%d.tag == 0) __fc_%d = (char)__pf_%d.i;\n", mid, mid, mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "size_t __sl = strlen(__ps_%d.s);\n", mid);
+            sb_indent(s, depth+2);
+            sb_printf(s, "if ((long long)__sl < __pw_%d) {\n", mid);
+            sb_indent(s, depth+3);
+            sb_printf(s, "size_t __nl = (size_t)__pw_%d;\n", mid);
+            sb_indent(s, depth+3);
+            sb_add(s, "char *__buf = (char*)malloc(__nl + 1);\n");
+            if (is_left) {
+                sb_indent(s, depth+3);
+                sb_printf(s, "size_t __pad = __nl - __sl; for (size_t __i = 0; __i < __pad; __i++) __buf[__i] = __fc_%d; memcpy(__buf + __pad, __ps_%d.s, __sl);\n", mid, mid);
+            } else {
+                sb_indent(s, depth+3);
+                sb_printf(s, "memcpy(__buf, __ps_%d.s, __sl); for (size_t __i = __sl; __i < __nl; __i++) __buf[__i] = __fc_%d;\n", mid, mid);
+            }
+            sb_indent(s, depth+3);
+            sb_printf(s, "__buf[__nl] = 0; __pr_%d = XS_STR(__buf);\n", mid);
+            sb_indent(s, depth+2); sb_add(s, "}\n");
+            sb_indent(s, depth+1); sb_add(s, "}\n");
+            sb_indent(s, depth); sb_printf(s, "__pr_%d; })", mid);
         } else if (strcmp(meth, "trim") == 0) {
             sb_add(s, "xs_str_trim(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "trim_start") == 0 || strcmp(meth, "trim_left") == 0 ||
+                   strcmp(meth, "ltrim") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __ts_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; (__ts_%d.tag == 2 && __ts_%d.s) ? ({ const char *__p = __ts_%d.s; while (*__p == ' ' || *__p == '\\t' || *__p == '\\n' || *__p == '\\r') __p++; XS_STR(strdup(__p)); }) : __ts_%d; })", mid, mid, mid, mid);
+        } else if (strcmp(meth, "trim_end") == 0 || strcmp(meth, "trim_right") == 0 ||
+                   strcmp(meth, "rtrim") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __te_%d = ", mid);
+            emit_expr(s, n->method_call.obj, depth);
+            sb_printf(s, "; (__te_%d.tag == 2 && __te_%d.s) ? ({ size_t __l = strlen(__te_%d.s); while (__l > 0 && (__te_%d.s[__l-1] == ' ' || __te_%d.s[__l-1] == '\\t' || __te_%d.s[__l-1] == '\\n' || __te_%d.s[__l-1] == '\\r')) __l--; char *__r = (char*)malloc(__l + 1); memcpy(__r, __te_%d.s, __l); __r[__l] = 0; XS_STR(__r); }) : __te_%d; })", mid, mid, mid, mid, mid, mid, mid, mid, mid);
         } else if (strcmp(meth, "chars") == 0) {
             sb_add(s, "xs_str_chars(");
             emit_expr(s, n->method_call.obj, depth);
@@ -2285,7 +2389,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         else sb_add(s, "XS_NULL");
         break;
     case NODE_IF: {
-        /* if as expression: ternary */
+        /* if as expression: ternary chain — emit each elif as its own
+         * arm. Without this, an if-elif-else collapsed into the first
+         * cond plus the final else, dropping every middle branch. */
         sb_add(s, "(xs_truthy(");
         emit_expr(s, n->if_expr.cond, depth);
         sb_add(s, ") ? ");
@@ -2294,6 +2400,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else {
             sb_add(s, "XS_NULL");
         }
+        for (int ei = 0; ei < n->if_expr.elif_conds.len; ei++) {
+            sb_add(s, " : (xs_truthy(");
+            emit_expr(s, n->if_expr.elif_conds.items[ei], depth);
+            sb_add(s, ") ? ");
+            Node *eb = ei < n->if_expr.elif_thens.len ? n->if_expr.elif_thens.items[ei] : NULL;
+            if (eb && VAL_TAG(eb) == NODE_BLOCK && eb->block.expr)
+                emit_expr(s, eb->block.expr, depth);
+            else
+                sb_add(s, "XS_NULL");
+        }
         sb_add(s, " : ");
         if (n->if_expr.else_branch && VAL_TAG(n->if_expr.else_branch) == NODE_BLOCK
             && n->if_expr.else_branch->block.expr) {
@@ -2301,6 +2417,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else {
             sb_add(s, "XS_NULL");
         }
+        for (int ei = 0; ei < n->if_expr.elif_conds.len; ei++) sb_addc(s, ')');
         sb_addc(s, ')');
         break;
     }
@@ -4671,12 +4788,25 @@ char *transpile_c(Node *program, const char *filename) {
         "/* string methods */\n"
         "static xs_val xs_str_split(xs_val s, xs_val delim) {\n"
         "    if (s.tag != 2 || !s.s) return xs_array(0);\n"
+        "    const char *src = s.s;\n"
         "    const char *d = (delim.tag == 2 && delim.s) ? delim.s : \" \";\n"
+        "    size_t dl = strlen(d);\n"
         "    xs_val result = xs_array(0);\n"
-        "    char *copy = strdup(s.s);\n"
-        "    char *tok = strtok(copy, d);\n"
-        "    while (tok) { xs_arr_push(result, XS_STR(strdup(tok))); tok = strtok(NULL, d); }\n"
-        "    free(copy);\n"
+        "    if (dl == 0) {\n"
+        "        for (const char *p = src; *p; p++) { char buf[2] = {*p, 0}; xs_arr_push(result, XS_STR(strdup(buf))); }\n"
+        "        return result;\n"
+        "    }\n"
+        "    /* keep empty fields like Python's str.split: \"a,,b\".split(\",\") -> [\"a\", \"\", \"b\"]. */\n"
+        "    const char *p = src;\n"
+        "    while (1) {\n"
+        "        const char *hit = strstr(p, d);\n"
+        "        if (!hit) { xs_arr_push(result, XS_STR(strdup(p))); break; }\n"
+        "        size_t pl = (size_t)(hit - p);\n"
+        "        char *part = (char*)malloc(pl + 1);\n"
+        "        memcpy(part, p, pl); part[pl] = 0;\n"
+        "        xs_arr_push(result, XS_STR(part));\n"
+        "        p = hit + dl;\n"
+        "    }\n"
         "    return result;\n"
         "}\n\n"
         "static xs_val xs_str_upper(xs_val s) {\n"
@@ -5348,6 +5478,54 @@ char *transpile_c(Node *program, const char *filename) {
         }
     }
 
+    /* emit forward declarations BEFORE lambdas so a lambda body can
+     * reference any top-level fn or class/impl method. */
+    if (VAL_TAG(program) == NODE_PROGRAM) {
+        sb_add(&s, "/* function prototypes */\n");
+        for (int i = 0; i < program->program.stmts.len; i++) {
+            Node *st = program->program.stmts.items[i];
+            if (!st) continue;
+            if (VAL_TAG(st) == NODE_FN_DECL && !is_main_fn(st) && st->fn_decl.name) {
+                sb_add(&s, "static xs_val ");
+                char __mb[256];
+                const char *en = mangle_overload(st->fn_decl.name,
+                    st->fn_decl.params.len, __mb, sizeof __mb);
+                emit_safe_name(&s, en);
+                emit_params_c(&s, &st->fn_decl.params);
+                sb_add(&s, ";\n");
+                sb_printf(&s, "static xs_val __xs_wrap_%s(void *, xs_val *, int);\n",
+                          st->fn_decl.name);
+            } else if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name) {
+                for (int j = 0; j < st->class_decl.members.len; j++) {
+                    Node *mm = st->class_decl.members.items[j];
+                    if (mm && VAL_TAG(mm) == NODE_FN_DECL && mm->fn_decl.name) {
+                        sb_printf(&s, "xs_val %s_%s(xs_val", st->class_decl.name, mm->fn_decl.name);
+                        for (int p = 0; p < mm->fn_decl.params.len; p++) {
+                            const char *pn = mm->fn_decl.params.items[p].name;
+                            if (pn && strcmp(pn, "self") == 0) continue;
+                            sb_add(&s, ", xs_val");
+                        }
+                        sb_add(&s, ");\n");
+                    }
+                }
+            } else if (VAL_TAG(st) == NODE_IMPL_DECL && st->impl_decl.type_name) {
+                for (int j = 0; j < st->impl_decl.members.len; j++) {
+                    Node *mm = st->impl_decl.members.items[j];
+                    if (mm && VAL_TAG(mm) == NODE_FN_DECL && mm->fn_decl.name) {
+                        sb_printf(&s, "static xs_val %s_%s(xs_val", st->impl_decl.type_name, mm->fn_decl.name);
+                        for (int p = 0; p < mm->fn_decl.params.len; p++) {
+                            const char *pn = mm->fn_decl.params.items[p].name;
+                            if (pn && strcmp(pn, "self") == 0) continue;
+                            sb_add(&s, ", xs_val");
+                        }
+                        sb_add(&s, ");\n");
+                    }
+                }
+            }
+        }
+        sb_addc(&s, '\n');
+    }
+
     /* emit lambda static functions */
     for (int li = 0; li < n_lambdas; li++) {
         Node *ln = lambdas[li].node;
@@ -5411,25 +5589,6 @@ char *transpile_c(Node *program, const char *filename) {
                 }
             }
         }
-    }
-
-    /* emit forward declarations for pub functions (header-like) */
-    if (VAL_TAG(program) == NODE_PROGRAM) {
-        int has_pub = 0;
-        for (int i = 0; i < program->program.stmts.len; i++) {
-            Node *st = program->program.stmts.items[i];
-            if (st && VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.is_pub && !is_main_fn(st)) {
-                if (!has_pub) {
-                    sb_add(&s, "/* exported function prototypes */\n");
-                    has_pub = 1;
-                }
-                sb_add(&s, "xs_val ");
-                emit_safe_name(&s, st->fn_decl.name);
-                emit_params_c(&s, &st->fn_decl.params);
-                sb_add(&s, ";\n");
-            }
-        }
-        if (has_pub) sb_addc(&s, '\n');
     }
 
     if (needs_main_wrap) {

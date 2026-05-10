@@ -4257,13 +4257,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         j += n;
                     }
                     mc_result=arr;
-                } else if ((strcmp(mc_name,"replace")==0||strcmp(mc_name,"replace_all")==0)&&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR&&VAL_TAG(mc_args[1])==XS_STR) {
+                } else if ((strcmp(mc_name,"replace")==0||strcmp(mc_name,"replace_all")==0||
+                            strcmp(mc_name,"replace_first")==0||strcmp(mc_name,"replace_one")==0)
+                           &&mc_argc>=2&&VAL_TAG(mc_args[0])==XS_STR&&VAL_TAG(mc_args[1])==XS_STR) {
                     const char *from=mc_args[0]->s,*to=mc_args[1]->s;
                     size_t fl=strlen(from),tl=strlen(to);
                     /* Optional 3rd arg caps the number of replacements,
                        matching the interp. Without this `replace(x, y, 1)`
                        silently replaced every occurrence under --vm. */
-                    int max_replace = (mc_argc >= 3 && VAL_TAG(mc_args[2]) == XS_INT)
+                    int max_replace;
+                    if (strcmp(mc_name,"replace_first")==0||strcmp(mc_name,"replace_one")==0) max_replace = 1;
+                    else max_replace = (mc_argc >= 3 && VAL_TAG(mc_args[2]) == XS_INT)
                                        ? (int)VAL_INT(mc_args[2]) : -1;
                     size_t cap=strlen(s)*2+64; char *buf=xs_malloc(cap); size_t wpos=0;
                     const char *p3=s; const char *fnd2;

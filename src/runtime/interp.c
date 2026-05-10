@@ -1859,14 +1859,17 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
             }
             return arr;
         }
-        if (strcmp(method, "replace") == 0 || strcmp(method, "replace_all") == 0) {
+        if (strcmp(method, "replace") == 0 || strcmp(method, "replace_all") == 0 ||
+            strcmp(method, "replace_first") == 0 || strcmp(method, "replace_one") == 0) {
             if (argc < 2) return value_incref(obj);
             const char *from = (VAL_TAG(args[0])==XS_STR)?args[0]->s:"";
             const char *to   = (VAL_TAG(args[1])==XS_STR)?args[1]->s:"";
             int flen=(int)strlen(from), tlen=(int)strlen(to);
             if (flen == 0) return value_incref(obj);
             int max_replace = -1; /* -1 means replace all */
-            if (argc >= 3 && VAL_TAG(args[2]) == XS_INT) max_replace = (int)VAL_INT(args[2]);
+            if (strcmp(method, "replace_first") == 0 || strcmp(method, "replace_one") == 0)
+                max_replace = 1;
+            else if (argc >= 3 && VAL_TAG(args[2]) == XS_INT) max_replace = (int)VAL_INT(args[2]);
             /* count occurrences (up to max_replace if set) */
             int count=0; const char *p=s;
             while ((p=strstr(p,from))) { count++; p+=flen; if (max_replace>=0 && count>=max_replace) break; }
