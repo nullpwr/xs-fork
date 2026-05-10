@@ -964,8 +964,13 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
             } else {
                 compile_node(c, n->assign.value,  1);
                 if (want_value) {
+                    /* stack: col idx val. We need val on top after the
+                     * INDEX_SET so the assignment-as-expression yields
+                     * the assigned value. DUP first so INDEX_SET still
+                     * has its three operands. */
                     int tmp = local_add_hidden(c);
-                    emit_a(c, OP_STORE_LOCAL, tmp);
+                    emit(c, MAKE_A(OP_DUP, 0, 0));   /* col idx val val */
+                    emit_a(c, OP_STORE_LOCAL, tmp);  /* col idx val */
                     emit(c, MAKE_A(OP_INDEX_SET, 0, 0));
                     emit_a(c, OP_LOAD_LOCAL, tmp);
                 } else {

@@ -324,14 +324,32 @@ static Value *vm_abs(Interp *interp, Value **args, int argc) {
 
 static Value *vm_min(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 2) return argc > 0 ? value_incref(args[0]) : xs_null();
-    return value_cmp(args[0],args[1]) <= 0 ? value_incref(args[0]) : value_incref(args[1]);
+    if (argc == 0) return xs_null();
+    if (argc == 1 && VAL_TAG(args[0]) == XS_ARRAY) {
+        XSArray *a = args[0]->arr;
+        if (!a || a->len == 0) return xs_null();
+        Value *m = a->items[0];
+        for (int j = 1; j < a->len; j++) if (value_cmp(a->items[j], m) < 0) m = a->items[j];
+        return value_incref(m);
+    }
+    Value *m = args[0];
+    for (int j = 1; j < argc; j++) if (value_cmp(args[j], m) < 0) m = args[j];
+    return value_incref(m);
 }
 
 static Value *vm_max(Interp *interp, Value **args, int argc) {
     (void)interp;
-    if (argc < 2) return argc > 0 ? value_incref(args[0]) : xs_null();
-    return value_cmp(args[0],args[1]) >= 0 ? value_incref(args[0]) : value_incref(args[1]);
+    if (argc == 0) return xs_null();
+    if (argc == 1 && VAL_TAG(args[0]) == XS_ARRAY) {
+        XSArray *a = args[0]->arr;
+        if (!a || a->len == 0) return xs_null();
+        Value *m = a->items[0];
+        for (int j = 1; j < a->len; j++) if (value_cmp(a->items[j], m) > 0) m = a->items[j];
+        return value_incref(m);
+    }
+    Value *m = args[0];
+    for (int j = 1; j < argc; j++) if (value_cmp(args[j], m) > 0) m = args[j];
+    return value_incref(m);
 }
 
 static Value *vm_sqrt(Interp *interp, Value **args, int argc) {
@@ -2653,12 +2671,33 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             value_decref(super_inst);
                         }
                     }
-                    if (argc > 0 && fields->map->len > 0) {
+                    /* Positional arg -> field binding only happens when
+                     * the class has no init method. With an init defined,
+                     * the args go to init and shouldn't shadow defaults
+                     * field-by-field. */
+                    if (argc > 0 && fields->map->len > 0 &&
+                        !map_get(callee->map, "__methods") /* no methods at all */) {
                         int fi = 0;
-                        for (int j = 0; j < fields->map->cap && fi < argc; j++)
-                            if (fields->map->keys[j])
+                        for (int oi = 0; oi < fields->map->len && fi < argc; oi++) {
+                            int j = fields->map->order ? fields->map->order[oi] : oi;
+                            if (j < fields->map->cap && fields->map->keys[j])
                                 map_set(inst->map, fields->map->keys[j],
                                         value_incref(vm->sp[-argc + fi++]));
+                        }
+                    } else if (argc > 0 && fields->map->len > 0) {
+                        /* class has methods (incl. init?) — only do positional
+                         * binding if there's no init. */
+                        Value *m = map_get(callee->map, "__methods");
+                        int has_init = (m && VAL_TAG(m) == XS_MAP && map_has(m->map, "init"));
+                        if (!has_init) {
+                            int fi = 0;
+                            for (int oi = 0; oi < fields->map->len && fi < argc; oi++) {
+                                int j = fields->map->order ? fields->map->order[oi] : oi;
+                                if (j < fields->map->cap && fields->map->keys[j])
+                                    map_set(inst->map, fields->map->keys[j],
+                                            value_incref(vm->sp[-argc + fi++]));
+                            }
+                        }
                     }
                     Value *init_fn = map_get(inst->map, "init");
                     Value *ca_s[256], **ctor_args = argc <= 256 ? ca_s : malloc(argc * sizeof(Value*));

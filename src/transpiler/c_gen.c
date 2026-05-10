@@ -750,6 +750,11 @@ static void emit_expr(SB *s, Node *n, int depth) {
         } else if (is_boxed_var(n->ident.name)) {
             /* in enclosing scope: access through box */
             sb_printf(s, "(*__box_%s)", n->ident.name);
+        } else if (lookup_fn_param_count(n->ident.name) >= 0) {
+            /* bare reference to a top-level function: wrap as a callable
+             * xs_val so it can be passed to .map / .filter / etc. The
+             * wrapper is generated alongside the function itself. */
+            sb_printf(s, "xs_fn_new(__xs_wrap_%s, NULL)", n->ident.name);
         } else
             emit_safe_name(s, n->ident.name);
         break;
@@ -1134,7 +1139,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
                         dispatched_overload = 1;
                     }
                 }
-                if (!dispatched_overload) emit_expr(s, n->call.callee, depth);
+                if (!dispatched_overload) {
+                    /* In callee position, emit the C symbol name directly
+                     * even if it's a known fn (which would otherwise be
+                     * wrapped as xs_fn_new(__xs_wrap_X, ...)). */
+                    if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
+                        lookup_fn_param_count(n->call.callee->ident.name) >= 0)
+                        emit_safe_name(s, n->call.callee->ident.name);
+                    else
+                        emit_expr(s, n->call.callee, depth);
+                }
                 sb_addc(s, '(');
                 /* determine expected param count for padding */
                 int expected = -1;
@@ -1467,13 +1481,17 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
             else sb_add(s, "XS_NULL");
             sb_addc(s, ')');
-        } else if (strcmp(meth, "get") == 0) {
-            sb_add(s, "xs_index(");
+        } else if (strcmp(meth, "get") == 0 || strcmp(meth, "get_or") == 0) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __go_%d = xs_index(", mid);
             emit_expr(s, n->method_call.obj, depth);
             sb_add(s, ", ");
             if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
             else sb_add(s, "XS_NULL");
-            sb_addc(s, ')');
+            sb_printf(s, "); (__go_%d.tag == 4) ? ", mid);
+            if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+            else sb_add(s, "XS_NULL");
+            sb_printf(s, " : __go_%d; })", mid);
         } else if (strcmp(meth, "set") == 0 || strcmp(meth, "put") == 0) {
             sb_add(s, "xs_map_put(&");
             emit_expr(s, n->method_call.obj, depth);
@@ -3141,6 +3159,28 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             }
             sb_indent(s, depth);
             sb_add(s, "}\n\n");
+            /* emit a wrapper that adapts the typed C call signature to
+             * xs_call's (env, args, argc) so the function can be passed
+             * around as an xs_val. */
+            if (n->fn_decl.name && !is_main_fn(n)) {
+                int np = n->fn_decl.params.len;
+                sb_indent(s, depth);
+                sb_printf(s, "static xs_val __xs_wrap_%s(void *__env, xs_val *__args, int __argc) {\n",
+                          n->fn_decl.name);
+                sb_indent(s, depth + 1);
+                sb_add(s, "(void)__env; (void)__argc;\n");
+                sb_indent(s, depth + 1);
+                sb_add(s, "return ");
+                emit_safe_name(s, fn_emit_name);
+                sb_addc(s, '(');
+                for (int p = 0; p < np; p++) {
+                    if (p) sb_add(s, ", ");
+                    sb_printf(s, "(__argc > %d ? __args[%d] : XS_NULL)", p, p);
+                }
+                sb_add(s, ");\n");
+                sb_indent(s, depth);
+                sb_add(s, "}\n\n");
+            }
         }
         break;
     }
