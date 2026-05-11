@@ -1,5 +1,119 @@
 # Changelog
 
+## 1.2.4
+
+Two paper cuts from the post-1.2.3 bug list.
+
+`--emit wasm` now writes the binary to stdout when stdout isn't a tty,
+matching `--emit js` and `--emit c`. So
+`xs --emit wasm fib.xs > fib.wasm` Just Works. Interactive runs still
+drop a fresh `out.wasm`, with the status line moved to stderr.
+
+`xs test <dir>` no longer prints "0 passed, 0 failed, 0 total" and
+exits 0 when the directory has `.xs` files but none match
+`test_*.xs` or `*_test.xs`. The runner reports
+"No tests found in <dir>" and the expected filename patterns,
+matching the per-file "No #[test] functions found" hint that was
+already there.
+
+## 1.2.3
+
+Three bugs that came up after 1.2.2 shipped.
+
+The HTTP response status line was always rendering "OK" as the reason
+phrase regardless of code -- a 404 came out as `HTTP/1.1 404 OK`. The
+format string in `builtins_http.c` was hardcoded; the formatter now
+runs through `http_status_text(code)` so the phrase tracks the code.
+
+`@every` / `@cron` / `@watch` / `@on_signal` triggers stopped firing
+once a script entered `http.serve` because the accept loop never
+yielded back to the trigger event loop. The accept loop now uses a
+100ms `select` timeout and pumps `trigger_pump_due` (one pass each
+of `pump_signals` + `check_watches` + `fire_due`) every iteration.
+
+The wasm bump allocator was dropping `memory.grow`'s return value and
+only ever growing one page per call. Tight recursion like `fib(32)`
+under Node WASI walked off the end of linear memory and segfaulted in
+the host. The grow path now loops until the new `heap_ptr` fits, traps
+explicitly via `unreachable` if `memory.grow` returns -1, and the
+initial memory section moved from 2 pages to 16 (1 MB) so the common
+case skips the grow entirely. `fib(32)` completes correctly under
+both Node WASI and wasmtime.
+
+Plus: `build_plugin_map` is now in `interp.h` and the VM's plugin
+loader uses it, so `plugin.lexer` / `plugin.parser` / `plugin.hooks`
+/ `plugin.ast` are available under `--vm` and `--jit` (previously
+only `--interp` exposed them; `plugin.parser.on_unknown(...)` would
+crash on the default backend).
+
+## 1.2.2
+
+Big surface-level pass on the language to push parity across all four
+backends and add the long-promised wrapping decorators.
+
+**`__str__` / `value_repr`.** Instances now print through `__str__`
+when defined; `value_repr` produces the canonical form that round-trips
+through `xs_eval`. `str.format("{}", obj)` and `println(obj)` agree.
+
+**Wrapping decorators.** `@memoize`, `@retry`, `@trace`, `@timed`
+work on every backend. The compiler builds a wrapper map carrying
+`_wrap_kind` + `_wrap_fn` + decorator args, and `call_value` /
+`OP_CALL` recognise it before reaching for the underlying fn.
+
+**VM typed-collection methods + bigint promotion.** `OP_METHOD_CALL`
+dispatches on the receiver's tag instead of falling through to a
+generic native, picking up `arr.sum`, `arr.fold`, `m.entries`,
+`s.chars` etc. directly. Integer arithmetic that overflows promotes
+to `bigint` rather than silently wrapping.
+
+**Predicate-aware methods + alias fan-out.** `arr.find(p)`,
+`arr.partition(p)`, `arr.first / last / take_while / drop_while`
+take callable predicates everywhere. `arr.head` / `arr.tail` /
+`arr.init` are aliases for the natural shape on every backend.
+
+**JS transpile foundation + second pass.** Stdlib polyfills for
+`json`, `math`, `time`, `random`, `collections`, plus `range`. Format
+spec `f"{x:0.2f}"` lowers through `__xs_fmt_float`. Match arm guards,
+tuple/enum patterns, trait dispatch (`__traits` map), `arr.partition`
+/ `arr.zip` / `arr.chunk` / `arr.window` / `arr.scan`, `Set` wrapper
+with insertion order, `str.lines` / `str.indent` / `str.dedent`
+shaped exactly like the C runtime.
+
+**C transpile foundation.** `arr.first/head/last/tail/init`,
+`arr.sum/product/avg`, `take`/`drop`/`unique`/`enumerate`,
+`fold(init, fn)` (alongside `reduce` with the args-swapped ordering),
+`str.bytes` / `str.reverse`, `parse_int` routed through
+`xs_conv_to_int`. The `xs_to_str` rotating buffer pool grew from 8
+to 256 entries so deep nesting (lists of tuples) no longer wraps
+back onto the outer buffer. `math.*` / `json.*` / `m.get/set/clone`
+dispatch matches the interp.
+
+**Transpile parity sweep.** Closures over let-rebound captures copy
+the slot at lambda emission rather than reading the slot post-hoc.
+Defer ordering inside try/catch matches the runtime. `arr.group_by`
+returns a Map (keeps insertion order; the prior plain-object form
+lost numeric-key ordering). `yield*` for delegated iterables.
+`{ ..a, x: 1 }` spread preserves order. `/.../` regex literals route
+to the embedded Thompson NFA on both targets.
+
+**VM bugs the parity sweep flushed out.** `OP_CALL_KW` raises on an
+unknown kwarg. Channel buffered send + close drain in the right order
+under contention. Nursery cancellation rethrows in a sibling task that
+was inside a defer. BigInt sign on mixed-sign multiply / divmod.
+Merge-sort stability tightened with `<=` on the left-half compare.
+
+**JS shadow-fix pass.** The "fast path" for known-shape receivers
+(`arr.map` -> `Array#map`, `s.split` -> `String#split`, etc.) now
+probes `typeof __o.method === 'function'` first, so a user type
+defining `map` / `split` / `replace` / `to_str` / etc. wins over the
+host built-in.
+
+**bug055 portability.** The VM-method-error span regression test now
+skips on `wasi` (no fork, no `/tmp`) and `windows` (the inline
+`NO_COLOR=1 ./xs ...` form cmd.exe doesn't parse), and sets
+`NO_COLOR` via `os.setenv` so the child inherits it portably. Added
+`os.platform == "wasi"` detection in `builtins_os.c`.
+
 ## 1.2.1
 
 Cleared the v1.2 deferred queue plus a friend-feedback batch.
