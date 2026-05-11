@@ -3267,7 +3267,12 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
    The body buf should NOT include the end opcode - we add it. */
 
 /* $alloc(size: i32) -> i32
-   Bump allocator. Returns pointer, advances heap. */
+   Bump allocator. Returns pointer, advances heap.
+   Grows linear memory in a loop until the new heap_ptr fits, and
+   traps if memory.grow returns -1 (OOM). The original single-shot
+   grow would underflow on alloc requests larger than one page and
+   silently dropped grow failures, which let the program write past
+   the end of linear memory and segfault under Node WASI. */
 static void emit_rt_alloc(WasmBuf *body) {
     /* local 0 = size (param) */
     /* result = global heap_ptr */
@@ -3282,19 +3287,31 @@ static void emit_rt_alloc(WasmBuf *body) {
     buf_byte(body, OP_I32_AND);
     buf_byte(body, OP_I32_ADD);
     emit_global_set(body, GLOBAL_HEAP_PTR);
-    /* Check if we need to grow memory */
-    emit_global_get(body, GLOBAL_HEAP_PTR);
-    buf_byte(body, OP_MEMORY_SIZE);
-    buf_leb128_u(body, 0);
-    emit_i32(body, 16); /* pages -> bytes shift */
-    buf_byte(body, OP_I32_SHL);
-    buf_byte(body, OP_I32_GT_U);
-    buf_byte(body, OP_IF);
+    /* loop: while (heap_ptr > memory_size_bytes) memory.grow(1); */
+    buf_byte(body, OP_LOOP);
     buf_byte(body, WASM_TYPE_VOID);
-    emit_i32(body, 1);
-    buf_byte(body, OP_MEMORY_GROW);
-    buf_leb128_u(body, 0);
-    buf_byte(body, OP_DROP);
+        emit_global_get(body, GLOBAL_HEAP_PTR);
+        buf_byte(body, OP_MEMORY_SIZE);
+        buf_leb128_u(body, 0);
+        emit_i32(body, 16); /* pages -> bytes shift */
+        buf_byte(body, OP_I32_SHL);
+        buf_byte(body, OP_I32_GT_U);
+        buf_byte(body, OP_IF);
+        buf_byte(body, WASM_TYPE_VOID);
+            emit_i32(body, 1);
+            buf_byte(body, OP_MEMORY_GROW);
+            buf_leb128_u(body, 0);
+            /* memory.grow returns -1 on failure; trap rather than
+               continue with a corrupt heap. */
+            emit_i32(body, -1);
+            buf_byte(body, OP_I32_EQ);
+            buf_byte(body, OP_IF);
+            buf_byte(body, WASM_TYPE_VOID);
+                buf_byte(body, OP_UNREACHABLE);
+            buf_byte(body, OP_END);
+            buf_byte(body, OP_BR);
+            buf_leb128_u(body, 1); /* continue the outer loop */
+        buf_byte(body, OP_END);
     buf_byte(body, OP_END);
     /* Return saved heap_ptr (already on stack from first global.get) */
 }
@@ -6493,7 +6510,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         buf_init(&sec);
         buf_leb128_u(&sec, 1);
         buf_byte(&sec, 0x00); /* min only */
-        buf_leb128_u(&sec, 2); /* 2 pages = 128KB */
+        buf_leb128_u(&sec, 16); /* 16 pages = 1MB initial */
         buf_section(&output, 5, &sec);
         buf_free(&sec);
     }

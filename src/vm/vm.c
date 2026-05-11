@@ -6,6 +6,7 @@
 #include "core/limits.h"
 #include "runtime/builtins.h"
 #include "runtime/error.h"
+#include "runtime/interp.h"
 #include "runtime/triggers.h"
 #include "runtime/concurrent.h"
 #include "optimizer/inline_cache.h"
@@ -939,15 +940,24 @@ static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     free(src);
     if (!prog) return xs_null();
 
-    /* set up plugin object in globals */
+    /* set up plugin object in globals - lexer/parser/runtime/ast/hooks
+       come from the same builder the interp uses; the two slots that the
+       VM-side plugin needs to handle differently (global.set + add_method,
+       which receive an extra self-arg under method-call lowering) get
+       overwritten with VM-aware versions afterwards */
     Value *plugin = xs_map_new();
-    Value *runtime = xs_map_new();
-    Value *global_obj = xs_map_new();
-    { Value *v = xs_native(vm_plugin_global_set); map_set(global_obj->map, "set", v); value_decref(v); }
-    { Value *v = xs_str("plugin_global"); map_set(global_obj->map, "__type", v); value_decref(v); }
-    map_set(runtime->map, "global", global_obj); value_decref(global_obj);
-    { Value *v = xs_native(vm_plugin_add_method); map_set(runtime->map, "add_method", v); value_decref(v); }
-    map_set(plugin->map, "runtime", runtime); value_decref(runtime);
+    build_plugin_map(plugin);
+    Value *runtime = map_get(plugin->map, "runtime");
+    Value *global_obj = runtime ? map_get(runtime->map, "global") : NULL;
+    if (global_obj) {
+        { Value *v = xs_native(vm_plugin_global_set); map_set(global_obj->map, "set", v); value_decref(v); }
+        { Value *v = xs_str("plugin_global"); map_set(global_obj->map, "__type", v); value_decref(v); }
+    }
+    if (runtime) {
+        Value *v = xs_native(vm_plugin_add_method);
+        map_set(runtime->map, "add_method", v);
+        value_decref(v);
+    }
     Value *meta = xs_map_new();
     map_set(plugin->map, "meta", meta); value_decref(meta);
     map_set(g_plugin_vm->globals, "plugin", plugin); value_decref(plugin);

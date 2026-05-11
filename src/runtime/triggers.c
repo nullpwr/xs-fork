@@ -610,6 +610,19 @@ static void sleep_ns(int64_t ns) {
 #endif
 }
 
+void trigger_pump_due(Interp *i) {
+    if (!has_persistent_triggers()) return;
+    /* Ensure entries that haven't been seen by the loop yet (e.g.
+       registered just before a long-running native call) have their
+       next_fire_ns computed. */
+    (void)soonest_fire_ns(now_mono_ns());
+    trigger_pump_signals(i);
+    if (g_trigger_loop_aborted) return;
+    check_watches(i);
+    if (g_trigger_loop_aborted) return;
+    fire_due(i, now_mono_ns());
+}
+
 void trigger_run_event_loop(Interp *i) {
     if (!has_persistent_triggers()) return;
     g_trigger_loop_aborted = 0;

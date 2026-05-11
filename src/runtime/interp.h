@@ -175,4 +175,9 @@ Value *builtin_debug_to_string(Interp *i, Value **args, int argc);
 Value *builtin_clone(Interp *i, Value **args, int argc);
 Value *builtin_struct_eq(Interp *i, Value **args, int argc);
 
+/* populates plugin.lexer/parser/runtime/ast/teardown/requires on the
+   passed map so VM and JIT plugin loaders surface the same API the
+   interp does */
+void build_plugin_map(Value *plugin_map);
+
 #endif

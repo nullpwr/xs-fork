@@ -71,4 +71,11 @@ void trigger_pump_signals(Interp *i);
    Returns when the registry has nothing live left. */
 void trigger_run_event_loop(Interp *i);
 
+/* One pass of the periodic trigger machinery. Fires any @every /
+   @cron / @delayed entries that are due, runs @watch checks, and
+   drains the @on_signal pending flags. Long-running native loops
+   (e.g. http.serve) call this between iterations so registered
+   triggers don't starve. */
+void trigger_pump_due(Interp *i);
+
 #endif

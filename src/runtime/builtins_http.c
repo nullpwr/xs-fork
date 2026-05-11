@@ -5,6 +5,7 @@
 #include "runtime/builtins.h"
 #include "net/http_server.h"
 #include "runtime/concurrent.h"
+#include "runtime/triggers.h"
 #include "core/value.h"
 #include "runtime/error.h"
 #include <stdlib.h>
@@ -259,8 +260,20 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
     for (;;) {
         struct sockaddr_in cli = {0};
         socklen_t clen = sizeof cli;
-        /* Release the GIL while waiting for a connection so spawned
-           XS tasks can run; reacquire on accept return. */
+        /* Wait for a connection with a short timeout so the periodic
+           trigger machinery (@every / @cron / @watch / @on_signal)
+           keeps ticking. The GIL is released for the wait so any
+           spawned XS tasks can run; trigger callbacks fire under
+           the GIL once select returns. */
+        fd_set rset; FD_ZERO(&rset); FD_SET(lfd, &rset);
+        struct timeval tv = { 0, 100 * 1000 };
+        xs_gil_release();
+        int sel = select(lfd + 1, &rset, NULL, NULL, &tv);
+        xs_gil_acquire();
+        if (sel == 0) { trigger_pump_due(ig); continue; }
+        if (sel < 0)  { if (errno == EINTR) { trigger_pump_due(ig); continue; }
+                        perror("select"); break; }
+        trigger_pump_due(ig);
         xs_gil_release();
         int cfd = accept(lfd, (struct sockaddr *)&cli, &clen);
         xs_gil_acquire();
@@ -410,10 +423,10 @@ static Value *native_http_serve(Interp *ig, Value **a, int n) {
         char resp_hdr[1024];
         int rbody_len = (int)strlen(rbody);
         int hlen = snprintf(resp_hdr, sizeof resp_hdr,
-            "HTTP/1.1 %d OK\r\n"
+            "HTTP/1.1 %d %s\r\n"
             "Content-Length: %d\r\n"
             "Connection: close\r\n",
-            status, rbody_len);
+            status, http_status_text(status), rbody_len);
         if (rheaders) {
             int nk = 0; char **ks = map_keys(rheaders, &nk);
             for (int k = 0; k < nk && hlen < (int)sizeof resp_hdr - 64; k++) {

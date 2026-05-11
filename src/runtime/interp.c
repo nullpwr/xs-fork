@@ -8370,7 +8370,7 @@ static Node *plugin_try_parser_override_impl(Parser *p, const char *keyword) {
     return NULL;
 }
 
-static void build_plugin_map(Value *plugin_map) {
+void build_plugin_map(Value *plugin_map) {
     /* plugin.lexer */
     Value *lexer_map = xs_map_new();
     map_take(lexer_map->map, "add_keyword", xs_native(native_plugin_add_keyword));
