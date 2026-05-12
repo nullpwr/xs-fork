@@ -1,8 +1,0 @@
-[package]
-name = "xs-diff"
-version = "0.1.0"
-license = "Apache-2.0"
-description = "line-level diff with unified-diff output"
-
-[lib]
-path = "src/lib.xs"

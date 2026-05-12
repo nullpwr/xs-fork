@@ -1,9 +1,0 @@
-[package]
-name = "xs-cli-args"
-version = "0.1.0"
-authors = ["xs-lang0 <xslang.090@gmail.com>"]
-license = "Apache-2.0"
-description = "declarative argv parser with subcommands"
-
-[lib]
-path = "src/lib.xs"
