@@ -1201,6 +1201,10 @@ int main(int argc, char **argv) {
                         fprintf(stderr, "xs run: failed to load %s\n", run_path);
                         return 1;
                     }
+                    int run_file_arg = sub_idx + 1;
+                    if (run_file_arg + 1 <= argc)
+                        xs_set_user_args(argc - run_file_arg - 1,
+                                         argv + run_file_arg + 1);
                     VM *vm = vm_new();
                     vm_run(vm, proto);
                     vm_drain_tasks();
@@ -1212,9 +1216,15 @@ int main(int argc, char **argv) {
                     return 1;
 #endif
                 } else {
-                    /* treat as .xs source file, run via interpreter */
+                    /* treat as .xs source file, run via interpreter.
+                       The bare `xs file.xs ...` path sets user args
+                       at the bottom of arg parsing; the goto skips
+                       over that so we have to do it here too. */
                     filename = run_path;
                     file_arg = sub_idx + 1;
+                    if (file_arg + 1 <= argc)
+                        xs_set_user_args(argc - file_arg - 1,
+                                         argv + file_arg + 1);
                     goto run_file;
                 }
             }
