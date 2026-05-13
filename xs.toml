@@ -1,6 +1,6 @@
 [package]
 name = "xs"
-version = "1.2.5"
+version = "1.2.6"
 xs_version = ">=0.3.0"
 description = "The XS programming language"
 license = "Apache-2.0"

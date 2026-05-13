@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.6
+
+A plugin that uses `plugin.lexer.add_keyword` /
+`plugin.parser.on_unknown` / `plugin.parser.on_postfix` /
+`plugin.parser.override` / `plugin.lexer.transform` registered the
+hooks under `--vm` and `--jit`, but the main program had already
+been parsed before the `load` ran, so the new keyword token never
+went through `on_unknown` and the constructed AST node was never
+spliced into the program. The interp's re-parse loop is the only
+place that reflows the source after a plugin registers handlers,
+so syntax-extending plugins now force the interp fallback the same
+way runtime-hook plugins (`after_eval`, `before_eval`, `ast_hook`)
+already did. Plugins that only call `plugin.runtime.global.set` or
+`plugin.runtime.add_method` keep running on the VM at full speed.
+
 ## 1.2.5
 
 `xs run file.xs foo bar` was swallowing the trailing args -- the
