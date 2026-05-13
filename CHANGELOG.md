@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.7
+
+`xs fmt` was emitting every NODE_BINOP as `left op right` with no
+parentheses, so `(x ?? 1) + 2` round-tripped to `x ?? 1 + 2`.
+Those don't parse the same: the second form groups as
+`x ?? (1 + 2)` because `??` has prec 3 and `+` has prec 12, so a
+non-null x makes the program return `x` instead of `x + 2`.
+Silent semantic change. fmt.c now mirrors parser.c's `prec_of()`
+and parenthesises a binop child whose precedence is lower than
+the parent (left side) or lower-or-equal (right side; XS binops
+are all left-associative). Idempotent on already-formatted
+output.
+
+The bytecode VM materialises generators eagerly: OP_YIELD pushes
+into a per-frame array and the body runs to completion. Infinite
+generators (`while true { yield ... }`) used to climb forever
+and OOM-kill the process. Capped at 1M values with a
+GeneratorOverflow that points at `--interp` (which already runs
+generators on a real worker thread with channel handoff).
+Lazy yield/resume on the VM is tracked for v1.3.
+
 ## 1.2.6
 
 A plugin that uses `plugin.lexer.add_keyword` /
