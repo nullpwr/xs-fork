@@ -6426,6 +6426,25 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_YIELD: {
             Value *val = POP();
             if (frame->is_generator && frame->yield_arr) {
+                /* Eager accumulation: the VM has no real coroutine path
+                   yet, so the body runs to completion and every yield
+                   lands in this array. Cap at 1M values so an infinite
+                   `while true { yield ... }` produces an actionable
+                   error instead of OOM-killing the process. The interp
+                   spawns a real worker thread per generator (channel
+                   handoff via xs_spawn_generator) and stays lazy --
+                   point users there until the VM grows the same path. */
+                if (frame->yield_arr->arr->len >= 1000000) {
+                    value_decref(val);
+                    fprintf(stderr,
+                        "xs: error: generator yielded > 1M values; "
+                        "the bytecode VM materialises generators eagerly. "
+                        "Re-run with --interp for lazy yield/resume, "
+                        "or break out before the cap.\n");
+                    extern int g_xs_runtime_error_count;
+                    g_xs_runtime_error_count++;
+                    return 1;
+                }
                 array_push(frame->yield_arr->arr, val);
                 frame->yield_index++;
             } else {
