@@ -284,8 +284,12 @@ release: CFLAGS = -O3 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/t
 # LTO re-runs maybe-uninitialized analysis across TUs; the bearssl
 # AES path trips a false positive once the interleave helpers get
 # inlined. The compile-time suppression is in the per-file rule above;
-# mirror it at link time so LTO stays quiet too.
-release: LDFLAGS += -flto $(STRIP_FLAG) -Wno-maybe-uninitialized
+# mirror it at link time so LTO stays quiet too. Apple's linker rejects
+# -Wno-* flags, so feed them through gcc only on non-darwin.
+release: LDFLAGS += -flto $(STRIP_FLAG)
+ifneq ($(shell uname -s),Darwin)
+release: LDFLAGS += -Wno-maybe-uninitialized
+endif
 release: clean $(TARGET)
 
 test: $(TARGET)

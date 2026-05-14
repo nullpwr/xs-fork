@@ -529,7 +529,7 @@ static void lint_block(XSLint *l, Node *n) {
         lint_node(l, n->block.stmts.items[i]);
     }
     if (n->block.expr) {
-        NodeTag t = VAL_TAG(n->block.expr);
+        NodeTag t = n->block.expr->tag;
         if (t == NODE_FOR || t == NODE_WHILE || t == NODE_LOOP ||
             t == NODE_IF  || t == NODE_MATCH || t == NODE_TRY ||
             t == NODE_BLOCK)
