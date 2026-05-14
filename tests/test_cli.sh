@@ -116,6 +116,17 @@ else
     echo "  FAIL  build produces .xsc file"
 fi
 
+# REPL basic eval
+check_output "repl basic expr" "=> 2" sh -c 'printf "1 + 1\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl let no print" "=> 84" sh -c 'printf "let x = 42\nx * 2\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl multiline fn" "=> 7" sh -c 'printf "fn add(a, b) {\n  a + b\n}\nadd(3, 4)\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl error recovery" "=> 2" sh -c 'printf "this_is_undefined\n1 + 1\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl banner" "xs 1." sh -c 'printf ":q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl no-arg launches repl" "xs 1." sh -c 'printf ":q\n" | NO_COLOR=1 ./xs'
+check_output "repl :help" ":quit" sh -c 'printf ":h\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl :t int" "int" sh -c 'printf ":t 42\n:q\n" | NO_COLOR=1 ./xs repl'
+check_output "repl unknown cmd" "try :help" sh -c 'printf ":bogus\n:q\n" | NO_COLOR=1 ./xs repl 2>&1'
+
 # explain
 check_output "explain T0001" "mismatched types" ./xs explain T0001
 

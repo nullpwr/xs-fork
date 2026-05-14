@@ -97,6 +97,7 @@
 
 #include "optimizer/optimizer.h"
 #include "ir/ir.h"
+#include "repl/repl.h"
 
 int g_no_color = 0;
 
@@ -609,6 +610,7 @@ static void usage(void) {
         "  remove <pkg>                  Remove a dependency\n"
         "  publish                       Publish current package to the registry\n"
         "  search <query>                Search the package registry\n"
+        "  repl                          Start an interactive REPL\n"
         "  upgrade [--yes]               Replace this binary with the latest release\n"
         "  uninstall [--yes] [--with-data]  Remove xs from the system\n"
         "  explain <code>                Explain an error code\n"
@@ -1006,6 +1008,16 @@ int main(int argc, char **argv) {
                                "Print the username/email associated with the stored token.\n")
                 H("search",    "Usage: xs search <query>\n\n"
                                "Search the XS package registry.\n")
+                H("repl",      "Usage: xs repl\n\n"
+                               "Start an interactive REPL. Bindings persist across lines.\n\n"
+                               "Meta-commands:\n"
+                               "  :help, :h         show available commands\n"
+                               "  :quit, :q         exit\n"
+                               "  :env              list bindings in scope\n"
+                               "  :clear            reset to a fresh interpreter\n"
+                               "  :t <expr>         show the type of an expression\n\n"
+                               "Multi-line input: keep typing after an open (, [, or { and\n"
+                               "the REPL will continue with a '.. ' prompt until balanced.\n")
                 H("upgrade",   "Usage: xs upgrade [--yes]\n\n"
                                "Download the latest xs binary and replace this one.\n\n"
                                "Options:\n"
@@ -1135,10 +1147,8 @@ int main(int argc, char **argv) {
     }
 
     if (argc == 1) {
-        usage();
-        fflush(stdout);
         cache_free(g_sema_cache);
-        return 0;
+        return xs_repl_run(g_no_color);
     }
 
     /* Find subcommand: first non-flag argument */
@@ -2060,6 +2070,11 @@ test_again: ;
             fprintf(stderr, "xs search: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
             return 1;
 #endif
+
+        } else if (strcmp(sub, "repl") == 0) {
+            for (int _i = 1; _i < argc; _i++)
+                if (strcmp(argv[_i], "--no-color") == 0) g_no_color = 1;
+            return xs_repl_run(g_no_color);
 
         } else if (strcmp(sub, "upgrade") == 0) {
             return xs_self_upgrade(sub_argc, &argv[sub_idx + 1]);

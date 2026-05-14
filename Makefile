@@ -136,7 +136,8 @@ TOOL_SRCS = src/fmt/fmt.c \
             src/optimizer/optimizer.c \
             src/optimizer/ssa.c \
             src/optimizer/inline_cache.c \
-            src/ir/ir.c
+            src/ir/ir.c \
+            src/repl/repl.c
 
 DB_SRCS = src/db/xsdb.c
 

@@ -118,43 +118,54 @@ Prompts for confirmation by default. Use `--yes` or `-y` to skip.
 
 ## Interactive REPL
 
-### `xs` (no arguments)
+### `xs` (no arguments) / `xs repl`
 
-When stdin is a TTY, start the interactive Read-Eval-Print Loop. With
-stdin redirected from a non-tty (a script, a pipe), the binary prints
-the usage banner and exits.
+Start the interactive Read-Eval-Print Loop. Bindings persist across lines
+for the duration of the session.
 
 ```bash
-xs                       # REPL when stdin is a tty
-echo 'println(1)' | xs   # one-off, then exits
+xs                       # launch REPL
+xs repl                  # same
+printf '1 + 1\n:q\n' | xs repl  # pipe input, exit
 ```
 
-**REPL commands:**
+Expression results print automatically, prefixed with `=> `. Declarations
+(let, fn, struct, etc.) are registered silently.
+
+```
+xs 1.2.9
+type :help for commands, :quit to exit (or Ctrl-D)
+>> let x = 10
+>> x * 3
+=> 30
+>> fn square(n) { n * n }
+>> square(7)
+=> 49
+```
+
+**Multi-line input**: keep typing after an unclosed `(`, `[`, or `{`.
+The prompt switches to `.. ` until delimiters balance.
+
+```
+>> fn add(a, b) {
+..   a + b
+.. }
+>> add(3, 4)
+=> 7
+```
+
+**Meta-commands:**
 
 | Command | Description |
 |---------|-------------|
-| `:help` | Show available commands |
-| `:reset` | Clear all bindings, create fresh interpreter |
-| `:env` | List all global bindings with types |
-| `:type <expr>` | Show the inferred type of an expression |
-| `:ast <expr>` | Show the AST for an expression |
-| `:time <expr>` | Evaluate expression and show execution time |
-| `:doc <name>` | Show documentation for a function/module |
-| `:load <file>` | Load and execute a file in the current session |
-| `:save <file>` | Save REPL history to a file |
-| `:modules` | List all available standard library modules |
-| `:tour` | Print a guided language tour |
-| `:theme dark\|light` | Switch color theme |
-| `:test [pattern]` | Run test files (glob on `test_*.xs` / `*_test.xs`) |
-| `:quit` / `:exit` | Exit the REPL |
+| `:help`, `:h` | Show this list |
+| `:quit`, `:q` | Exit the REPL |
+| `:env` | List all bindings in scope with their kind and type |
+| `:clear` | Reset to a fresh interpreter, dropping all bindings |
+| `:t <expr>` | Show the runtime type of an expression |
 
-**Features:**
-
-- Syntax highlighting with configurable color themes
-- Multi-line input: lines ending with `{`, `(`, `[`, or `\` automatically
-  continue on the next line
-- Arrow key history navigation
-- Error recovery (errors don't kill the session)
+**Error recovery**: parse errors and runtime errors print a diagnostic and
+re-prompt. The session does not exit.
 
 ---
 
