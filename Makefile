@@ -721,6 +721,8 @@ clean:
 	rm -f $(OBJS) $(TARGET)
 	find src -name '*.o' -delete
 	find src -name '*.d' -delete
+	rm -f *.o *.d
+	rm -f xs_bug*.txt xs_*.xst
 	rm -rf build/ios build/android build/esp32
 
 -include $(OBJS:.o=.d)
