@@ -396,6 +396,16 @@ static void compile_sub_pattern_tos(Compiler *c, Node *sub,
    inside fields actually compare and bind. */
 static void compile_struct_pattern_at(Compiler *c, Node *pat, int val_slot,
                                       int *fail_jumps, int *n_fail, int max_fails) {
+    /* Type guard: a named pattern like `Circle { ... }` must only fire
+       on a value whose type matches. Without this, fields silently
+       resolve to null on the wrong shape and the arm fires anyway. */
+    if (pat->pat_struct.path) {
+        emit_a(c, OP_LOAD_LOCAL, val_slot);
+        emit_const(c, xs_str(pat->pat_struct.path));
+        emit(c, MAKE_A(OP_IS, 0, 0));
+        if (*n_fail < max_fails)
+            fail_jumps[(*n_fail)++] = emit_jump(c, OP_JUMP_IF_FALSE);
+    }
     for (int fi = 0; fi < pat->pat_struct.fields.len; fi++) {
         const char *fname = pat->pat_struct.fields.items[fi].key;
         Node *fpat = pat->pat_struct.fields.items[fi].val;

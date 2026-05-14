@@ -775,6 +775,21 @@ static int match_pattern(Interp *i, Node *pat, Value *val, Env *env) {
             }
             m = val->en->map_data;
         } else if (VAL_TAG(val) == XS_INST) {
+            /* Walk the bases breadth-first so a base-class pattern still
+               matches a subclass instance. Reject otherwise so e.g.
+               `Circle { radius }` does not silently bind on a Rect. */
+            if (type_name && val->inst->class_) {
+                XSClass *stack[64];
+                int sp = 0, ok = 0;
+                stack[sp++] = val->inst->class_;
+                while (sp > 0 && !ok) {
+                    XSClass *c = stack[--sp];
+                    if (c->name && strcmp(c->name, type_name) == 0) { ok = 1; break; }
+                    for (int b = 0; b < c->nbases && sp < 64; b++)
+                        if (c->bases[b]) stack[sp++] = c->bases[b];
+                }
+                if (!ok) return 0;
+            }
             m = val->inst->fields;
         }
         if (!m) return 0;
