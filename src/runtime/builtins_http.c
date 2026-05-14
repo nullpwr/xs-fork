@@ -16,6 +16,7 @@
 #include <errno.h>
 #if !defined(_WIN32) && !defined(__wasi__)
 #include <unistd.h>
+#include <sys/select.h>
 #endif
 
 extern Value *http_do_request(const char *method, const char *url,
