@@ -3117,16 +3117,10 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
         return;
 
     case NODE_DEL: {
-        /* `del name`: clear a local slot if the name resolves to one,
-           otherwise drop the global binding. The interp throws on a
-           subsequent read because env_get walks the chain and finds
-           nothing; the VM's local slots can't be made un-defined,
-           so they get nulled instead. The global path is exact. */
         const char *dname = n->del_.name;
         int slot = dname ? local_resolve(c->current, dname) : -1;
         if (slot >= 0) {
-            emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
-            emit_a(c, OP_STORE_LOCAL, slot);
+            emit_a(c, OP_DEL_LOCAL, slot);
         } else if (dname) {
             compile_name_load(c, "__del_global");
             emit_const(c, xs_str(dname));

@@ -27,6 +27,7 @@ typedef enum {
 
     OP_LOAD_LOCAL,    /* Bx=slot */
     OP_STORE_LOCAL,
+    OP_DEL_LOCAL,     /* Bx=slot; decref and tombstone the slot so reads throw */
     OP_LOAD_UPVALUE,  /* Bx=idx */
     OP_STORE_UPVALUE,
     OP_LOAD_GLOBAL,   /* Bx=name_const */

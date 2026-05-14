@@ -26,6 +26,7 @@ Value *xs_duration(int64_t ns);
 extern Value *XS_NULL_VAL;
 extern Value *XS_TRUE_VAL;
 extern Value *XS_FALSE_VAL;
+extern Value *XS_DELETED_VAL; /* tombstone for del'd local slots; pointer identity only */
 
 Value *value_incref(Value *v);
 void   value_decref(Value *v);

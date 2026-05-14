@@ -1839,6 +1839,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
 
         case OP_LOAD_LOCAL: {
             Value *v = frame->base[INSTR_Bx(instr)];
+            if (v == XS_DELETED_VAL) {
+                xs_runtime_error(vm_current_span(vm), "NameError", NULL,
+                                 "variable was deleted from this scope");
+                PUSH(value_incref(XS_NULL_VAL)); /* placeholder; unwind pops it */
+                break;
+            }
             PUSH(value_incref(v ? v : XS_NULL_VAL));
             break;
         }
@@ -1846,7 +1852,14 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             int slot   = (int)INSTR_Bx(instr);
             Value *old = frame->base[slot];
             frame->base[slot] = POP();
-            if (old) value_decref(old);
+            if (old && old != XS_DELETED_VAL) value_decref(old);
+            break;
+        }
+        case OP_DEL_LOCAL: {
+            int slot   = (int)INSTR_Bx(instr);
+            Value *old = frame->base[slot];
+            frame->base[slot] = XS_DELETED_VAL;
+            if (old && old != XS_DELETED_VAL) value_decref(old);
             break;
         }
         case OP_LOAD_UPVALUE:

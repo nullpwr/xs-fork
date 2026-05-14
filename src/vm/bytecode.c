@@ -84,6 +84,7 @@ const char *bytecode_op_name(Opcode op) {
         [OP_DUP] = "DUP",
         [OP_LOAD_LOCAL] = "LOAD_LOCAL",
         [OP_STORE_LOCAL] = "STORE_LOCAL",
+        [OP_DEL_LOCAL] = "DEL_LOCAL",
         [OP_LOAD_UPVALUE] = "LOAD_UPVALUE",
         [OP_STORE_UPVALUE] = "STORE_UPVALUE",
         [OP_LOAD_GLOBAL] = "LOAD_GLOBAL",

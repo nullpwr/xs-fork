@@ -14,9 +14,10 @@
 extern void proto_free(struct XSProto *);
 #endif
 
-Value *XS_NULL_VAL = NULL;
-Value *XS_TRUE_VAL  = NULL;
-Value *XS_FALSE_VAL = NULL;
+Value *XS_NULL_VAL   = NULL;
+Value *XS_TRUE_VAL   = NULL;
+Value *XS_FALSE_VAL  = NULL;
+Value *XS_DELETED_VAL = NULL;
 
 /* Thread-local freelist for Value structs. Arithmetic-heavy code
    (fib, loop_sum) allocates millions of short-lived ints; going
@@ -74,15 +75,18 @@ void value_init_singletons(void) {
     XS_FALSE_VAL = val_alloc(XS_BOOL);
     XS_FALSE_VAL->i = 0;
     XS_FALSE_VAL->refcount = 1000000;
+    XS_DELETED_VAL = val_alloc(XS_NULL);
+    XS_DELETED_VAL->refcount = 1000000; /* pinned tombstone; identified by pointer only */
 }
 
 /* Release the pinned singletons and drain the int-value freelist.
    Called at process shutdown so leak checkers don't flag intentionally
    long-lived values. */
 void value_free_singletons(void) {
-    if (XS_NULL_VAL)  { free(XS_NULL_VAL);  XS_NULL_VAL  = NULL; }
-    if (XS_TRUE_VAL)  { free(XS_TRUE_VAL);  XS_TRUE_VAL  = NULL; }
-    if (XS_FALSE_VAL) { free(XS_FALSE_VAL); XS_FALSE_VAL = NULL; }
+    if (XS_NULL_VAL)     { free(XS_NULL_VAL);     XS_NULL_VAL     = NULL; }
+    if (XS_TRUE_VAL)     { free(XS_TRUE_VAL);     XS_TRUE_VAL     = NULL; }
+    if (XS_FALSE_VAL)    { free(XS_FALSE_VAL);    XS_FALSE_VAL    = NULL; }
+    if (XS_DELETED_VAL)  { free(XS_DELETED_VAL);  XS_DELETED_VAL  = NULL; }
     while (g_val_freelist) {
         Value *next = (Value *)g_val_freelist->fn;
         free(g_val_freelist);
