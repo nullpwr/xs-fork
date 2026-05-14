@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.10
+
+`xs upgrade` and `xs uninstall` fold the old xsi installer's job
+into xs proper. The xsi binary is gone; the install one-liner now
+fetches the xs binary directly. `xs repl` (and bare `xs` with no
+args) drops into an interactive read-eval loop with persistent
+bindings, multi-line input, and `:help :quit :env :clear :t`
+meta-commands.
+
+`assert_eq` raises a catchable `AssertionError` instead of calling
+exit, so `try { assert_eq(...) } catch e { ... }` works. Pulled
+the inline temporal block forms (`every 1s { ... }`, `after`,
+`timeout`, `debounce`) since they never actually scheduled the
+body; the `@every` / `@after` / `@cron` decorators stay and are
+the way to do this. Also fixed `import log` colliding with the
+math `log` builtin, `Set.has(x)` for non-string elements,
+`arr.sorted()` as a VM method, and `reflect.type_of` for struct
+values built via the VM.
+
+VM `del x` now tombstones the slot so subsequent reads throw
+(was binding to null silently). Struct match patterns reject
+mismatched types instead of binding fields to null on a sibling
+shape, so `match shape { Circle { radius } => ... }` no longer
+fires on a `Rect`. macOS Apple Clang build under `-Wenum-conversion`
+and `-Wenum-compare-conditional` is fixed; POSIX builds include
+`<sys/select.h>` explicitly.
+
+## 1.2.9
+
+Patch release that filled in `xs --help` to actually list
+`upgrade`, `uninstall`, `publish`, and `search`, and regenerated
+the VS Code extension icons (the marketplace icon plus the .xs /
+.xsc file icons) in the new sage-on-dark style.
+
 ## 1.2.8
 
 The pipe-to-free-function pattern (`nums |> reduce(0, fn)`) was
