@@ -1,65 +1,128 @@
-; keywords
-[
-  "fn" "fn*" "let" "var" "const"
-  "struct" "enum" "trait" "impl" "class" "type" "effect" "tag"
-  "import" "use" "export" "from" "as" "plugin"
-  "if" "elif" "else" "match" "when" "while" "for" "in" "loop"
-  "return" "break" "continue" "yield"
-  "try" "catch" "finally" "throw" "defer"
-  "async" "await" "spawn" "nursery" "actor"
-  "perform" "handle" "resume"
-  "pub" "mut" "static" "inline" "unsafe"
-  "where"
-] @keyword
+; ---- comments ---------------------------------------------------------------
 
-["and" "or" "not" "is"] @keyword.operator
+(line_comment)  @comment.line
+(block_comment) @comment.block
 
-["true" "false" "null"] @constant.builtin
+; ---- literals ---------------------------------------------------------------
+
+(string_literal)  @string
+(char_literal)    @string.special
+
+; duration_literal: 30s, 100ms, 2m30s
+(duration_literal) @number
+
+(number_literal) @number
+
+(boolean_literal) @boolean
+(null_literal)    @constant.builtin
+
+["true" "false"] @boolean
+"null" @constant.builtin
+
+; ---- self / super -----------------------------------------------------------
+
 ["self" "super"] @variable.builtin
 
-; literals
-(number_literal) @number
-(string_literal) @string
-(char_literal) @string
-(boolean_literal) @constant.builtin
-(null_literal) @constant.builtin
-; durations get their own capture so themes can paint 5s / 100ms
-; differently from a bare number - they are a real first-class type.
-(duration_literal) @constant.numeric.duration
+; ---- decorators -------------------------------------------------------------
 
-; comments
-(line_comment)  @comment
-(block_comment) @comment
-
-; decorators
 (decorator) @attribute
 (decorator name: (identifier) @attribute)
 
-; types
+; ---- types ------------------------------------------------------------------
+
 (primitive_type)  @type.builtin
 (type_identifier) @type
 (generic_type (type_identifier) @type)
 
-; functions
-(function_declaration name: (identifier) @function)
-(function_signature  name: (identifier) @function)
-(call_expression callee: (identifier) @function.call)
-(call_expression callee: (field_expression field: (identifier) @function.method))
-(field_expression field: (identifier) @property)
+; ---- keywords - split by semantic role -------------------------------------
 
-; parameters
+; declaration: fn, fn*, let, var, const, struct, enum, trait, impl, class,
+;              type, effect, tag, bind, actor, nursery, macro
+"fn"      @keyword.function
+"fn*"     @keyword.function
+
+[
+  "let" "var" "const"
+  "struct" "enum" "trait" "impl" "class" "type"
+  "effect" "tag" "bind" "actor" "nursery" "macro"
+] @keyword.type
+
+; import / module
+[
+  "import" "export" "from" "use" "as" "load" "module" "plugin"
+] @keyword.import
+
+; control flow
+[
+  "if" "elif" "else"
+  "match" "when"
+  "try" "catch" "finally" "throw"
+  "defer"
+  "do" "with"
+] @keyword.control
+
+; loops
+[
+  "while" "for" "in" "loop"
+  "break" "continue"
+] @keyword.repeat
+
+; return / yield
+"return" @keyword.return
+"yield"  @keyword.return
+
+; async / concurrency / effects
+[
+  "async" "await" "spawn"
+  "perform" "handle" "resume" "pause"
+] @keyword.coroutine
+
+; modifiers
+[
+  "pub" "mut" "static" "inline" "unsafe"
+] @keyword.modifier
+
+; other
+[
+  "assert" "panic" "del" "where"
+] @keyword
+
+; logical word-operators
+["and" "or" "not" "is"] @keyword.operator
+
+; ---- function / call --------------------------------------------------------
+
+(function_declaration name: (identifier) @function)
+(function_signature   name: (identifier) @function)
+
+(call_expression callee: (identifier) @function.call)
+(call_expression callee: (field_expression field: (identifier) @function.method.call))
+
+; built-in functions
+(call_expression callee: (identifier) @function.builtin
+  (#match? @function.builtin
+    "^(print|println|eprint|eprintln|input|len|type|range|typeof|dbg|pprint|repr|exit|todo|unreachable|copy|clone|assert|assert_eq|panic|str|int|float|push|pop|sorted|reversed|enumerate|sum|min|max|first|last|any|all|map|filter|reduce|flatten|unique)$"))
+
+; ---- variables / parameters -------------------------------------------------
+
 (parameter name: (identifier) @variable.parameter)
 
-; bindings
 (let_declaration   name: (identifier) @variable)
 (var_declaration   name: (identifier) @variable)
 (const_declaration name: (identifier) @constant)
 
-; struct/enum fields
-(struct_field name: (identifier) @property)
-(enum_variant name: (identifier) @constructor)
+; UPPER_SNAKE_CASE identifiers as constants
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
 
-; operators
+; ---- struct / enum fields ---------------------------------------------------
+
+(struct_field name: (identifier) @variable.member)
+(enum_variant name: (identifier) @constructor)
+(field_expression field: (identifier) @variable.member)
+
+; ---- operators --------------------------------------------------------------
+
 [
   "+" "-" "*" "/" "%" "**"
   "==" "!=" "<" "<=" ">" ">="
@@ -67,9 +130,11 @@
   "&" "|" "^" "<<" ">>"
   "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
   ".." "..="
-  "??" "|>" "->"
+  "??" "|>" "->" "=>"
+  "++"
 ] @operator
 
-; punctuation
+; ---- punctuation ------------------------------------------------------------
+
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 ["," ";" ":" "."]          @punctuation.delimiter

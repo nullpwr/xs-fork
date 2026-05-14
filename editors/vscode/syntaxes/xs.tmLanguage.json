@@ -3,256 +3,494 @@
   "name": "XS",
   "scopeName": "source.xs",
   "patterns": [
+    { "include": "#shebang" },
     { "include": "#comments" },
     { "include": "#decorators" },
     { "include": "#strings" },
     { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#function-declaration" },
-    { "include": "#tag-declaration" },
-    { "include": "#builtins" },
     { "include": "#constants" },
+    { "include": "#type-declarations" },
+    { "include": "#function-declarations" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
     { "include": "#types" },
-    { "include": "#operators" }
+    { "include": "#operators" },
+    { "include": "#punctuation" }
   ],
   "repository": {
-    "decorators": {
+
+    "shebang": {
       "patterns": [
         {
-          "name": "entity.name.tag.xs",
-          "match": "@\\[\\s*macro\\s*\\]"
-        },
-        {
-          "name": "entity.name.tag.xs",
-          "match": "@(on_start|on_exit|on_signal|on_panic|every|cron|delayed|watch|bench|example|export|once|pure|test|deprecated|scoped)\\b"
+          "name": "comment.line.shebang.xs",
+          "match": "\\A#!.*$"
         }
       ]
     },
+
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.double-dash.xs",
-          "match": "--.*$"
-        },
-        {
           "name": "comment.block.xs",
           "begin": "\\{-",
-          "end": "-\\}"
+          "end": "-\\}",
+          "patterns": [
+            { "include": "#comments" }
+          ]
+        },
+        {
+          "name": "comment.line.double-dash.xs",
+          "match": "--.*$"
         }
       ]
     },
+
+    "decorators": {
+      "patterns": [
+        {
+          "comment": "macro decorator @[macro]",
+          "name": "entity.name.function.decorator.xs",
+          "match": "@\\[\\s*macro\\s*\\]"
+        },
+        {
+          "comment": "decorator with arguments",
+          "begin": "(@(?:on_start|on_exit|on_signal|on_panic|every|cron|delayed|watch|bench|example|export|once|pure|test|deprecated|scoped|memoize|retry|trace|timed))\\s*(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": { "name": "entity.name.function.decorator.xs" },
+            "2": { "name": "punctuation.section.arguments.begin.xs" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.arguments.end.xs" }
+          },
+          "contentName": "meta.decorator.arguments.xs",
+          "patterns": [
+            { "include": "#strings" },
+            { "include": "#numbers" },
+            { "include": "#constants" }
+          ]
+        },
+        {
+          "comment": "decorator without arguments",
+          "name": "entity.name.function.decorator.xs",
+          "match": "@(?:on_start|on_exit|on_signal|on_panic|every|cron|delayed|watch|bench|example|export|once|pure|test|deprecated|scoped|memoize|retry|trace|timed)\\b"
+        },
+        {
+          "comment": "generic user decorator",
+          "match": "(@)([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.decorator.xs" },
+            "2": { "name": "entity.name.function.decorator.xs" }
+          }
+        }
+      ]
+    },
+
     "strings": {
       "patterns": [
         {
+          "comment": "triple-quoted string (must come before double-quoted)",
           "name": "string.quoted.triple.xs",
           "begin": "\"\"\"",
           "end": "\"\"\"",
           "patterns": [
-            {
-              "name": "constant.character.escape.xs",
-              "match": "\\\\."
-            },
-            {
-              "name": "meta.interpolation.xs",
-              "contentName": "source.xs.embedded",
-              "begin": "(?<!\\\\)\\{",
-              "end": "\\}",
-              "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.xs" } },
-              "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.xs" } },
-              "patterns": [{ "include": "source.xs" }]
-            }
+            { "include": "#escape-sequences" },
+            { "include": "#string-interpolation" }
           ]
         },
         {
+          "comment": "raw string r\"...\"",
           "name": "string.quoted.raw.xs",
           "begin": "r\"",
           "end": "\""
         },
         {
+          "comment": "color string c\"...\"",
           "name": "string.quoted.color.xs",
           "begin": "c\"",
           "end": "\"",
           "patterns": [
-            {
-              "name": "constant.character.escape.xs",
-              "match": "\\\\."
-            }
+            { "include": "#escape-sequences" },
+            { "include": "#string-interpolation" }
           ]
         },
         {
+          "comment": "double-quoted string",
           "name": "string.quoted.double.xs",
           "begin": "\"",
           "end": "\"",
           "patterns": [
-            {
-              "name": "constant.character.escape.xs",
-              "match": "\\\\."
-            },
-            {
-              "name": "meta.interpolation.xs",
-              "contentName": "source.xs.embedded",
-              "begin": "(?<!\\\\)\\{",
-              "end": "\\}",
-              "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.xs" } },
-              "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.xs" } },
-              "patterns": [{ "include": "source.xs" }]
-            }
+            { "include": "#escape-sequences" },
+            { "include": "#string-interpolation" }
           ]
         },
         {
+          "comment": "single-quoted string",
           "name": "string.quoted.single.xs",
           "begin": "'",
           "end": "'",
           "patterns": [
-            {
-              "name": "constant.character.escape.xs",
-              "match": "\\\\."
-            },
-            {
-              "name": "meta.interpolation.xs",
-              "contentName": "source.xs.embedded",
-              "begin": "(?<!\\\\)\\{",
-              "end": "\\}",
-              "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.xs" } },
-              "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.xs" } },
-              "patterns": [{ "include": "source.xs" }]
-            }
+            { "include": "#escape-sequences" },
+            { "include": "#string-interpolation" }
           ]
         }
       ]
     },
-    "numbers": {
+
+    "escape-sequences": {
       "patterns": [
         {
-          "name": "constant.numeric.hex.xs",
-          "match": "\\b0x[0-9a-fA-F_]+\\b"
+          "name": "constant.character.escape.xs",
+          "match": "\\\\(?:[ntrsa\\\\\"'0abfve\\{]|u\\{[0-9a-fA-F]+\\}|x[0-9a-fA-F]{2})"
         },
         {
-          "name": "constant.numeric.octal.xs",
-          "match": "\\b0o[0-7_]+\\b"
-        },
-        {
-          "name": "constant.numeric.binary.xs",
-          "match": "\\b0b[01_]+\\b"
-        },
-        {
-          "name": "constant.numeric.duration.xs",
-          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?(ns|us|ms|s|m|h|d)(\\d+(ns|us|ms|s|m|h|d))*\\b"
-        },
-        {
-          "name": "constant.numeric.float.xs",
-          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9_]+)?\\b"
+          "name": "constant.character.escape.xs",
+          "match": "\\\\."
         }
       ]
     },
+
+    "string-interpolation": {
+      "patterns": [
+        {
+          "name": "meta.interpolation.xs",
+          "begin": "(?<!\\\\)\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.begin.xs" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.interpolation.end.xs" }
+          },
+          "contentName": "meta.embedded.expression.xs",
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#strings" },
+            { "include": "#numbers" },
+            { "include": "#constants" },
+            { "include": "#keywords" },
+            { "include": "#builtins" },
+            { "include": "#types" },
+            { "include": "#operators" }
+          ]
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        {
+          "comment": "hexadecimal integer",
+          "name": "constant.numeric.integer.xs",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "comment": "binary integer",
+          "name": "constant.numeric.integer.xs",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "comment": "octal integer",
+          "name": "constant.numeric.integer.xs",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "comment": "duration literal: 30s, 100ms, 2m30s, 1h30m0s etc. (must come before plain number)",
+          "match": "\\b([0-9][0-9_]*(?:\\.[0-9][0-9_]*)?)(ns|us|ms|s|m|h|d)(?:([0-9][0-9_]*(?:\\.[0-9][0-9_]*)?)(ns|us|ms|s|m|h|d))*\\b",
+          "captures": {
+            "1": { "name": "constant.numeric.duration.xs" },
+            "2": { "name": "keyword.other.unit.xs" },
+            "3": { "name": "constant.numeric.duration.xs" },
+            "4": { "name": "keyword.other.unit.xs" }
+          }
+        },
+        {
+          "comment": "float with exponent",
+          "name": "constant.numeric.xs",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?[eE][+-]?[0-9][0-9_]*\\b"
+        },
+        {
+          "comment": "float",
+          "name": "constant.numeric.xs",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b"
+        },
+        {
+          "comment": "integer",
+          "name": "constant.numeric.xs",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.xs",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.xs",
+          "match": "\\bnull\\b"
+        },
+        {
+          "name": "variable.language.self.xs",
+          "match": "\\b(self|super|Self)\\b"
+        }
+      ]
+    },
+
+    "type-declarations": {
+      "patterns": [
+        {
+          "comment": "struct/enum/trait/class/type/effect/actor/nursery name",
+          "match": "\\b(struct|enum|trait|class|type|effect|actor|nursery)\\s+([A-Z][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.xs" },
+            "2": { "name": "entity.name.type.xs" }
+          }
+        },
+        {
+          "comment": "impl for type",
+          "match": "\\b(impl)\\s+(?:<[^>]*>\\s*)?([A-Z][a-zA-Z0-9_]*)(?:\\s+(for)\\s+([A-Z][a-zA-Z0-9_]*))?",
+          "captures": {
+            "1": { "name": "keyword.declaration.xs" },
+            "2": { "name": "entity.name.type.xs" },
+            "3": { "name": "keyword.declaration.xs" },
+            "4": { "name": "entity.name.type.xs" }
+          }
+        },
+        {
+          "comment": "module name",
+          "match": "\\b(module)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import.xs" },
+            "2": { "name": "entity.name.type.xs" }
+          }
+        }
+      ]
+    },
+
+    "function-declarations": {
+      "patterns": [
+        {
+          "comment": "function definition",
+          "match": "\\b(fn\\*?)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=[(<])",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.xs" },
+            "2": { "name": "entity.name.function.xs" }
+          }
+        },
+        {
+          "comment": "tag declaration",
+          "match": "\\b(tag)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=[({])",
+          "captures": {
+            "1": { "name": "keyword.declaration.xs" },
+            "2": { "name": "entity.name.function.xs" }
+          }
+        }
+      ]
+    },
+
     "keywords": {
       "patterns": [
         {
+          "comment": "control flow",
           "name": "keyword.control.xs",
-          "match": "\\b(if|else|elif|while|for|in|loop|match|when|return|break|continue|try|catch|finally|throw|defer|yield|async|await)\\b"
+          "match": "\\b(if|else|elif|while|for|in|loop|match|when|return|break|continue|try|catch|finally|throw|defer|yield|do|with)\\b"
         },
         {
+          "comment": "async/concurrency control",
+          "name": "keyword.control.xs",
+          "match": "\\b(async|await|spawn)\\b"
+        },
+        {
+          "comment": "effect control",
+          "name": "keyword.control.xs",
+          "match": "\\b(perform|handle|resume|pause)\\b"
+        },
+        {
+          "comment": "declaration keywords",
           "name": "keyword.declaration.xs",
-          "match": "\\b(fn|let|var|const|struct|enum|trait|impl|class|type|macro|tag)\\b"
+          "match": "\\b(fn|let|var|const|struct|enum|trait|impl|class|type|macro|tag|effect|bind|actor|nursery)\\b"
         },
         {
-          "name": "keyword.import.xs",
-          "match": "\\b(import|export|from|use|module|as)\\b"
+          "comment": "import/module",
+          "name": "keyword.control.import.xs",
+          "match": "\\b(import|export|from|use|module|as|load)\\b"
         },
         {
+          "comment": "modifiers",
+          "name": "keyword.modifier.xs",
+          "match": "\\b(pub|mut|static|inline|unsafe)\\b"
+        },
+        {
+          "comment": "logical operators (word form)",
           "name": "keyword.operator.logical.xs",
           "match": "\\b(and|or|not|is)\\b"
         },
         {
+          "comment": "other keywords",
           "name": "keyword.other.xs",
-          "match": "\\b(pub|mut|static|inline|unsafe|effect|perform|handle|resume|spawn|nursery|actor)\\b"
+          "match": "\\b(assert|panic|del|where)\\b"
         }
       ]
     },
-    "function-declaration": {
-      "patterns": [
-        {
-          "match": "\\b(fn\\*?)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*[(<]",
-          "captures": {
-            "1": { "name": "keyword.declaration.xs" },
-            "2": { "name": "entity.name.function.xs" }
-          }
-        }
-      ]
-    },
-    "tag-declaration": {
-      "patterns": [
-        {
-          "match": "\\b(tag)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*[({]",
-          "captures": {
-            "1": { "name": "keyword.declaration.xs" },
-            "2": { "name": "entity.name.function.xs" }
-          }
-        }
-      ]
-    },
+
     "builtins": {
       "patterns": [
         {
-          "name": "support.function.xs",
-          "match": "\\b(print|println|eprint|eprintln|input|len|type|range|assert|assert_eq|panic|typeof|dbg|pprint|repr|exit|todo|unreachable|copy|clone|signal|derived)\\b"
-        }
-      ]
-    },
-    "constants": {
-      "patterns": [
-        {
-          "name": "constant.language.xs",
-          "match": "\\b(true|false|null)\\b"
+          "comment": "built-in functions followed by (",
+          "match": "\\b(print|println|eprint|eprintln|input|len|type|range|typeof|dbg|pprint|repr|exit|todo|unreachable|copy|clone|assert|assert_eq|panic|str|int|float|push|pop|sorted|reversed|enumerate|sum|min|max|first|last|any|all|map|filter|reduce|flatten|unique)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "support.function.xs" }
+          }
         },
         {
-          "name": "variable.language.xs",
-          "match": "\\b(self|super)\\b"
+          "comment": "stdlib module names in field access (math.sqrt etc.)",
+          "match": "\\b(async|base64|buf|cli|collections|crypto|csv|db|encode|ffi|fmt|fs|gc|hash|http|io|json|log|math|msgpack|net|os|path|process|Promise|random|re|reflect|string|test|thread|time|toml|tracing|url|uuid)\\s*(?=\\.)",
+          "captures": {
+            "1": { "name": "support.module.xs" }
+          }
         }
       ]
     },
+
     "types": {
       "patterns": [
         {
-          "name": "storage.type.primitive.xs",
+          "comment": "built-in primitive types",
+          "name": "support.type.xs",
           "match": "\\b(int|i8|i16|i32|i64|u8|u16|u32|u64|float|f32|f64|str|string|bool|char|byte|re|any|dyn|void|unit|never)\\b"
         },
         {
+          "comment": "user-defined types (capitalized)",
           "name": "entity.name.type.xs",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
         }
       ]
     },
+
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.pipe.xs",
+          "comment": "arrow operators",
+          "name": "keyword.operator.arrow.xs",
+          "match": "=>|->"
+        },
+        {
+          "comment": "pipe operator",
+          "name": "keyword.operator.arrow.xs",
           "match": "\\|>"
         },
         {
-          "name": "keyword.operator.arrow.xs",
-          "match": "=>|->",
-          "comment": "fat arrow and return type arrow"
-        },
-        {
-          "name": "keyword.operator.range.xs",
-          "match": "\\.\\.<|\\.\\.\\.|\\.\\."
-        },
-        {
-          "name": "keyword.operator.power.xs",
-          "match": "\\*\\*"
-        },
-        {
-          "name": "keyword.operator.spaceship.xs",
-          "match": "<=>"
-        },
-        {
+          "comment": "null-coalescing",
           "name": "keyword.operator.null-coalesce.xs",
           "match": "\\?\\?"
         },
         {
+          "comment": "optional chaining",
+          "name": "keyword.operator.optional.xs",
+          "match": "\\?\\."
+        },
+        {
+          "comment": "inclusive range",
+          "name": "keyword.operator.range.xs",
+          "match": "\\.\\.\\.?=?"
+        },
+        {
+          "comment": "array concat",
           "name": "keyword.operator.concat.xs",
           "match": "\\+\\+"
+        },
+        {
+          "comment": "power",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "\\*\\*"
+        },
+        {
+          "comment": "spaceship",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "<=>"
+        },
+        {
+          "comment": "compound assignment",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "[+\\-*/%&|^]=|<<=|>>="
+        },
+        {
+          "comment": "shift",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "<<|>>"
+        },
+        {
+          "comment": "comparison",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "comment": "logical symbols",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "comment": "bitwise",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "[&|^~]"
+        },
+        {
+          "comment": "arithmetic",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "comment": "assignment",
+          "name": "keyword.operator.arithmetic.xs",
+          "match": "="
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.parens.begin.xs",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.parens.end.xs",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.xs",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.xs",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.section.braces.begin.xs",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.braces.end.xs",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.separator.comma.xs",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.semicolon.xs",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.colon.xs",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.accessor.dot.xs",
+          "match": "\\."
         }
       ]
     }

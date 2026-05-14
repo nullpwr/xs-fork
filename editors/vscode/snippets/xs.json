@@ -1,13 +1,93 @@
 {
   "Function": {
     "prefix": "fn",
-    "body": ["fn ${1:name}(${2:params}) {", "\t$0", "}"],
+    "body": ["fn ${1:name}(${2:args})${3: -> ${4:type}} {", "\t$0", "}"],
     "description": "Function declaration"
   },
-  "Function with return type": {
-    "prefix": "fnt",
-    "body": ["fn ${1:name}(${2:params}) -> ${3:type} {", "\t$0", "}"],
-    "description": "Function with return type"
+  "Async function": {
+    "prefix": "afn",
+    "body": ["async fn ${1:name}(${2:args})${3: -> ${4:type}} {", "\t$0", "}"],
+    "description": "Async function declaration"
+  },
+  "Effect": {
+    "prefix": "effect",
+    "body": ["effect ${1:Name} {", "\tfn ${2:op}(${3:args})${4: -> ${5:type}}", "}"],
+    "description": "Effect declaration"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "\t${2:pattern} => ${3:result}",
+      "\t_ => ${0:default}",
+      "}"
+    ],
+    "description": "Match expression"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name} { ${0:fields} }"],
+    "description": "Struct declaration"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": ["enum ${1:Name} {", "\t${2:Variant1}", "\t${3:Variant2}", "}"],
+    "description": "Enum declaration"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": ["trait ${1:Name} {", "\tfn ${2:method}(self)${3: -> ${4:type}}", "}"],
+    "description": "Trait declaration"
+  },
+  "Impl": {
+    "prefix": "impl",
+    "body": ["impl ${1:Trait} for ${2:Type} {", "\t$0", "}"],
+    "description": "Impl block (trait for type)"
+  },
+  "Impl type": {
+    "prefix": "implt",
+    "body": ["impl ${1:Type} {", "\tfn ${2:method}(self${3}) {", "\t\t$0", "\t}", "}"],
+    "description": "Impl block for a type"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": ["class ${1:Name} {", "\tfn init(self${2}) {", "\t\t$0", "\t}", "}"],
+    "description": "Class declaration"
+  },
+  "Actor": {
+    "prefix": "actor",
+    "body": ["actor ${1:Name} {", "\tfn ${2:method}(self) {", "\t\t$0", "\t}", "}"],
+    "description": "Actor declaration"
+  },
+  "Spawn": {
+    "prefix": "spawn",
+    "body": ["spawn {", "\t$0", "}"],
+    "description": "Spawn a concurrent task"
+  },
+  "Nursery": {
+    "prefix": "nursery",
+    "body": ["with nursery() as ${1:n} {", "\t${1:n}.spawn { $0 }", "}"],
+    "description": "Structured concurrency nursery"
+  },
+  "Try-Catch": {
+    "prefix": "try",
+    "body": ["try {", "\t$1", "} catch ${2:e} {", "\t$0", "}"],
+    "description": "Try-catch block"
+  },
+  "Test": {
+    "prefix": "test",
+    "body": ["@test", "fn ${1:test_name}() {", "\tassert_eq(${2:expected}, ${3:actual})", "}"],
+    "description": "Test function"
+  },
+  "Every decorator": {
+    "prefix": "every",
+    "body": ["@every(${1:30s})", "fn ${2:tick}() {", "\t$0", "}"],
+    "description": "Recurring task via @every decorator"
+  },
+  "Cron decorator": {
+    "prefix": "cron",
+    "body": ["@cron(\"${1:0 */5 * * * *}\")", "fn ${2:job}() {", "\t$0", "}"],
+    "description": "Cron-scheduled task via @cron decorator"
   },
   "Let binding": {
     "prefix": "let",
@@ -44,45 +124,15 @@
     "body": ["while ${1:condition} {", "\t$0", "}"],
     "description": "While loop"
   },
-  "Match": {
-    "prefix": "match",
-    "body": ["match ${1:expr} {", "\t${2:pattern} => ${3:value}", "\t_ => ${0:default}", "}"],
-    "description": "Match expression"
-  },
-  "Struct": {
-    "prefix": "struct",
-    "body": ["struct ${1:Name} {", "\t${0:fields}", "}"],
-    "description": "Struct declaration"
-  },
-  "Impl": {
-    "prefix": "impl",
-    "body": ["impl ${1:Type} {", "\tfn ${2:method}(self${3}) {", "\t\t$0", "\t}", "}"],
-    "description": "Impl block"
-  },
-  "Trait": {
-    "prefix": "trait",
-    "body": ["trait ${1:Name} {", "\tfn ${2:method}(self)${0}", "}"],
-    "description": "Trait declaration"
-  },
-  "Enum": {
-    "prefix": "enum",
-    "body": ["enum ${1:Name} {", "\t${0:Variant}", "}"],
-    "description": "Enum declaration"
-  },
-  "Class": {
-    "prefix": "class",
-    "body": ["class ${1:Name} {", "\tfn init(self${2}) {", "\t\t$0", "\t}", "}"],
-    "description": "Class declaration"
-  },
-  "Try-Catch": {
-    "prefix": "try",
-    "body": ["try {", "\t$1", "} catch ${2:e} {", "\t$0", "}"],
-    "description": "Try-catch block"
-  },
   "Import": {
     "prefix": "import",
     "body": "import ${0:module}",
-    "description": "Import module"
+    "description": "Import stdlib module"
+  },
+  "Use file": {
+    "prefix": "use",
+    "body": "use \"${0:path}\"",
+    "description": "Use a file"
   },
   "Print": {
     "prefix": "pr",
@@ -92,32 +142,12 @@
   "Print interpolation": {
     "prefix": "pri",
     "body": "println(\"${1:text} {${0:expr}}\")",
-    "description": "Print with interpolation"
+    "description": "Print with string interpolation"
   },
-  "Assert": {
+  "Assert equals": {
     "prefix": "assert",
-    "body": "assert_eq(${1:actual}, ${0:expected})",
+    "body": "assert_eq(${1:expected}, ${0:actual})",
     "description": "Assert equals"
-  },
-  "Async function": {
-    "prefix": "async",
-    "body": ["async fn ${1:name}(${2:params}) {", "\t$0", "}"],
-    "description": "Async function"
-  },
-  "Actor": {
-    "prefix": "actor",
-    "body": ["actor ${1:Name} {", "\tvar ${2:state} = ${3:0}", "", "\tfn ${4:method}(${5}) {", "\t\t$0", "\t}", "}"],
-    "description": "Actor declaration"
-  },
-  "Effect": {
-    "prefix": "effect",
-    "body": ["effect ${1:Name} {", "\t${0:op}(${2:params})", "}"],
-    "description": "Effect declaration"
-  },
-  "Plugin": {
-    "prefix": "plugin",
-    "body": ["-- plugin: ${1:name}", "let meta = #{", "\t\"name\": \"${1}\",", "\t\"version\": \"0.1.0\"", "}", "", "fn on_load(api) {", "\t$0", "}"],
-    "description": "Plugin boilerplate"
   },
   "Tag block": {
     "prefix": "tag",
@@ -127,7 +157,7 @@
   "Inline C": {
     "prefix": "inlinec",
     "body": ["inline c {", "\t$0", "}"],
-    "description": "Inline C block (for transpilation)"
+    "description": "Inline C block"
   },
   "List comprehension": {
     "prefix": "comp",
@@ -138,5 +168,20 @@
     "prefix": "map",
     "body": "#{\"${1:key}\": ${0:value}}",
     "description": "Map literal"
+  },
+  "Plugin boilerplate": {
+    "prefix": "plugin",
+    "body": [
+      "-- plugin: ${1:name}",
+      "let meta = #{",
+      "\t\"name\": \"${1}\",",
+      "\t\"version\": \"0.1.0\"",
+      "}",
+      "",
+      "fn on_load(api) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Plugin boilerplate"
   }
 }
