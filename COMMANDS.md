@@ -83,6 +83,39 @@ xs --backend jit program.xs
 
 ---
 
+## Self-Management
+
+### `xs upgrade`
+
+Replace the current binary with the latest release from github.com/xs-lang0/xs.
+
+```bash
+xs upgrade         # prompt before replacing
+xs upgrade --yes   # skip confirmation
+```
+
+Compares the current version against the GitHub releases API. If already up to date, exits 0 without touching anything. Verifies the SHA-256 of the downloaded binary against the sibling `.sha256` file before swapping.
+
+Not supported on Windows in this build - re-run the install script instead:
+
+```powershell
+irm xslang.org/install.ps1 | iex
+```
+
+### `xs uninstall`
+
+Remove the xs binary from the system.
+
+```bash
+xs uninstall                 # remove only the binary (prompts)
+xs uninstall --with-data     # also remove ~/.xs and ~/.xs_cache
+xs uninstall --yes           # skip confirmation
+```
+
+Prompts for confirmation by default. Use `--yes` or `-y` to skip.
+
+---
+
 ## Interactive REPL
 
 ### `xs` (no arguments)

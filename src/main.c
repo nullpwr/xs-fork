@@ -64,6 +64,7 @@
 #ifdef XSC_ENABLE_PKG
 #include "pkg/pkg.h"
 #endif
+#include "pkg/self.h"
 #ifdef XSC_ENABLE_PROFILER
 #include "profiler/profiler.h"
 #endif
@@ -1001,6 +1002,17 @@ int main(int argc, char **argv) {
                                "Print the username/email associated with the stored token.\n")
                 H("search",    "Usage: xs search <query>\n\n"
                                "Search the XS package registry.\n")
+                H("upgrade",   "Usage: xs upgrade [--yes]\n\n"
+                               "Download the latest xs binary and replace this one.\n\n"
+                               "Options:\n"
+                               "  --yes, -y    Skip the confirmation prompt\n\n"
+                               "Compares the running version against the GitHub releases API.\n"
+                               "Verifies SHA-256 of the downloaded binary before swapping.\n")
+                H("uninstall", "Usage: xs uninstall [--yes] [--with-data]\n\n"
+                               "Remove the xs binary from the system.\n\n"
+                               "Options:\n"
+                               "  --yes, -y      Skip the confirmation prompt\n"
+                               "  --with-data    Also remove ~/.xs and ~/.xs_cache\n")
                 H("lsp",       "Usage: xs lsp\n\n"
                                "Start the Language Server Protocol server on stdin/stdout.\n"
                                "Supports: diagnostics, hover, completion, go-to-definition.\n"
@@ -2044,6 +2056,12 @@ test_again: ;
             fprintf(stderr, "xs search: not enabled in this build (rebuild with XSC_ENABLE_PKG=1)\n");
             return 1;
 #endif
+
+        } else if (strcmp(sub, "upgrade") == 0) {
+            return xs_self_upgrade(sub_argc, &argv[sub_idx + 1]);
+
+        } else if (strcmp(sub, "uninstall") == 0) {
+            return xs_self_uninstall(sub_argc, &argv[sub_idx + 1]);
 
         } else if (strcmp(sub, "pkg") == 0) {
 #ifdef XSC_ENABLE_PKG

@@ -130,6 +130,7 @@ TOOL_SRCS = src/fmt/fmt.c \
             src/doc/docgen.c \
             src/pkg/pkg.c \
             src/pkg/pkg_http.c \
+            src/pkg/self.c \
             src/profiler/profiler.c \
             src/coverage/coverage.c \
             src/optimizer/optimizer.c \
