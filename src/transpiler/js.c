@@ -426,6 +426,24 @@ static void emit_expr(SB *s, Node *n, int depth) {
             break;
         } else if (is_callee_name(n->call.callee, "input")) {
             sb_add(s, "prompt(");
+        } else if (is_callee_name(n->call.callee, "reduce") ||
+                   is_callee_name(n->call.callee, "fold") ||
+                   is_callee_name(n->call.callee, "map") ||
+                   is_callee_name(n->call.callee, "filter") ||
+                   is_callee_name(n->call.callee, "each") ||
+                   is_callee_name(n->call.callee, "some") ||
+                   is_callee_name(n->call.callee, "every") ||
+                   is_callee_name(n->call.callee, "find") ||
+                   is_callee_name(n->call.callee, "count") ||
+                   is_callee_name(n->call.callee, "sum")) {
+            /* Free-function forms of array methods. The pipe operator
+               desugars `xs |> reduce(0, fn)` to `reduce(xs, 0, fn)`,
+               and at top level there is no `reduce` to call. Route to
+               the prelude polyfill so the same pattern works. fold is
+               an alias for reduce. */
+            const char *cname = n->call.callee->ident.name;
+            if (strcmp(cname, "fold") == 0) sb_add(s, "__xs_reduce(");
+            else { sb_add(s, "__xs_"); sb_add(s, cname); sb_addc(s, '('); }
         } else {
             /* check if callee is a capitalized identifier (constructor call) */
             int is_ctor = 0;
@@ -3172,6 +3190,34 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_chars = (s) => [...String(s)];\n");
     sb_add(&s, "const __xs_str_reverse = (s) => [...String(s)].reverse().join('');\n");
+    /* Free-function forms of arr.reduce / map / filter / each / fold /
+       some / every / find. The pipe operator desugars `xs |> reduce(0,
+       fn)` to `reduce(xs, 0, fn)`, and a top-level `reduce` is not in
+       scope by default, so without these helpers the JS errors with
+       ReferenceError at the first pipe-to-reduce site. The helpers
+       accept the array as the first arg and forward to the
+       corresponding Array prototype method, picking the (init, fn) vs
+       (fn, init) order at runtime so users don't have to remember. */
+    sb_add(&s, "const __xs_reduce = (xs, a, b) => {\n");
+    sb_add(&s, "    if (!Array.isArray(xs)) throw new Error('reduce: expected array');\n");
+    sb_add(&s, "    if (b === undefined) return xs.reduce((acc, x) => a(acc, x));\n");
+    sb_add(&s, "    const fn = typeof a === 'function' ? a : b;\n");
+    sb_add(&s, "    const init = typeof a === 'function' ? b : a;\n");
+    sb_add(&s, "    return xs.reduce((acc, x) => fn(acc, x), init);\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_map = (xs, fn) => Array.isArray(xs) ? xs.map(x => fn(x)) : Array.from(xs, x => fn(x));\n");
+    sb_add(&s, "const __xs_filter = (xs, fn) => Array.isArray(xs) ? xs.filter(x => fn(x)) : Array.from(xs).filter(x => fn(x));\n");
+    sb_add(&s, "const __xs_each = (xs, fn) => { for (const x of xs) fn(x); return null; };\n");
+    sb_add(&s, "const __xs_some = (xs, fn) => Array.isArray(xs) ? xs.some(x => fn(x)) : false;\n");
+    sb_add(&s, "const __xs_every = (xs, fn) => Array.isArray(xs) ? xs.every(x => fn(x)) : false;\n");
+    sb_add(&s, "const __xs_find = (xs, fn) => Array.isArray(xs) ? xs.find(x => fn(x)) : undefined;\n");
+    sb_add(&s, "const __xs_count = (xs, fn) => {\n");
+    sb_add(&s, "    if (typeof fn === 'function') {\n");
+    sb_add(&s, "        let n = 0; for (const x of xs) if (fn(x)) n++; return n;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return Array.isArray(xs) || typeof xs === 'string' ? xs.length : 0;\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_sum = (xs) => Array.isArray(xs) ? xs.reduce((a, b) => __xs_add(a, b), 0) : 0;\n");
     sb_add(&s, "const __xs_contains = (a, b) => {\n");
     sb_add(&s, "    if (typeof a === 'string') return a.includes(String(b));\n");
     /* Predicate form: arr.contains(|x| ...) -> any-truthy probe.
