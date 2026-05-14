@@ -240,12 +240,19 @@ ifeq ($(XSC_ENABLE_DOC),1)
   CFLAGS += -DXSC_ENABLE_DOC
 endif
 
-OBJS = $(SRCS:.c=.o)
+BUILD_DIR = build/obj
+OBJS = $(SRCS:%.c=$(BUILD_DIR)/%.o)
 
 # Targets
-.PHONY: all clean debug release test test-unit test-e2e test-negative test-property test-golden test-regression test-conformance test-all install wasm wasm-browser bench bench-compare ios ios-device ios-sim ios-sim-arm64 android android-clean android-print-triple esp32 esp32-component sync-version
+.PHONY: all clean debug release test test-unit test-e2e test-negative test-property test-golden test-regression test-conformance test-all install wasm wasm-browser bench bench-compare ios ios-device ios-sim ios-sim-arm64 android android-clean android-print-triple esp32 esp32-component sync-version _sweep_root
 
-all: $(TARGET)
+all: _sweep_root $(TARGET)
+
+# Wipe any stray root-level .o/.d/xs_bug*/xs_*.xst artefacts that landed
+# from manual `gcc -c` invocations or interrupted runs. Makefile-managed
+# objects live under $(BUILD_DIR), so anything at the root is debris.
+_sweep_root:
+	@rm -f *.o *.d xs_bug*.txt xs_*.xst
 
 # Propagate the contents of ./VERSION into xs.toml. portable-ish:
 # avoid sed -i (not GNU/BSD-compatible), do a copy + redirect.
@@ -258,7 +265,12 @@ sync-version:
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-%.o: %.c
+# All Makefile-managed object + dep files land under build/obj/ so the
+# source tree stays clean. Any stray .o at the root is by definition
+# someone's hand-rolled `gcc -c` invocation, and the start-of-build
+# sweep below wipes them so they don't accumulate.
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # BearSSL is upstream constant-time crypto. Under -flto the optimiser
@@ -268,7 +280,8 @@ $(TARGET): $(OBJS)
 # Also drop -Wunknown-pragmas: sysrng.c uses an MSVC-specific
 # `#pragma comment(lib, ...)` to link against advapi32 on windows that
 # gcc has no equivalent for.
-src/tls/bearssl/%.o: src/tls/bearssl/%.c
+$(BUILD_DIR)/src/tls/bearssl/%.o: src/tls/bearssl/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Wno-maybe-uninitialized -Wno-unknown-pragmas -c -o $@ $<
 
 debug: CFLAGS = -g -O0 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
@@ -718,7 +731,8 @@ esp32-component:
 	@echo "scaffold written to examples/embedded/esp32/components/xs/"
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -rf $(BUILD_DIR)
+	rm -f $(TARGET)
 	find src -name '*.o' -delete
 	find src -name '*.d' -delete
 	rm -f *.o *.d
