@@ -3749,7 +3749,8 @@ static Value *eval_method(Interp *i, Value *obj, const char *method,
                             }
                             return value_incref(XS_NULL_VAL);
                         }
-                        if (strcmp(method, "contains") == 0) {
+                        if (strcmp(method, "has") == 0 ||
+                            strcmp(method, "contains") == 0) {
                             if (argc < 1) return value_incref(XS_FALSE_VAL);
                             char *k = value_str(args[0]);
                             int found = map_has(sd, k);
@@ -5541,8 +5542,8 @@ Value *interp_eval(Interp *i, Node *n) {
     case NODE_IDENT: {
         dep_track_add(n->ident.name);
         Value *v = env_get(i->env, n->ident.name);
-        if (!v) {
-            const char *suggestion = find_similar_name(i->env, n->ident.name);
+        if (!v || v == XS_DELETED_VAL) {
+            const char *suggestion = (!v) ? find_similar_name(i->env, n->ident.name) : NULL;
             char hint_buf[128];
             if (suggestion) {
                 snprintf(hint_buf, sizeof hint_buf, "did you mean '%s'?", suggestion);
@@ -5552,7 +5553,9 @@ Value *interp_eval(Interp *i, Node *n) {
                 xs_runtime_error(n->span, "not found in this scope", NULL,
                         "name '%s' is not defined", n->ident.name);
             }
-            i->cf.signal = CF_ERROR;
+            /* xs_runtime_error sets CF_THROW when inside a try block; only
+               fall back to CF_ERROR when the signal wasn't already set. */
+            if (!i->cf.signal) i->cf.signal = CF_ERROR;
             return value_incref(XS_NULL_VAL);
         }
         return value_incref(v);
@@ -7421,33 +7424,6 @@ do_call: ;
     case NODE_LIT_DURATION: {
         return xs_duration(n->lit_duration.ns);
     }
-    case NODE_EVERY: {
-        Value *interval = EVAL(i, n->every_.interval);
-        value_decref(interval);
-        Value *result = EVAL(i, n->every_.body);
-        return result;
-    }
-    case NODE_AFTER: {
-        Value *delay = EVAL(i, n->after_.delay);
-        value_decref(delay);
-        return EVAL(i, n->after_.body);
-    }
-    case NODE_TIMEOUT: {
-        Value *result = EVAL(i, n->timeout_.body);
-        if (i->cf.signal == CF_PANIC && n->timeout_.fallback) {
-            i->cf.signal = 0;
-            if (i->cf.value) { value_decref(i->cf.value); i->cf.value = NULL; }
-            value_decref(result);
-            result = EVAL(i, n->timeout_.fallback);
-        }
-        return result;
-    }
-    case NODE_DEBOUNCE: {
-        Value *delay = EVAL(i, n->debounce_.delay);
-        value_decref(delay);
-        return EVAL(i, n->debounce_.body);
-    }
-
     case NODE_PAUSE: {
         Value *dur = EVAL(i, n->pause_.duration);
         if (i->cf.signal) { value_decref(dur); return value_incref(XS_NULL_VAL); }
@@ -9767,6 +9743,11 @@ void interp_exec(Interp *i, Node *stmt) {
         if (stmt->import.nparts == 0) break;
         char *modname = stmt->import.path[0];
         Value *mod = env_get(i->env, modname);
+        /* If the existing binding is not a module/map, a builtin function
+           is shadowing a stdlib module of the same name. Prefer the module
+           when an explicit import is used. */
+        if (mod && VAL_TAG(mod) != XS_MAP && VAL_TAG(mod) != XS_MODULE)
+            mod = NULL;
 
         /* phase 3: resolve_import hook chain */
         if (!mod && g_n_resolve_import > 0) {

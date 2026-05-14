@@ -99,10 +99,11 @@ int env_delete(Env *e, const char *name) {
     for (Env *cur = e; cur; cur = cur->parent) {
         for (int i = 0; i < cur->len; i++) {
             if (strcmp(cur->bindings[i].name, name) == 0) {
-                free(cur->bindings[i].name);
+                /* Tombstone the slot so later reads throw rather than
+                   silently returning null. The VM uses XS_DELETED_VAL in
+                   local slots for the same reason; mirror it here. */
                 value_decref(cur->bindings[i].value);
-                cur->bindings[i] = cur->bindings[cur->len - 1];
-                cur->len--;
+                cur->bindings[i].value = value_incref(XS_DELETED_VAL);
                 return 1;
             }
         }

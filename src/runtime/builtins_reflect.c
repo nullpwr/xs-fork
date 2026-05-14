@@ -21,14 +21,26 @@ static Value *native_reflect_type_of(Interp *ig, Value **a, int n) {
         case XS_STR:        return xs_str("str");
         case XS_CHAR:       return xs_str("char");
         case XS_ARRAY:      return xs_str("array");
-        case XS_MAP:        return xs_str("map");
+        case XS_MAP: {
+            /* VM-compiled structs and class instances are maps tagged
+               with __type. Return the type name when it's present and
+               not an internal marker (Set, Deque, etc.). */
+            Value *ty = (a[0]->map) ? map_get(a[0]->map, "__type") : NULL;
+            if (ty && VAL_TAG(ty) == XS_STR && ty->s && ty->s[0]) {
+                return xs_str(ty->s);
+            }
+            return xs_str("map");
+        }
         case XS_TUPLE:      return xs_str("tuple");
         case XS_FUNC:       return xs_str("fn");
         case XS_NATIVE:     return xs_str("native_fn");
         case XS_STRUCT_VAL: return xs_str("struct");
         case XS_ENUM_VAL:   return xs_str("enum");
         case XS_CLASS_VAL:  return xs_str("class");
-        case XS_INST:       return xs_str("instance");
+        case XS_INST:
+            if (a[0]->inst && a[0]->inst->class_ && a[0]->inst->class_->name)
+                return xs_str(a[0]->inst->class_->name);
+            return xs_str("instance");
         case XS_RANGE:      return xs_str("range");
         case XS_MODULE:     return xs_str("module");
 #ifdef XSC_ENABLE_VM
@@ -101,7 +113,11 @@ static Value *native_reflect_is_instance(Interp *ig, Value **a, int n) {
         case XS_FLOAT:  actual = "float"; break;
         case XS_STR:    actual = "str"; break;
         case XS_ARRAY:  actual = "array"; break;
-        case XS_MAP:    actual = "map"; break;
+        case XS_MAP: {
+            Value *ty = (a[0]->map) ? map_get(a[0]->map, "__type") : NULL;
+            actual = (ty && VAL_TAG(ty) == XS_STR && ty->s && ty->s[0]) ? ty->s : "map";
+            break;
+        }
         case XS_FUNC:   actual = "fn"; break;
         case XS_NATIVE: actual = "native_fn"; break;
         case XS_INST:   actual = a[0]->inst->class_ ? a[0]->inst->class_->name : "instance"; break;

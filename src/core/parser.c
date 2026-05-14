@@ -3970,56 +3970,6 @@ static Node *parse_import(Parser *p) {
     return n;
 }
 
-/* temporal statements */
-static Node *parse_every(Parser *p) {
-    Token *kw = pp_expect(p, TK_EVERY, "expected 'every'");
-    Span span = kw->span;
-    Node *interval = parse_expr(p, 0);
-    Node *body = parse_block(p);
-    Node *n = node_new(NODE_EVERY, span);
-    n->every_.interval = interval;
-    n->every_.body = body;
-    return n;
-}
-
-static Node *parse_after(Parser *p) {
-    Token *kw = pp_expect(p, TK_AFTER, "expected 'after'");
-    Span span = kw->span;
-    Node *delay = parse_expr(p, 0);
-    Node *body = parse_block(p);
-    Node *n = node_new(NODE_AFTER, span);
-    n->after_.delay = delay;
-    n->after_.body = body;
-    return n;
-}
-
-static Node *parse_timeout(Parser *p) {
-    Token *kw = pp_advance(p);
-    Span span = kw->span;
-    Node *duration = parse_expr(p, 0);
-    Node *body = parse_block(p);
-    Node *fallback = NULL;
-    if (pp_match(p, TK_ELSE)) {
-        fallback = parse_block(p);
-    }
-    Node *n = node_new(NODE_TIMEOUT, span);
-    n->timeout_.duration = duration;
-    n->timeout_.body = body;
-    n->timeout_.fallback = fallback;
-    return n;
-}
-
-static Node *parse_debounce(Parser *p) {
-    Token *kw = pp_expect(p, TK_DEBOUNCE, "expected 'debounce'");
-    Span span = kw->span;
-    Node *delay = parse_expr(p, 0);
-    Node *body = parse_block(p);
-    Node *n = node_new(NODE_DEBOUNCE, span);
-    n->debounce_.delay = delay;
-    n->debounce_.body = body;
-    return n;
-}
-
 /* load "path" or load "path" with { KEY: "val", ... } */
 static Node *parse_load_stmt(Parser *p) {
     Token *kw = pp_expect(p, TK_LOAD, "expected 'load'");
@@ -4461,25 +4411,6 @@ static Node *parse_stmt(Parser *p) {
     if (tok->kind == TK_IMPORT) return parse_import(p);
     if (tok->kind == TK_USE) return parse_use(p);
     if (tok->kind == TK_LOAD) return parse_load_stmt(p);
-    if (tok->kind == TK_EVERY) return parse_every(p);
-    if (tok->kind == TK_AFTER) return parse_after(p);
-    if (tok->kind == TK_IDENT && tok->sval && strcmp(tok->sval, "timeout") == 0) {
-        Token *next = pp_peek(p, 1);
-        TokenKind nk = next ? next->kind : TK_EOF;
-        /* Treat as expression statement when 'timeout' is being used as an
-           identifier (assignment, postfix, operator), otherwise dispatch to
-           the timeout-stmt form. */
-        int as_ident = (nk == TK_ASSIGN || nk == TK_PLUS_ASSIGN ||
-                        nk == TK_MINUS_ASSIGN || nk == TK_STAR_ASSIGN ||
-                        nk == TK_SLASH_ASSIGN || nk == TK_PERCENT_ASSIGN ||
-                        nk == TK_LPAREN || nk == TK_DOT || nk == TK_LBRACKET ||
-                        nk == TK_COLON_COLON || nk == TK_QUESTION ||
-                        nk == TK_COLON || nk == TK_COMMA ||
-                        nk == TK_RPAREN || nk == TK_RBRACE || nk == TK_RBRACKET ||
-                        nk == TK_SEMICOLON || nk == TK_NEWLINE || nk == TK_EOF);
-        if (!as_ident) return parse_timeout(p);
-    }
-    if (tok->kind == TK_DEBOUNCE) return parse_debounce(p);
     if (tok->kind == TK_PAUSE) {
         pp_advance(p);
         Node *dur = parse_expr(p, 0);

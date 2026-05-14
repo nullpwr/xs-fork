@@ -1257,9 +1257,9 @@ static Value *builtin_sorted(Interp *i, Value **args, int argc) {
 }
 
 static Value *builtin_assert_eq(Interp *i, Value **args, int argc) {
+    (void)i;
     if (argc < 2) {
-        fprintf(stderr, "xs: assert_eq requires 2 arguments\n");
-        if (i) { i->cf.signal = CF_PANIC; i->cf.value = xs_str("assert_eq requires 2 arguments"); }
+        xs_runtime_error(span_zero(), "AssertionError", NULL, "assert_eq requires 2 arguments");
         return value_incref(XS_NULL_VAL);
     }
     int equal = value_equal(args[0], args[1]);
@@ -1288,10 +1288,13 @@ static Value *builtin_assert_eq(Interp *i, Value **args, int argc) {
         char *a = value_repr(args[0]);
         char *b = value_repr(args[1]);
         const char *msg = (argc >= 3 && VAL_TAG(args[2]) == XS_STR) ? args[2]->s : "";
-        fprintf(stderr, "xs: assertion failed: assert_eq(%s, %s)%s%s\n",
-                a, b, msg[0] ? ": " : "", msg);
+        char detail[512];
+        if (msg[0])
+            snprintf(detail, sizeof detail, "assert_eq(%s, %s): %s", a, b, msg);
+        else
+            snprintf(detail, sizeof detail, "assert_eq(%s, %s)", a, b);
         free(a); free(b);
-        if (i) { i->cf.signal = CF_PANIC; i->cf.value = xs_str("assert_eq failed"); }
+        xs_runtime_error(span_zero(), "AssertionError", NULL, "assertion failed: %s", detail);
     }
     return value_incref(XS_NULL_VAL);
 }

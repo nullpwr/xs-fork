@@ -486,23 +486,6 @@ void node_free(Node *n) {
         node_free(n->bind_decl.expr);
         break;
     case NODE_LIT_DURATION: break;
-    case NODE_EVERY:
-        node_free(n->every_.interval);
-        node_free(n->every_.body);
-        break;
-    case NODE_AFTER:
-        node_free(n->after_.delay);
-        node_free(n->after_.body);
-        break;
-    case NODE_TIMEOUT:
-        node_free(n->timeout_.duration);
-        node_free(n->timeout_.body);
-        node_free(n->timeout_.fallback);
-        break;
-    case NODE_DEBOUNCE:
-        node_free(n->debounce_.delay);
-        node_free(n->debounce_.body);
-        break;
     case NODE_PAUSE:
         node_free(n->pause_.duration);
         break;

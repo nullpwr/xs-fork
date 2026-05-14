@@ -91,9 +91,6 @@ static const KWEntry KEYWORDS[] = {
     {"resume",   TK_RESUME},
     {"tag",      TK_TAG},
     {"bind",     TK_BIND},
-    {"every",    TK_EVERY},
-    {"after",    TK_AFTER},
-    {"debounce", TK_DEBOUNCE},
     {"pause",    TK_PAUSE},
     {"del",      TK_DEL},
     {"do",       TK_DO},
@@ -1396,10 +1393,6 @@ const char *token_kind_name(TokenKind k) {
     case TK_USE: return "use";
     case TK_TAG: return "tag";
     case TK_BIND: return "bind";
-    case TK_EVERY: return "every";
-    case TK_AFTER: return "after";
-    case TK_TIMEOUT: return "timeout";
-    case TK_DEBOUNCE: return "debounce";
     case TK_PAUSE: return "pause";
     case TK_DEL: return "del";
     case TK_DO: return "do";

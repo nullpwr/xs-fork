@@ -2275,10 +2275,6 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         emit_null(code);
         break;
 
-    case NODE_EVERY:
-    case NODE_AFTER:
-    case NODE_TIMEOUT:
-    case NODE_DEBOUNCE:
     case NODE_PAUSE:
     case NODE_DEL:
         emit_null(code);
@@ -3201,24 +3197,6 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     case NODE_PERFORM:
     case NODE_RESUME:
-        break;
-
-    /* ---- Timing constructs ---- */
-
-    case NODE_EVERY:
-        if (node->every_.body) compile_block(node->every_.body, code, locals, ctx);
-        break;
-
-    case NODE_AFTER:
-        if (node->after_.body) compile_block(node->after_.body, code, locals, ctx);
-        break;
-
-    case NODE_TIMEOUT:
-        if (node->timeout_.body) compile_block(node->timeout_.body, code, locals, ctx);
-        break;
-
-    case NODE_DEBOUNCE:
-        if (node->debounce_.body) compile_block(node->debounce_.body, code, locals, ctx);
         break;
 
     case NODE_PAUSE:

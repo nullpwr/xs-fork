@@ -3095,28 +3095,6 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
         emit_const(c, xs_duration(n->lit_duration.ns));
         break;
 
-    case NODE_EVERY:
-        compile_node(c, n->every_.interval, 1);
-        emit(c, MAKE_A(OP_POP, 0, 0));
-        compile_node(c, n->every_.body, want_value);
-        return;
-
-    case NODE_AFTER:
-        compile_node(c, n->after_.delay, 1);
-        emit(c, MAKE_A(OP_POP, 0, 0));
-        compile_node(c, n->after_.body, want_value);
-        return;
-
-    case NODE_TIMEOUT:
-        compile_node(c, n->timeout_.body, want_value);
-        return;
-
-    case NODE_DEBOUNCE:
-        compile_node(c, n->debounce_.delay, 1);
-        emit(c, MAKE_A(OP_POP, 0, 0));
-        compile_node(c, n->debounce_.body, want_value);
-        return;
-
     case NODE_PAUSE:
         /* `pause <duration>` lowers to a call to the __pause native;
            the interpreter handles the same node directly. */

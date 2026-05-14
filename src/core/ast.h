@@ -139,10 +139,6 @@ typedef enum {
     NODE_BIND,
 
     NODE_LIT_DURATION,
-    NODE_EVERY,
-    NODE_AFTER,
-    NODE_TIMEOUT,
-    NODE_DEBOUNCE,
     NODE_PAUSE,
     NODE_DEL,
 
@@ -597,10 +593,6 @@ struct Node {
 
         struct { int64_t ns; } lit_duration;    /* stored as nanoseconds */
 
-        struct { Node *interval; Node *body; } every_;
-        struct { Node *delay; Node *body; } after_;
-        struct { Node *duration; Node *body; Node *fallback; } timeout_;
-        struct { Node *delay; Node *body; } debounce_;
         struct { Node *duration; } pause_;
         struct { char *name; } del_;
 

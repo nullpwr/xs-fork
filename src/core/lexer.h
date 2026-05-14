@@ -32,7 +32,7 @@ typedef enum {
 
     TK_EFFECT, TK_PERFORM, TK_HANDLE, TK_RESUME,
     TK_TAG, TK_BIND,
-    TK_EVERY, TK_AFTER, TK_TIMEOUT, TK_DEBOUNCE, TK_PAUSE, TK_DEL,
+    TK_PAUSE, TK_DEL,
     TK_DO, TK_WITH, TK_LOAD,
 
     // operators

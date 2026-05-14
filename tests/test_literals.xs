@@ -44,22 +44,4 @@ assert_eq(str(1m30s), "1m30s")
 assert_eq(str(2500ms), "2.5s")
 assert_eq(str(0s), "0s")
 
--- scheduling primitives accept Duration
-var ran = false
-after 1ms {
-    ran = true
-}
-assert_eq(ran, true)
-
-var count = 0
-every 1s {
-    count = count + 1
-}
-assert_eq(count, 1)
-
-timeout 5s {
-    -- body returns; nothing to assert here, just exercise the parse + run
-    let _ = 1
-}
-
 println("all literal tests passed")

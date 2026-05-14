@@ -57,10 +57,6 @@ const char *node_tag_to_string(NodeTag tag) {
     case NODE_EXPR_STMT:  return "expr_stmt";
     case NODE_BIND:       return "bind";
     case NODE_LIT_DURATION: return "duration";
-    case NODE_EVERY:      return "every";
-    case NODE_AFTER:      return "after";
-    case NODE_TIMEOUT:    return "timeout";
-    case NODE_DEBOUNCE:   return "debounce";
     case NODE_PAUSE:      return "pause";
     case NODE_DEL:        return "del";
     case NODE_DO_EXPR:    return "do";
@@ -111,10 +107,6 @@ int node_tag_from_string(const char *s) {
     if (strcmp(s, "expr_stmt") == 0) return NODE_EXPR_STMT;
     if (strcmp(s, "bind") == 0) return NODE_BIND;
     if (strcmp(s, "duration") == 0) return NODE_LIT_DURATION;
-    if (strcmp(s, "every") == 0) return NODE_EVERY;
-    if (strcmp(s, "after") == 0) return NODE_AFTER;
-    if (strcmp(s, "timeout") == 0) return NODE_TIMEOUT;
-    if (strcmp(s, "debounce") == 0) return NODE_DEBOUNCE;
     if (strcmp(s, "pause") == 0) return NODE_PAUSE;
     if (strcmp(s, "del") == 0) return NODE_DEL;
     return -1;
@@ -221,24 +213,6 @@ Value *node_to_xs_map(Node *n) {
     }
     case NODE_LIT_DURATION:
         map_take(m->map, "ns", xs_int(n->lit_duration.ns));
-        break;
-    case NODE_EVERY:
-        map_set(m->map, "interval", node_to_xs_map(n->every_.interval));
-        map_set(m->map, "body", node_to_xs_map(n->every_.body));
-        break;
-    case NODE_AFTER:
-        map_set(m->map, "delay", node_to_xs_map(n->after_.delay));
-        map_set(m->map, "body", node_to_xs_map(n->after_.body));
-        break;
-    case NODE_TIMEOUT:
-        map_set(m->map, "duration", node_to_xs_map(n->timeout_.duration));
-        map_set(m->map, "body", node_to_xs_map(n->timeout_.body));
-        if (n->timeout_.fallback)
-            map_set(m->map, "fallback", node_to_xs_map(n->timeout_.fallback));
-        break;
-    case NODE_DEBOUNCE:
-        map_set(m->map, "delay", node_to_xs_map(n->debounce_.delay));
-        map_set(m->map, "body", node_to_xs_map(n->debounce_.body));
         break;
     case NODE_PAUSE:
         map_set(m->map, "duration", node_to_xs_map(n->pause_.duration));
@@ -522,49 +496,6 @@ Node *node_from_xs_map(Value *map) {
         n->lit_duration.ns = (v && VAL_TAG(v) == XS_INT) ? VAL_INT(v) : 0;
         return n;
     }
-    if (tag_i == NODE_EVERY) {
-        Node *n = node_new(NODE_EVERY, sp);
-        Value *interval = map_get(map->map, "interval");
-        Value *body = map_get(map->map, "body");
-        n->every_.interval = node_from_xs_map(interval);
-        n->every_.body = node_from_xs_map(body);
-        if (!n->every_.interval) n->every_.interval = node_new(NODE_LIT_NULL, sp);
-        if (!n->every_.body) n->every_.body = node_new(NODE_LIT_NULL, sp);
-        return n;
-    }
-    if (tag_i == NODE_AFTER) {
-        Node *n = node_new(NODE_AFTER, sp);
-        Value *delay = map_get(map->map, "delay");
-        Value *body = map_get(map->map, "body");
-        n->after_.delay = node_from_xs_map(delay);
-        n->after_.body = node_from_xs_map(body);
-        if (!n->after_.delay) n->after_.delay = node_new(NODE_LIT_NULL, sp);
-        if (!n->after_.body) n->after_.body = node_new(NODE_LIT_NULL, sp);
-        return n;
-    }
-    if (tag_i == NODE_TIMEOUT) {
-        Node *n = node_new(NODE_TIMEOUT, sp);
-        Value *dur = map_get(map->map, "duration");
-        Value *body = map_get(map->map, "body");
-        Value *fb = map_get(map->map, "fallback");
-        n->timeout_.duration = node_from_xs_map(dur);
-        n->timeout_.body = node_from_xs_map(body);
-        n->timeout_.fallback = (fb && VAL_TAG(fb) == XS_MAP) ? node_from_xs_map(fb) : NULL;
-        if (!n->timeout_.duration) n->timeout_.duration = node_new(NODE_LIT_NULL, sp);
-        if (!n->timeout_.body) n->timeout_.body = node_new(NODE_LIT_NULL, sp);
-        return n;
-    }
-    if (tag_i == NODE_DEBOUNCE) {
-        Node *n = node_new(NODE_DEBOUNCE, sp);
-        Value *delay = map_get(map->map, "delay");
-        Value *body = map_get(map->map, "body");
-        n->debounce_.delay = node_from_xs_map(delay);
-        n->debounce_.body = node_from_xs_map(body);
-        if (!n->debounce_.delay) n->debounce_.delay = node_new(NODE_LIT_NULL, sp);
-        if (!n->debounce_.body) n->debounce_.body = node_new(NODE_LIT_NULL, sp);
-        return n;
-    }
-
     /* Unsupported tag: wrap as a plugin_eval node that calls the XS value directly.
        We store the XS map itself as a literal that interp_eval can handle. */
     return NULL;

@@ -3292,7 +3292,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 map_del(sd, k); free(k);
                             }
                             mc_result = value_incref(XS_NULL_VAL);
-                        } else if (strcmp(mc_name, "contains") == 0 ||
+                        } else if (strcmp(mc_name, "has") == 0 ||
+                                   strcmp(mc_name, "contains") == 0 ||
                                    strcmp(mc_name, "includes") == 0) {
                             int hit = 0;
                             if (mc_argc >= 1) {
@@ -5338,6 +5339,40 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *arr=xs_array_new();
                     for(int j=mc_obj->arr->len-1;j>=0;j--) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     mc_result=arr;
+                } else if (strcmp(mc_name,"sorted")==0) {
+                    /* Return a sorted copy; optional comparator fn. */
+                    Value *arr=xs_array_new();
+                    for(int j=0;j<mc_obj->arr->len;j++) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
+                    Value *cmp_fn=(mc_argc>=1&&mc_args[0]&&
+                                   (VAL_TAG(mc_args[0])==XS_NATIVE||VAL_TAG(mc_args[0])==XS_CLOSURE))
+                                  ?mc_args[0]:NULL;
+                    int slen=arr->arr->len;
+                    if(slen>1){
+                        Value **buf=xs_malloc((size_t)slen*sizeof(Value*));
+                        for(int width=1;width<slen;width*=2){
+                            for(int s=0;s<slen;s+=2*width){
+                                int lo=s,mid=(s+width<slen)?s+width:slen,hi=(s+2*width<slen)?s+2*width:slen;
+                                int p=lo,q=mid,k=lo;
+                                while(p<mid&&q<hi){
+                                    int cmp;
+                                    if(cmp_fn){
+                                        Value *pair[2]={arr->arr->items[p],arr->arr->items[q]};
+                                        Value *r=vm_invoke(vm,cmp_fn,pair,2);
+                                        frame=FRAME;
+                                        cmp=(r&&VAL_TAG(r)==XS_INT)?(int)VAL_INT(r):0;
+                                        if(r) value_decref(r);
+                                    } else { cmp=value_cmp(arr->arr->items[p],arr->arr->items[q]); }
+                                    if(cmp<=0) buf[k++]=arr->arr->items[p++];
+                                    else       buf[k++]=arr->arr->items[q++];
+                                }
+                                while(p<mid) buf[k++]=arr->arr->items[p++];
+                                while(q<hi)  buf[k++]=arr->arr->items[q++];
+                                for(int j=lo;j<hi;j++) arr->arr->items[j]=buf[j];
+                            }
+                        }
+                        free(buf);
+                    }
+                    mc_result=arr;
                 } else if (strcmp(mc_name,"scan")==0&&mc_argc>=2) {
                     /* scan(init, fn): init first, fn second, matching interpreter */
                     Value *acc=value_incref(mc_args[0]);
@@ -6952,10 +6987,10 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_IMPORT: {
             const char *mod_name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *mod = map_get(vm->globals, mod_name);
-            if (!mod) {
-                /* First-time import of a stdlib module: build it,
-                   bind it under its name in globals so subsequent
-                   imports / qualified accesses see the same value. */
+            /* If the existing global is not a module or map, it is a
+               builtin function that shares a name with a stdlib module.
+               Always prefer the module when an explicit import is used. */
+            if (!mod || (VAL_TAG(mod) != XS_MAP && VAL_TAG(mod) != XS_MODULE)) {
                 Value *built = stdlib_load_module(NULL, mod_name);
                 if (built) {
                     map_set(vm->globals, mod_name, built);
@@ -6975,7 +7010,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             const char *item_name = PROTO->chunk.consts[INSTR_A(instr)]->s;
             const char *mod_name  = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
             Value *mod = map_get(vm->globals, mod_name);
-            if (!mod) {
+            if (!mod || (VAL_TAG(mod) != XS_MAP && VAL_TAG(mod) != XS_MODULE)) {
                 Value *built = stdlib_load_module(NULL, mod_name);
                 if (built) {
                     map_set(vm->globals, mod_name, built);
