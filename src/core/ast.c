@@ -178,7 +178,7 @@ static void free_string_array(char **arr, int n) {
 
 void node_free(Node *n) {
     if (!n) return;
-    switch (VAL_TAG(n)) {
+    switch (n->tag) {
     case NODE_LIT_INT: case NODE_LIT_FLOAT: case NODE_LIT_BOOL:
     case NODE_LIT_NULL: case NODE_LIT_CHAR:
         break;

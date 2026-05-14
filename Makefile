@@ -8,6 +8,7 @@ CC      = gcc
 XS_VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
 
 CFLAGS  = -O2 -Wall -Wextra -Wno-unused-parameter -std=c11 -Isrc -Isrc/tls/bearssl \
+          -Wno-unknown-warning-option -Wno-enum-compare-conditional \
           -DXS_VERSION='"$(XS_VERSION)"' -MMD -MP
 LDFLAGS = -lm -lpthread
 
