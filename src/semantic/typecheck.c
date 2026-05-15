@@ -644,6 +644,18 @@ static void tc_walk(Node *n, SymTab *st, SemaCtx *ctx) {
         if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT) {
             Symbol *fn_sym = sym_lookup(st, n->call.callee->ident.name);
             if (fn_sym && fn_sym->decl && VAL_TAG(fn_sym->decl) == NODE_FN_DECL) {
+                /* @deprecated("msg") fn warns its callers. Until now the
+                   message was parsed and parked on the AST but no one
+                   read it -- the docs claimed "warns at check time" and
+                   nothing actually warned. */
+                const char *dmsg = fn_sym->decl->fn_decl.deprecated_msg;
+                if (dmsg && ctx && ctx->diag) {
+                    Diagnostic *diag = diag_new(DIAG_WARNING, DIAG_PHASE_SEMANTIC,
+                        "W0001", "'%s' is deprecated: %s",
+                        n->call.callee->ident.name, dmsg);
+                    diag_annotate(diag, n->span, 1, "deprecated call");
+                    diag_emit(ctx->diag, diag);
+                }
                 ParamList *params = &fn_sym->decl->fn_decl.params;
                 int nargs = n->call.args.len;
                 int nparams = params->len;
