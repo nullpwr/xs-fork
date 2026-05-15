@@ -1120,8 +1120,9 @@ fn test_strings() {
 #[deprecated("moved to v2")]
 fn legacy() { }
 
--- pub: marks a function as public (visible to importers)
-pub fn helper() { return 42 }
+-- export: list the names a file exposes to importers (see "Exporting Names")
+export { helper }
+fn helper() { return 42 }
 
 -- static: in impl blocks, a method that doesn't take self
 impl Point {
@@ -2316,40 +2317,41 @@ For directories, `use "dir/"` imports all `.xs` files in the directory.
 
 ### Exporting Names
 
-Cross-file imports respect `pub`. A name from the imported file is
-visible through the namespace only if its declaration is marked
-public; everything else stays file-local.
+A file's public surface is whatever its `export { ... }` list names.
+Everything else stays file-local. The list goes wherever you want at
+the top level of the file (typically last); names can be aliased with
+`as` to publish under a different spelling.
 
 ```xs
 -- math_utils.xs
-pub fn double(x) { return x * 2 }      -- visible
-pub let TAU = 6.2831                   -- visible
-pub const E  = 2.71828                 -- visible
-pub struct Point { x: int, y: int }    -- visible
-pub enum Status { Ok, Failed }         -- visible (variants too)
+fn double(x) { return x * 2 }
+fn triple(x) { return x * 3 }
+fn helper(x) { return x + 1 }          -- not exported
+let TAU = 6.2831
+let seed = 42                          -- not exported
+struct Point { x: int, y: int }
 
-fn _helper(x) { return x + 1 }         -- private, file-local
-let _seed = 42                         -- private, file-local
+fn rgb_to_hex(r, g, b) { ... }
+
+export { double, triple, TAU, Point, rgb_to_hex as rgbToHex }
 ```
 
 ```xs
 use "math_utils.xs"
+
 println(math_utils.double(5))          -- 10
 println(math_utils.TAU)                -- 6.2831
-println(math_utils._helper)            -- null (private)
+println(math_utils.helper)             -- null (not exported)
+println(math_utils.rgbToHex(255, 0, 0))-- callable under the alias
+println(math_utils.rgb_to_hex)         -- null (alias is the only public name)
 ```
 
-`@export("alias")` on a function exposes it under a public name distinct
-from the local one. Both names work at the call site.
+A file with no `export { ... }` list at all falls back to exposing
+every top-level binding -- scripts and quick experiments work without
+ceremony. Add an export list and strict filtering kicks in.
 
-```xs
-@export("rgbToHex")
-fn rgb_to_hex(r, g, b) { ... }
-```
-
-A file with no `pub` or `@export` anywhere falls back to exposing every
-top-level binding. As soon as a single declaration is marked public,
-strict filtering kicks in.
+There is no `pub` modifier and no `@export` decorator. The `export { }`
+list is the one and only mechanism for marking a public surface.
 
 ### Declaring Modules Inline
 
@@ -3438,8 +3440,7 @@ delegates to the original.
 @bench   fn bench_sort() { ... }
 @example fn example_basic_use() { ... }
 
-@export("publicName") fn local_name() { ... }
-@once @every(5s)      fn one_shot() { ... }
+@once @every(5s) fn one_shot() { ... }
 ```
 
 Lifecycle (`@on_start`, `@on_exit`, `@on_panic`) and signal

@@ -38,7 +38,7 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Higher-rank `forall<T>` types | works |
 | `@scoped` annotations + escape analysis | works |
 | `@[macro]` procedural-macro markers | works |
-| Decorators (`@on_start`/`@every`/`@cron`/`@watch`/`@export`/`@once`/`@bench`/...) | works |
+| Decorators (`@on_start`/`@every`/`@cron`/`@watch`/`@once`/`@bench`/...) | works |
 | Algebraic effects: effect/perform/handle/resume (single-shot) | works |
 | Multi-shot effects (resume called more than once) | partial: VM and JIT replay correctly; the tree-walker still returns the resume's first value. Use `--vm` or `--jit` for cartesian-product effect arms. |
 | Concurrency (spawn, async/await, channels, actors, nurseries) | works |

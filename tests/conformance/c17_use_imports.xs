@@ -1,5 +1,5 @@
--- Cross-file `use` semantics: pub-marked top-level decls are visible
--- through the imported namespace, unmarked ones are not.
+-- Cross-file `use` semantics: the importer sees only what the trailing
+-- `export { ... }` list names. Everything else stays private.
 
 use "./c17_use_lib/util.xs"
 
@@ -13,25 +13,26 @@ let p = P { x: 3, y: 4 }
 assert_eq(p.x, 3)
 assert_eq(p.y, 4)
 
--- @export("alias") exposes both the local name AND the alias
-assert_eq(util.aliased(), "via alias")
-assert_eq(util.local_only_name(), "via alias")
+-- `export { local as public }` rebinds the public name.
+assert_eq(util.rgbToHex(1, 2, 3), 6)
+-- Local name is no longer visible under the original spelling.
+assert_eq(util.rgb_to_hex, null)
 
--- Private bindings are not visible
+-- Anything not listed in the export block is private.
 assert_eq(util.whisper, null)
 assert_eq(util.private_const, null)
 assert_eq(util.SECRET, null)
 
--- `as` rebinds the namespace
+-- `as` rebinds the namespace at the use site.
 use "./c17_use_lib/util.xs" as u
 assert_eq(u.shout("again"), "HI again")
 
--- Selective `{ name }` binding pulls just the listed pub names
+-- Selective `{ name }` binding pulls the listed names into local scope.
 use "./c17_use_lib/util.xs" { shout, public_const }
 assert_eq(shout("local"), "HI local")
 assert_eq(public_const, 99)
 
--- Renamed selective: `{ shout as bark }` (parser accepts; runtime binds)
+-- Renamed selective pull: `{ shout as bark }`.
 use "./c17_use_lib/util.xs" { shout as bark }
 assert_eq(bark("renamed"), "HI renamed")
 

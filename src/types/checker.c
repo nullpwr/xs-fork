@@ -1402,7 +1402,7 @@ void ck_check_stmt(CkContext *ctx, Node *stmt) {
             ck_check_stmt(ctx, stmt->class_decl.members.items[i]);
         break;
 
-    case NODE_IMPORT: case NODE_USE: case NODE_MODULE_DECL:
+    case NODE_IMPORT: case NODE_USE: case NODE_EXPORT: case NODE_MODULE_DECL:
     case NODE_TYPE_ALIAS: case NODE_EFFECT_DECL:
         break;
 

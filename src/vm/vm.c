@@ -922,62 +922,16 @@ static void publist_free(PubList *pl) {
     free(pl->names);
 }
 
+/* Public surface of a loaded module = whatever its `export { ... }`
+   lists name. No export list = expose everything top-level. */
 static void publist_collect(Node *prog, PubList *out) {
     if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return;
     for (int j = 0; j < prog->program.stmts.len; j++) {
         Node *s = prog->program.stmts.items[j];
-        if (!s) continue;
-        switch (VAL_TAG(s)) {
-            case NODE_FN_DECL: {
-                int has_export = 0;
-                const char *export_name = NULL;
-                for (int d = 0; d < s->fn_decl.n_decorators; d++) {
-                    if (s->fn_decl.decorators[d].name &&
-                        strcmp(s->fn_decl.decorators[d].name, "export") == 0) {
-                        has_export = 1;
-                        if (s->fn_decl.decorators[d].n_args > 0 &&
-                            s->fn_decl.decorators[d].args[0] &&
-                            VAL_TAG(s->fn_decl.decorators[d].args[0]) == NODE_LIT_STRING) {
-                            export_name = s->fn_decl.decorators[d].args[0]->lit_string.sval;
-                        }
-                    }
-                }
-                if (s->fn_decl.is_pub || has_export) {
-                    out->any_pub = 1;
-                    publist_push(out, s->fn_decl.name);
-                    if (export_name) publist_push(out, export_name);
-                }
-                break;
-            }
-            case NODE_LET: case NODE_VAR:
-                if (s->let.is_pub) { out->any_pub = 1; publist_push(out, s->let.name); }
-                break;
-            case NODE_CONST:
-                if (s->const_.is_pub) { out->any_pub = 1; publist_push(out, s->const_.name); }
-                break;
-            case NODE_STRUCT_DECL:
-                if (s->struct_decl.is_pub) { out->any_pub = 1; publist_push(out, s->struct_decl.name); }
-                break;
-            case NODE_ENUM_DECL:
-                if (s->enum_decl.is_pub) {
-                    out->any_pub = 1;
-                    publist_push(out, s->enum_decl.name);
-                    for (int v = 0; v < s->enum_decl.variants.len; v++) {
-                        EnumVariant *ev = &s->enum_decl.variants.items[v];
-                        if (ev->name) publist_push(out, ev->name);
-                    }
-                }
-                break;
-            case NODE_MODULE_DECL:
-                if (s->module_decl.is_pub) { out->any_pub = 1; publist_push(out, s->module_decl.name); }
-                break;
-            case NODE_TYPE_ALIAS:
-                if (s->type_alias.is_pub) { out->any_pub = 1; publist_push(out, s->type_alias.name); }
-                break;
-            case NODE_TAG_DECL:
-                if (s->tag_decl.is_pub) { out->any_pub = 1; publist_push(out, s->tag_decl.name); }
-                break;
-            default: break;
+        if (s && VAL_TAG(s) == NODE_EXPORT) {
+            out->any_pub = 1;
+            for (int k = 0; k < s->export_.nnames; k++)
+                publist_push(out, s->export_.names[k]);
         }
     }
 }
@@ -1055,8 +1009,23 @@ static Value *vm_load_user_module_file(const char *filepath) {
         XSMap *m = map_new();
         if (pubs.any_pub) {
             for (int i = 0; i < pubs.len; i++) {
-                Value *v = map_get(child->globals, pubs.names[i]);
-                if (v) map_set(m, pubs.names[i], value_incref(v));
+                const char *local = pubs.names[i];
+                /* Look up an alias from any `export { local as pub }` lists. */
+                const char *publish_as = local;
+                for (int j = 0; j < prog->program.stmts.len; j++) {
+                    Node *s = prog->program.stmts.items[j];
+                    if (!s || VAL_TAG(s) != NODE_EXPORT) continue;
+                    for (int k = 0; k < s->export_.nnames; k++) {
+                        if (s->export_.names[k] &&
+                            strcmp(s->export_.names[k], local) == 0 &&
+                            s->export_.aliases[k]) {
+                            publish_as = s->export_.aliases[k];
+                            break;
+                        }
+                    }
+                }
+                Value *v = map_get(child->globals, local);
+                if (v) map_set(m, publish_as, value_incref(v));
             }
         } else {
             /* No pub anywhere: expose everything the file added. We

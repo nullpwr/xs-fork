@@ -443,7 +443,6 @@ static int is_known_decorator(const char *name) {
         "every", "cron", "delayed",
         "watch",
         "bench", "example",
-        "export",
         "once",
         "test",
         /* wrapping decorators -- replace the bound fn with a wrapper
@@ -469,12 +468,11 @@ int parser_decorator_is_wrapping(const char *name) {
 }
 
 /* @cron / @every / @delayed schedule the function with no caller, so
-   they can't accept parameters. @export / @once / @watch and the
-   no-arg lifecycle hooks (start / exit / signal) all also fire
-   without args, so we apply the same no-params rule to them.
-   @on_panic receives the exception, and @bench / @example are
-   caller-driven discovery markers (the runner passes a test harness),
-   so they can declare params. */
+   they can't accept parameters. @once / @watch and the no-arg
+   lifecycle hooks (start / exit / signal) all also fire without args,
+   so we apply the same no-params rule to them. @on_panic receives the
+   exception, and @bench / @example are caller-driven discovery markers
+   (the runner passes a test harness), so they can declare params. */
 static int decorator_forbids_params(const char *name) {
     if (!name) return 0;
     return strcmp(name, "every") == 0 ||
@@ -484,7 +482,6 @@ static int decorator_forbids_params(const char *name) {
            strcmp(name, "on_exit") == 0 ||
            strcmp(name, "on_signal") == 0 ||
            strcmp(name, "watch") == 0 ||
-           strcmp(name, "export") == 0 ||
            strcmp(name, "once") == 0;
 }
 
@@ -494,6 +491,12 @@ static void validate_decorators(Parser *p, int n_params,
     int trigger_count = 0;
     for (int i = 0; i < n_decs; i++) {
         const char *name = decs[i].name;
+        if (name && strcmp(name, "export") == 0) {
+            parse_error_at(p, decs[i].span, "P0054",
+                "`@export` is gone. List the names to expose at the "
+                "bottom of the file: `export { foo, bar }`");
+            continue;
+        }
         if (!is_known_decorator(name)) {
             parse_error_at(p, decs[i].span, "P0051",
                 "unknown decorator '@%s'", name ? name : "?");
@@ -4064,9 +4067,18 @@ static Node *parse_stmt(Parser *p) {
     Token *tok = pp_peek(p, 0);
     Span span = tok->span;
 
-    /* skip modifiers / attributes */
+    /* skip modifiers / attributes. `pub` is no longer a modifier --
+       it's a parse error pointing the author at the `export { ... }`
+       list, which is now the only way to mark a public surface. */
     int is_pub = 0, is_async = 0;
-    while (pp_check(p, TK_PUB)) { pp_advance(p); is_pub=1; }
+    if (pp_check(p, TK_PUB)) {
+        Token *pt = pp_advance(p);
+        parse_error_at(p, pt->span, "P0054",
+            "`pub` is no longer a modifier. List the names you want to "
+            "expose at the bottom of the file: `export { foo, bar }`");
+        synchronize(p);
+        return NULL;
+    }
     while (pp_check(p, TK_ASYNC)) { pp_advance(p); is_async=1; }
     while (pp_check(p, TK_STATIC) || pp_check(p, TK_MUT)) pp_advance(p);
     /* skip #[...] attributes, detect #[test], #[deprecated("msg")], #[derive(...)] */
@@ -4416,6 +4428,40 @@ static Node *parse_stmt(Parser *p) {
     if (tok->kind == TK_IMPORT) return parse_import(p);
     if (tok->kind == TK_USE) return parse_use(p);
     if (tok->kind == TK_LOAD) return parse_load_stmt(p);
+    /* `export { name, name as alias, ... }` declares a file's public
+       surface. Followed by an LBRACE so it doesn't conflict with
+       contextual-identifier uses of the word `export`. */
+    if (tok->kind == TK_EXPORT && pp_peek(p, 1)->kind == TK_LBRACE) {
+        Span span = tok->span;
+        pp_advance(p); /* consume 'export' */
+        pp_advance(p); /* consume '{' */
+        char **names = NULL, **aliases = NULL;
+        int nnames = 0;
+        while (!pp_check2(p, TK_RBRACE, TK_EOF)) {
+            Token *it = pp_expect(p, TK_IDENT, "expected name in export list");
+            char *n_ = xs_strdup(it->sval ? it->sval : "");
+            char *a_ = NULL;
+            if (pp_match(p, TK_AS)) {
+                Token *al = pp_expect(p, TK_IDENT, "expected alias name");
+                a_ = xs_strdup(al->sval ? al->sval : "");
+            } else {
+                a_ = xs_strdup(n_);
+            }
+            names   = xs_realloc(names,   (nnames + 1) * sizeof(char*));
+            aliases = xs_realloc(aliases, (nnames + 1) * sizeof(char*));
+            names[nnames] = n_;
+            aliases[nnames] = a_;
+            nnames++;
+            if (!pp_match(p, TK_COMMA)) break;
+        }
+        pp_expect(p, TK_RBRACE, "expected '}' to close export list");
+        if (!pp_match(p, TK_SEMICOLON)) pp_match(p, TK_NEWLINE);
+        Node *n = node_new(NODE_EXPORT, span);
+        n->export_.names   = names;
+        n->export_.aliases = aliases;
+        n->export_.nnames  = nnames;
+        return n;
+    }
     if (tok->kind == TK_PAUSE) {
         pp_advance(p);
         Node *dur = parse_expr(p, 0);

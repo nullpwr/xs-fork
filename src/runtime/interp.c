@@ -348,10 +348,6 @@ static void register_fn_decl_triggers(Interp *i, Node *stmt, Value *fn_v) {
         for (int a = 0; a < d->n_args; a++)
             args[a] = EVAL(i, d->args[a]);
         trigger_registry_register(d->name, args, d->n_args, fn_v, has_once);
-        if (strcmp(d->name, "export") == 0 && d->n_args >= 1 &&
-            args[0] && VAL_TAG(args[0]) == XS_STR && args[0]->s) {
-            env_define(i->globals, args[0]->s, fn_v, 1);
-        }
     }
 }
 
@@ -7549,65 +7545,44 @@ static void pubname_free(PubName *list) {
     }
 }
 
-static PubName *collect_public_names(Node *prog, int *any_pub) {
+/* Returns aliases for entries whose imported (alias) name differs from
+   the local name. Indexed parallel to a PubName entry's `name` field;
+   the loader looks up `local_name` in env/globals, then publishes it
+   under `alias_for(local_name)`. NULL means "publish under same name". */
+typedef struct AliasEntry { char *local; char *alias; struct AliasEntry *next; } AliasEntry;
+
+static const char *alias_lookup(AliasEntry *list, const char *local) {
+    for (AliasEntry *a = list; a; a = a->next)
+        if (strcmp(a->local, local) == 0) return a->alias;
+    return NULL;
+}
+
+static void alias_add(AliasEntry **list, const char *local, const char *alias) {
+    AliasEntry *e = xs_malloc(sizeof(*e));
+    e->local = xs_strdup(local);
+    e->alias = xs_strdup(alias);
+    e->next  = *list;
+    *list = e;
+}
+
+static void alias_free(AliasEntry *list) {
+    while (list) { AliasEntry *n = list->next; free(list->local); free(list->alias); free(list); list = n; }
+}
+
+/* The file's public surface is everything named in `export { ... }`
+   lists at the top level. If the file has no export lists at all, the
+   loader falls back to exposing every top-level binding -- scripts and
+   throwaway files keep working without ceremony. */
+static PubName *collect_public_names(Node *prog, int *has_export_list) {
     PubName *out = NULL;
-    *any_pub = 0;
+    *has_export_list = 0;
     if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return out;
     for (int j = 0; j < prog->program.stmts.len; j++) {
         Node *s = prog->program.stmts.items[j];
-        if (!s) continue;
-        switch (VAL_TAG(s)) {
-            case NODE_FN_DECL: {
-                int has_export = 0;
-                const char *export_name = NULL;
-                for (int d = 0; d < s->fn_decl.n_decorators; d++) {
-                    if (s->fn_decl.decorators[d].name &&
-                        strcmp(s->fn_decl.decorators[d].name, "export") == 0) {
-                        has_export = 1;
-                        if (s->fn_decl.decorators[d].n_args > 0 &&
-                            s->fn_decl.decorators[d].args[0] &&
-                            VAL_TAG(s->fn_decl.decorators[d].args[0]) == NODE_LIT_STRING) {
-                            export_name = s->fn_decl.decorators[d].args[0]->lit_string.sval;
-                        }
-                    }
-                }
-                if (s->fn_decl.is_pub || has_export) {
-                    *any_pub = 1;
-                    pubname_add(&out, s->fn_decl.name);
-                    if (export_name) pubname_add(&out, export_name);
-                }
-                break;
-            }
-            case NODE_LET: case NODE_VAR:
-                if (s->let.is_pub) { *any_pub = 1; pubname_add(&out, s->let.name); }
-                break;
-            case NODE_CONST:
-                if (s->const_.is_pub) { *any_pub = 1; pubname_add(&out, s->const_.name); }
-                break;
-            case NODE_STRUCT_DECL:
-                if (s->struct_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->struct_decl.name); }
-                break;
-            case NODE_ENUM_DECL:
-                if (s->enum_decl.is_pub) {
-                    *any_pub = 1;
-                    pubname_add(&out, s->enum_decl.name);
-                    /* variant constructors live in the same namespace */
-                    for (int v = 0; v < s->enum_decl.variants.len; v++) {
-                        EnumVariant *ev = &s->enum_decl.variants.items[v];
-                        if (ev->name) pubname_add(&out, ev->name);
-                    }
-                }
-                break;
-            case NODE_MODULE_DECL:
-                if (s->module_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->module_decl.name); }
-                break;
-            case NODE_TYPE_ALIAS:
-                if (s->type_alias.is_pub) { *any_pub = 1; pubname_add(&out, s->type_alias.name); }
-                break;
-            case NODE_TAG_DECL:
-                if (s->tag_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->tag_decl.name); }
-                break;
-            default: break;
+        if (s && VAL_TAG(s) == NODE_EXPORT) {
+            *has_export_list = 1;
+            for (int k = 0; k < s->export_.nnames; k++)
+                pubname_add(&out, s->export_.names[k]);
         }
     }
     return out;
@@ -7660,28 +7635,34 @@ static Value *load_xs_module_file(Interp *i, const char *filepath) {
     if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC || i->cf.signal == CF_THROW)
         CF_CLEAR(i);
 
-    int any_pub = 0;
-    PubName *pubs = collect_public_names(prog, &any_pub);
+    int has_exports = 0;
+    PubName *pubs = collect_public_names(prog, &has_exports);
+
+    /* Build alias table from `export { local as public, ... }`. */
+    AliasEntry *aliases = NULL;
+    for (int j = 0; j < prog->program.stmts.len; j++) {
+        Node *s = prog->program.stmts.items[j];
+        if (!s || VAL_TAG(s) != NODE_EXPORT) continue;
+        for (int k = 0; k < s->export_.nnames; k++) {
+            const char *local = s->export_.names[k];
+            const char *alias = s->export_.aliases[k];
+            if (local && alias && strcmp(local, alias) != 0)
+                alias_add(&aliases, local, alias);
+        }
+    }
 
     XSMap *m = map_new();
     for (int j = 0; j < i->env->len; j++) {
         const char *bname = i->env->bindings[j].name;
-        /* Only expose names the author marked public. If the file has no
-           pub/@export anywhere, fall back to exposing everything so that
-           older code keeps working unchanged. */
-        if (any_pub && !pubname_has(pubs, bname)) continue;
-        map_set(m, bname, value_incref(i->env->bindings[j].value));
+        /* Strict mode (export list present): only listed names go out.
+           Loose mode (no export list): expose every top-level binding
+           so that scripts and throwaway files just work. */
+        if (has_exports && !pubname_has(pubs, bname)) continue;
+        const char *publish_as = alias_lookup(aliases, bname);
+        map_set(m, publish_as ? publish_as : bname,
+                value_incref(i->env->bindings[j].value));
     }
-    /* @export("alias") binds the fn into globals (not env) under the
-       alias. Pull those in too so `mod.alias` resolves through the
-       module map. */
-    if (any_pub) {
-        for (PubName *pn = pubs; pn; pn = pn->next) {
-            if (map_get(m, pn->name)) continue;
-            Value *v = env_get(i->globals, pn->name);
-            if (v) map_set(m, pn->name, value_incref(v));
-        }
-    }
+    alias_free(aliases);
     pubname_free(pubs);
 
     env_decref(i->env);
@@ -10109,6 +10090,11 @@ void interp_exec(Interp *i, Node *stmt) {
         exec_load_stmt(i, stmt);
         break;
     }
+
+    case NODE_EXPORT:
+        /* Pure metadata: the loader reads the export list when the file
+           is loaded as a module. Running the file directly just skips it. */
+        break;
 
     case NODE_PLUGIN_DECL: {
         PluginPipeline *pp = (PluginPipeline *)i->pipeline;

@@ -17,8 +17,6 @@
 @bench   fn bench_a() { let _ = 1 }
 @example fn example_a() { let _ = 1 }
 
-@export("publicName") fn local_name() { let _ = 1 }
-
 @once @every(5s) fn once_only() { let _ = 1 }
 
 println("bug045: ok")

@@ -253,6 +253,7 @@ static void cov_register_node(XSCoverage *cov, Node *n) {
     case NODE_IDENT: case NODE_SCOPE:
     case NODE_PAT_WILD: case NODE_PAT_IDENT: case NODE_PAT_LIT:
     case NODE_CONTINUE: case NODE_TYPE_ALIAS: case NODE_IMPORT: case NODE_USE:
+    case NODE_EXPORT:
     case NODE_TRAIT_DECL:
         break;
     case NODE_LIT_STRING: case NODE_INTERP_STRING:

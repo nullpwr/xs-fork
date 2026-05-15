@@ -100,6 +100,7 @@ typedef enum {
     NODE_TRAIT_DECL,
     NODE_IMPORT,
     NODE_USE,
+    NODE_EXPORT,
     NODE_MODULE_DECL,
     NODE_TYPE_ALIAS,
 
@@ -471,6 +472,12 @@ struct Node {
             int    is_plugin;   /* 1 = use plugin "path" */
             int    sandbox_flags; /* bitfield: 1=inject_only, 2=no_override, 4=no_eval_hook */
         } use_;
+
+        struct {
+            char **names;        /* local names being exported */
+            char **aliases;      /* parallel: public name (== names[i] if no rename) */
+            int    nnames;
+        } export_;
 
         struct {
             char    *name;

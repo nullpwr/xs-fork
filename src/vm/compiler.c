@@ -3055,6 +3055,11 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
         if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         return;
 
+    case NODE_EXPORT:
+        /* Pure metadata: read by the cross-file loader, no bytecode. */
+        if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+        return;
+
     case NODE_USE: {
         if (n->use_.is_plugin && n->use_.path) {
             /* emit: __load_plugin("path") */

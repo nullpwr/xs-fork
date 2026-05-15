@@ -671,6 +671,26 @@ static void resolve_node(Node *n, SymTab *st, SemaCtx *ctx) {
                 sym_define(st, n->use_.name_aliases[ii], SYM_MODULE_ITEM, NULL, n, 0);
         }
         break;
+    case NODE_EXPORT:
+        /* Each name in `export { ... }` references a top-level decl.
+           Mark them used so unused-binding checks don't fire for the
+           public surface. The names must resolve to something visible
+           at this scope; sema's collect_toplevel runs first so bindings
+           defined further down the file are already in scope. */
+        for (int ii = 0; ii < n->export_.nnames; ii++) {
+            const char *nm = n->export_.names[ii];
+            if (!nm) continue;
+            sym_mark_used(st, nm);
+            if (!sym_lookup(st, nm)) {
+                if (ctx && ctx->diag) {
+                    Diagnostic *diag = diag_new(DIAG_ERROR, DIAG_PHASE_SEMANTIC,
+                        "T0002", "export references undefined name '%s'", nm);
+                    diag_annotate(diag, n->span, 1, "no such top-level binding");
+                    diag_emit(ctx->diag, diag);
+                }
+            }
+        }
+        break;
     case NODE_STRUCT_DECL:
     case NODE_ENUM_DECL:
     case NODE_TRAIT_DECL:
