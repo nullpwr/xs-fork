@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.11
+
+Cross-file `use` actually does something on the VM now -- it was a
+no-op with a "for now" comment. The bytecode compiler hands off to a
+new `__use_file` native that compiles the imported file with the VM
+compiler and runs it on a child VM, so the resulting closures invoke
+through the parent. Module-method dispatch on a struct constructor
+inside a loaded module (e.g. `lib.Point { x: 3 }`) constructs an
+instance instead of erroring with no-method.
+
+Visibility is one mechanism now: `export { name, name as alias, ... }`
+at the top level of a file. `pub` and `@export` are gone; using either
+raises P0054 with a one-liner pointing at the new shape. A file with
+no `export` list at all falls back to exposing every top-level
+binding, so quick scripts and throwaways stay zero-ceremony.
+
+`@deprecated("msg")` actually warns its callers now -- the message
+was parsed and parked on the AST but no one read it. Sema emits W0001
+at every call site of a deprecated fn.
+
+C transpiler grew per-arm effect handler dispatch, structured runtime
+errors, comparator support in `arr.sort_with`, predicate dispatch on
+`find` / `index_of`, the `del` tombstone semantics, map-spread, and
+explicit refusals for `bind` and the wrapping decorators. JS
+transpiler grew the same `del` tombstone, range methods, the bare
+builtins prelude, tuple-vs-array shape, and a parallel set of
+refusals.
+
+`make` now routes every `.o` / `.d` through `build/obj/` so the source
+tree stays clean. `make clean` sweeps any stray root-level artefacts
+that previous builds left behind.
+
 ## 1.2.10
 
 `xs upgrade` and `xs uninstall` fold the old xsi installer's job
