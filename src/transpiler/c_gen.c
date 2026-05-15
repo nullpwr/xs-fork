@@ -25,11 +25,30 @@ static const char *find_unsupported_for_c(Node *n) {
     case NODE_FN_DECL:
         if (n->fn_decl.is_generator)
             return "fn* generator declarations";
+        /* wrapping decorators (@memoize / @retry / @timed / @trace /
+         * @throttle / @debounce) need to rewrite the call path. trigger-
+         * style decorators (@on_start / @every / etc) are no-op'd silently
+         * because their absence doesn't change correctness for the
+         * decorated fn itself. */
+        for (int i = 0; i < n->fn_decl.n_decorators; i++) {
+            const char *dn = n->fn_decl.decorators[i].name;
+            if (!dn) continue;
+            if (strcmp(dn, "memoize") == 0 || strcmp(dn, "retry") == 0 ||
+                strcmp(dn, "timed") == 0   || strcmp(dn, "trace") == 0 ||
+                strcmp(dn, "throttle") == 0|| strcmp(dn, "debounce") == 0)
+                return "wrapping decorators (@memoize/@retry/@timed/@trace/@throttle/@debounce)";
+        }
         return find_unsupported_for_c(n->fn_decl.body);
     case NODE_LAMBDA:
         if (n->lambda.is_generator)
             return "fn*() generator lambdas";
         return find_unsupported_for_c(n->lambda.body);
+    case NODE_BIND:
+        /* `bind` is reactive on the interp + VM (re-evaluates when its
+         * dependencies are reassigned, indexed, or field-mutated). The C
+         * target lowers to a one-shot xs_val let, which silently goes
+         * stale. Refuse rather than miscompile. */
+        return "reactive `bind` declarations";
     case NODE_PROGRAM:
         for (int i = 0; i < n->program.stmts.len; i++) {
             const char *r = find_unsupported_for_c(n->program.stmts.items[i]);
@@ -2844,6 +2863,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         for (int i = 0; i < n->handle.arms.len; i++) {
             EffectArm *a = &n->handle.arms.items[i];
             sb_indent(s, depth + 1);
+            sb_printf(s, "__h%d.arm_eff_names[%d] = \"%s\";\n",
+                      hid, i, a->effect_name ? a->effect_name : (eff_name ? eff_name : "?"));
+            sb_indent(s, depth + 1);
             sb_printf(s, "__h%d.arm_op_names[%d] = \"%s\";\n",
                       hid, i, a->op_name ? a->op_name : "?");
         }
@@ -4653,9 +4675,10 @@ char *transpile_c(Node *program, const char *filename) {
         " * Multi-shot resume needs full continuations and is not supported. */\n"
         "typedef xs_val (*XsArmDispatch)(int aid, xs_val arg);\n"
         "typedef struct XsEffFrame {\n"
-        "    const char       *eff_name;\n"
+        "    const char       *eff_name; /* first arm's effect, kept for diags */\n"
         "    int               n_arms;\n"
-        "    const char       *arm_op_names[16];\n"
+        "    const char       *arm_eff_names[16]; /* per-arm effect (e.g. \"Log\") */\n"
+        "    const char       *arm_op_names[16];  /* per-arm op (e.g. \"say\") */\n"
         "    XsArmDispatch     dispatch;\n"
         "    jmp_buf           exit_jmp;\n"
         "    jmp_buf           resume_jmp;\n"
@@ -4668,21 +4691,25 @@ char *transpile_c(Node *program, const char *filename) {
         "static xs_val xs_perform(const char *eff, const char *op, xs_val arg) {\n"
         "    XsEffFrame *f = __xs_eff_top;\n"
         "    while (f) {\n"
-        "        if (strcmp(f->eff_name, eff) == 0) {\n"
-        "            for (int i = 0; i < f->n_arms; i++) {\n"
-        "                if (strcmp(f->arm_op_names[i], op) == 0) {\n"
-        "                    XsEffFrame *prev_active = __xs_eff_active_perform;\n"
-        "                    __xs_eff_active_perform = f;\n"
-        "                    if (setjmp(f->resume_jmp) == 0) {\n"
-        "                        xs_val r = f->dispatch(i, arg);\n"
-        "                        __xs_eff_active_perform = prev_active;\n"
-        "                        f->exit_value = r;\n"
-        "                        longjmp(f->exit_jmp, 1);\n"
-        "                        return (xs_val){.tag=4}; /* unreachable */\n"
-        "                    } else {\n"
-        "                        __xs_eff_active_perform = prev_active;\n"
-        "                        return f->resume_value;\n"
-        "                    }\n"
+        "        for (int i = 0; i < f->n_arms; i++) {\n"
+        "            /* Each arm carries its own (effect, op). A single handle\n"
+        "             * with `Log.say(m) => ...` and `Metric.count(n) => ...`\n"
+        "             * has arms[0].eff='Log' and arms[1].eff='Metric'; the\n"
+        "             * old code only stored the first arm's effect on the\n"
+        "             * frame and dropped Metric.count on the floor. */\n"
+        "            const char *arm_eff = f->arm_eff_names[i] ? f->arm_eff_names[i] : f->eff_name;\n"
+        "            if (strcmp(arm_eff, eff) == 0 && strcmp(f->arm_op_names[i], op) == 0) {\n"
+        "                XsEffFrame *prev_active = __xs_eff_active_perform;\n"
+        "                __xs_eff_active_perform = f;\n"
+        "                if (setjmp(f->resume_jmp) == 0) {\n"
+        "                    xs_val r = f->dispatch(i, arg);\n"
+        "                    __xs_eff_active_perform = prev_active;\n"
+        "                    f->exit_value = r;\n"
+        "                    longjmp(f->exit_jmp, 1);\n"
+        "                    return (xs_val){.tag=4}; /* unreachable */\n"
+        "                } else {\n"
+        "                    __xs_eff_active_perform = prev_active;\n"
+        "                    return f->resume_value;\n"
         "                }\n"
         "            }\n"
         "        }\n"
