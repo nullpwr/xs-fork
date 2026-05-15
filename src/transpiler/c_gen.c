@@ -1663,9 +1663,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
             else sb_add(s, "XS_NULL");
             sb_addc(s, ')');
-        } else if (strcmp(meth, "sort") == 0) {
-            sb_add(s, "xs_arr_sort(");
+        } else if (strcmp(meth, "sort") == 0 || strcmp(meth, "sort_by") == 0) {
+            sb_add(s, "xs_arr_sort_with(");
             emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, ", ");
+            if (n->method_call.args.len > 0)
+                emit_expr(s, n->method_call.args.items[0], depth);
+            else
+                sb_add(s, "XS_NULL");
             sb_addc(s, ')');
         } else if (strcmp(meth, "has") == 0) {
             sb_add(s, "xs_map_has(");
@@ -4294,7 +4299,8 @@ char *transpile_c(Node *program, const char *filename) {
         "                 int is_range; int64_t range_start; int64_t range_end; int range_inclusive;\n"
         "               } xs_arr;\n"
         "typedef struct { char **keys; xs_val *vals; int len; int cap; } xs_hmap;\n\n"
-        "static const char *xs_to_str(xs_val v);\n\n"
+        "static const char *xs_to_str(xs_val v);\n"
+        "static void xs_throw_arith(const char *kind, const char *msg);\n\n"
         "static int xs_eq(xs_val a, xs_val b) {\n"
         "    if (a.tag != b.tag) {\n"
         "        if ((a.tag == 0 && b.tag == 1) || (a.tag == 1 && b.tag == 0)) {\n"
@@ -4388,6 +4394,11 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_INT(a.i + b.i);\n"
         "}\n\n"
         "static xs_val xs_sub(xs_val a, xs_val b) {\n"
+        "    /* String / non-numeric operands trapped silently into the float\n"
+        "     * branch (reading the str pointer as a double). Throw a\n"
+        "     * structured catchable error instead. */\n"
+        "    if (a.tag == 2 || b.tag == 2 || a.tag == 5 || b.tag == 5 || a.tag == 6 || b.tag == 6)\n"
+        "        xs_throw_arith(\"type error\", \"unsupported operand type for -\");\n"
         "    if (a.tag == 1 || b.tag == 1) {\n"
         "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
         "        double bf = b.tag == 1 ? b.f : (double)b.i;\n"
@@ -4789,6 +4800,10 @@ char *transpile_c(Node *program, const char *filename) {
         "        }\n"
         "        return XS_NULL;\n"
         "    }\n"
+        "    /* indexing a non-collection (int / float / bool / null) throws a\n"
+        "     * structured catchable error matching the interp / VM. Without\n"
+        "     * this, (42)[0] silently produced null and `try` couldn't catch. */\n"
+        "    xs_throw_arith(\"type error\", \"value is not indexable\");\n"
         "    return XS_NULL;\n"
         "}\n\n"
         "/* arr[start..end] / arr[start..=end]; null bounds mean open. */\n"
@@ -5109,6 +5124,31 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (arr.tag != 5 || !arr.p) return arr;\n"
         "    xs_arr *a = (xs_arr*)arr.p;\n"
         "    qsort(a->items, a->len, sizeof(xs_val), __xs_sort_cmp);\n"
+        "    return arr;\n"
+        "}\n\n"
+        "/* sort with an optional callable comparator. qsort can't carry user\n"
+        " * context, so we stash the comparator in a static for the duration of\n"
+        " * the call. Single-threaded by construction; nested user-comparator\n"
+        " * sorts would need qsort_r (not portable to MinGW). */\n"
+        "static xs_val __xs_sort_cmp_fn = {.tag = 4};\n"
+        "static int __xs_sort_cmp_user(const void *a, const void *b) {\n"
+        "    xs_val args[2] = { *(const xs_val*)a, *(const xs_val*)b };\n"
+        "    xs_val r = xs_call(__xs_sort_cmp_fn, args, 2);\n"
+        "    if (r.tag == 0) return r.i > 0 ? 1 : (r.i < 0 ? -1 : 0);\n"
+        "    if (r.tag == 1) return r.f > 0 ? 1 : (r.f < 0 ? -1 : 0);\n"
+        "    if (r.tag == 3) return r.b ? 1 : -1;\n"
+        "    return 0;\n"
+        "}\n"
+        "static xs_val xs_arr_sort_with(xs_val arr, xs_val cmp) {\n"
+        "    if (arr.tag != 5 || !arr.p) return arr;\n"
+        "    xs_arr *a = (xs_arr*)arr.p;\n"
+        "    if (cmp.tag == 8 && cmp.p) {\n"
+        "        __xs_sort_cmp_fn = cmp;\n"
+        "        qsort(a->items, a->len, sizeof(xs_val), __xs_sort_cmp_user);\n"
+        "        __xs_sort_cmp_fn = (xs_val){.tag = 4};\n"
+        "    } else {\n"
+        "        qsort(a->items, a->len, sizeof(xs_val), __xs_sort_cmp);\n"
+        "    }\n"
         "    return arr;\n"
         "}\n\n"
         "/* extra collection helpers used by .method() lowering */\n"
