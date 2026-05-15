@@ -14,6 +14,26 @@ static int is_catchall(Node *pat) {
         case NODE_PAT_OR:
             return is_catchall(pat->pat_or.left) ||
                    is_catchall(pat->pat_or.right);
+        case NODE_PAT_TUPLE: {
+            /* `(a, b)` catches every value of the same arity. Treat as
+               catchall when each element is itself catchall -- the
+               warning is meant to flag literal-only patterns, not
+               structural destructures. */
+            for (int i = 0; i < pat->pat_tuple.elems.len; i++)
+                if (!is_catchall(pat->pat_tuple.elems.items[i])) return 0;
+            return 1;
+        }
+        case NODE_PAT_STRUCT: {
+            /* `Point { x, y, .. }` matches every Point. Treat as catchall
+               when every named sub-pattern is catchall. A NULL sub-pattern
+               is the shorthand binding (`x` alone) which is also catchall.
+               The presence of `..` does not introduce filtering. */
+            for (int i = 0; i < pat->pat_struct.fields.len; i++) {
+                Node *sub = pat->pat_struct.fields.items[i].val;
+                if (sub && !is_catchall(sub)) return 0;
+            }
+            return 1;
+        }
         default:               return 0;
     }
 }

@@ -7,6 +7,10 @@
 #include <inttypes.h>
 
 #include "core/strbuf.h"
+#include "core/lexer.h"
+#include "core/parser.h"
+#include "core/ast.h"
+#include "core/value.h"
 
 /* forward declarations */
 static void emit_node(SB *s, Node *n, int depth);
@@ -15,6 +19,7 @@ static void emit_stmt(SB *s, Node *n, int depth);
 static void emit_block_body(SB *s, Node *block, int depth);
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth);
 static int node_has_perform(Node *n);
+static int node_has_await(Node *n);
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth);
 
 /* Names that have been `del`'d in the current emit scope. Mirrors the
@@ -24,6 +29,158 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
 #define MAX_JS_DELETED_VARS 64
 static const char *js_deleted_vars[MAX_JS_DELETED_VARS];
 static int js_n_deleted_vars = 0;
+
+/* Source-file directory for the program currently being transpiled.
+   Used to resolve `use "./relative.xs"` paths in NODE_USE emit. */
+static char g_js_src_dir[1024] = "";
+
+/* Trait default-method registry. Filled by NODE_TRAIT_DECL emit; read
+   by NODE_IMPL_DECL to inherit default bodies for methods the impl
+   doesn't override. Bodies are weak refs into the program AST -- valid
+   for the duration of one transpile pass. */
+#define MAX_JS_TRAITS 64
+typedef struct {
+    const char *trait_name;
+    Node       *trait_node;
+} JsTraitEntry;
+static JsTraitEntry js_traits[MAX_JS_TRAITS];
+static int js_n_traits = 0;
+
+static void js_register_trait(Node *trait) {
+    if (!trait || !trait->trait_decl.name) return;
+    if (js_n_traits >= MAX_JS_TRAITS) return;
+    js_traits[js_n_traits].trait_name = trait->trait_decl.name;
+    js_traits[js_n_traits].trait_node = trait;
+    js_n_traits++;
+}
+
+static Node *js_find_trait(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < js_n_traits; i++)
+        if (js_traits[i].trait_name && strcmp(js_traits[i].trait_name, name) == 0)
+            return js_traits[i].trait_node;
+    return NULL;
+}
+
+/* Loaded `use "..."` modules; we keep the parsed AST alive for the rest
+   of the pass so child fn bodies (referenced from emitted code) stay
+   valid. Also serves as a guard against re-loading the same path twice. */
+#define MAX_JS_USE_MODS 64
+typedef struct {
+    char *path;
+    Node *prog;
+    char *src;  /* freed at pass end */
+} JsUseMod;
+static JsUseMod js_use_mods[MAX_JS_USE_MODS];
+static int js_n_use_mods = 0;
+
+static char *js_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char *buf = (char *)xs_malloc((size_t)sz + 1);
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    if (got != (size_t)sz) { free(buf); return NULL; }
+    buf[sz] = '\0';
+    return buf;
+}
+
+/* Resolve `path` relative to the importer's directory if it isn't absolute. */
+static void js_resolve_use_path(const char *path, char *out, size_t cap) {
+    if (!path) { out[0] = '\0'; return; }
+    if (path[0] == '/' || g_js_src_dir[0] == '\0') {
+        snprintf(out, cap, "%s", path);
+    } else {
+        snprintf(out, cap, "%s/%s", g_js_src_dir, path);
+    }
+}
+
+static Node *js_load_use_module(const char *resolved) {
+    for (int i = 0; i < js_n_use_mods; i++)
+        if (js_use_mods[i].path && strcmp(js_use_mods[i].path, resolved) == 0)
+            return js_use_mods[i].prog;
+    if (js_n_use_mods >= MAX_JS_USE_MODS) return NULL;
+    char *src = js_read_file(resolved);
+    if (!src) return NULL;
+    char *path_owned = xs_strdup(resolved);
+    Lexer lex; lexer_init(&lex, src, path_owned);
+    TokenArray ta = lexer_tokenize(&lex);
+    Parser p; parser_init(&p, &ta, path_owned);
+    Node *prog = parser_parse(&p);
+    token_array_free(&ta);
+    comment_list_free(&lex.comments);
+    if (!prog || p.had_error) {
+        if (prog) node_free(prog);
+        free(src); free(path_owned);
+        return NULL;
+    }
+    js_use_mods[js_n_use_mods].path = path_owned;
+    js_use_mods[js_n_use_mods].prog = prog;
+    js_use_mods[js_n_use_mods].src  = src;
+    js_n_use_mods++;
+    return prog;
+}
+
+/* Best-effort namespace name from `use "foo/bar.xs"` -> "bar". */
+static void js_derive_use_alias(const char *path, char *out, size_t cap) {
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    size_t i = 0;
+    while (base[i] && base[i] != '.' && i + 1 < cap) {
+        char c = base[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_')) c = '_';
+        out[i] = c; i++;
+    }
+    out[i] = '\0';
+    if (out[0] == '\0') snprintf(out, cap, "_mod");
+}
+
+/* Walk the imported program for `export { ... }` lists. If any exist,
+   only the listed names (under their public aliases) are exposed.
+   Otherwise everything top-level becomes public. */
+typedef struct {
+    int   any;
+    int   n;
+    char *locals[256];
+    char *aliases[256];
+} JsExports;
+
+static void js_collect_exports(Node *prog, JsExports *out) {
+    out->any = 0; out->n = 0;
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return;
+    for (int i = 0; i < prog->program.stmts.len; i++) {
+        Node *st = prog->program.stmts.items[i];
+        if (!st || VAL_TAG(st) != NODE_EXPORT) continue;
+        out->any = 1;
+        for (int k = 0; k < st->export_.nnames && out->n < 256; k++) {
+            out->locals[out->n]  = st->export_.names[k];
+            out->aliases[out->n] = st->export_.aliases[k] ? st->export_.aliases[k]
+                                                          : st->export_.names[k];
+            out->n++;
+        }
+    }
+}
+
+/* Top-level statements that bind a name in JS scope. We use this to
+   decide what to expose when there is no `export { ... }` list. */
+static const char *js_stmt_binds_name(Node *st) {
+    if (!st) return NULL;
+    switch (VAL_TAG(st)) {
+    case NODE_LET:        return st->let.name;
+    case NODE_VAR:        return st->let.name;
+    case NODE_CONST:      return st->const_.name;
+    case NODE_FN_DECL:    return st->fn_decl.name;
+    case NODE_STRUCT_DECL: return st->struct_decl.name;
+    case NODE_ENUM_DECL:  return st->enum_decl.name;
+    case NODE_CLASS_DECL: return st->class_decl.name;
+    default: return NULL;
+    }
+}
 static int js_is_deleted_var(const char *name) {
     if (!name) return 0;
     for (int i = 0; i < js_n_deleted_vars; i++)
@@ -535,12 +692,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_addc(s, ')');
             break;
         } else if (is_callee_name(n->call.callee, "assert")) {
-            sb_add(s, "(function(){ if (!(");
+            int has_aw = 0;
+            for (int j = 0; j < n->call.args.len; j++)
+                if (node_has_await(n->call.args.items[j])) { has_aw = 1; break; }
+            if (has_aw) sb_add(s, "await (async function(){ if (!(");
+            else        sb_add(s, "(function(){ if (!(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
             sb_add(s, ")) throw new Error(\"assertion failed\"); })()");
             break;
         } else if (is_callee_name(n->call.callee, "assert_eq")) {
-            sb_add(s, "(function(){ if (!__xs_eq(");
+            int has_aw = 0;
+            for (int j = 0; j < n->call.args.len; j++)
+                if (node_has_await(n->call.args.items[j])) { has_aw = 1; break; }
+            if (has_aw) sb_add(s, "await (async function(){ if (!__xs_eq_assert(");
+            else        sb_add(s, "(function(){ if (!__xs_eq_assert(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
             sb_add(s, ", ");
             if (n->call.args.len > 1) emit_expr(s, n->call.args.items[1], depth);
@@ -1738,15 +1903,23 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "while (!__result.done) {\n");
         sb_indent(s, depth + 2);
         sb_add(s, "const __eff = __result.value;\n");
+        sb_indent(s, depth + 2);
+        sb_add(s, "let __resumed = false;\n");
+        sb_indent(s, depth + 2);
+        sb_add(s, "let __arm_value = undefined;\n");
+        sb_indent(s, depth + 2);
+        sb_add(s, "let __matched = false;\n");
         for (int i = 0; i < n->handle.arms.len; i++) {
             EffectArm *earm = &n->handle.arms.items[i];
             sb_indent(s, depth + 2);
             if (i == 0) sb_add(s, "if (");
             else sb_add(s, "else if (");
-            sb_printf(s, "__eff.__effect === \"%s\" && __eff.__op === \"%s\"",
+            sb_printf(s, "__eff && __eff.__effect === \"%s\" && __eff.__op === \"%s\"",
                       earm->effect_name ? earm->effect_name : "",
                       earm->op_name ? earm->op_name : "");
             sb_add(s, ") {\n");
+            sb_indent(s, depth + 3);
+            sb_add(s, "__matched = true;\n");
             /* bind handler parameters from __eff.__args */
             for (int p = 0; p < earm->params.len; p++) {
                 sb_indent(s, depth + 3);
@@ -1756,25 +1929,31 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_printf(s, " = __eff.__args[%d];\n", p);
             }
             sb_indent(s, depth + 3);
-            sb_add(s, "const __xs_resume = (v) => { __result = __gen.next(v); };\n");
+            sb_add(s, "const __xs_resume = (v) => { __resumed = true; __result = __gen.next(v); };\n");
             if (earm->body && VAL_TAG(earm->body) == NODE_BLOCK) {
                 emit_block_body(s, earm->body, depth + 3);
-                /* the trailing expr of a block (e.g. `resume(null)` as the
-                 * last position) is parsed as block.expr, not a statement.
-                 * emit it so the handler arm's last action runs. */
+                /* trailing block expr becomes the arm's value */
                 if (earm->body->block.expr) {
                     sb_indent(s, depth + 3);
+                    sb_add(s, "__arm_value = ");
                     emit_expr(s, earm->body->block.expr, depth + 3);
                     sb_add(s, ";\n");
                 }
             } else if (earm->body) {
                 sb_indent(s, depth + 3);
+                sb_add(s, "__arm_value = ");
                 emit_expr(s, earm->body, depth + 3);
                 sb_add(s, ";\n");
             }
             sb_indent(s, depth + 2);
             sb_add(s, "}\n");
         }
+        /* Unmatched effect: terminate to avoid infinite spin. */
+        sb_indent(s, depth + 2);
+        sb_add(s, "if (!__matched) { return __arm_value; }\n");
+        /* Handler that didn't call resume returns its own value. */
+        sb_indent(s, depth + 2);
+        sb_add(s, "if (!__resumed) { return __arm_value; }\n");
         sb_indent(s, depth + 1);
         sb_add(s, "}\n");
         sb_indent(s, depth + 1);
@@ -2238,6 +2417,52 @@ static int node_has_perform(Node *n) {
         return 0;
     case NODE_HANDLE:
         return node_has_perform(n->handle.expr);
+    default:
+        return 0;
+    }
+}
+
+/* Mirrors node_has_perform but for await. Used to decide whether the
+   assert/assert_eq IIFE wrapper needs to be async + awaited so its
+   inner await isn't a SyntaxError under top-level-await context. */
+static int node_has_await(Node *n) {
+    if (!n) return 0;
+    if (VAL_TAG(n) == NODE_AWAIT) return 1;
+    switch (VAL_TAG(n)) {
+    case NODE_FN_DECL: case NODE_LAMBDA: return 0;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            if (node_has_await(n->block.stmts.items[i])) return 1;
+        if (n->block.expr && node_has_await(n->block.expr)) return 1;
+        return 0;
+    case NODE_EXPR_STMT:  return node_has_await(n->expr_stmt.expr);
+    case NODE_RETURN:     return node_has_await(n->ret.value);
+    case NODE_LET: case NODE_VAR: return node_has_await(n->let.value);
+    case NODE_CONST:      return node_has_await(n->const_.value);
+    case NODE_ASSIGN:     return node_has_await(n->assign.value) ||
+                                 node_has_await(n->assign.target);
+    case NODE_IF:
+        if (node_has_await(n->if_expr.cond)) return 1;
+        if (node_has_await(n->if_expr.then)) return 1;
+        for (int j = 0; j < n->if_expr.elif_conds.len; j++)
+            if (node_has_await(n->if_expr.elif_conds.items[j])) return 1;
+        for (int j = 0; j < n->if_expr.elif_thens.len; j++)
+            if (node_has_await(n->if_expr.elif_thens.items[j])) return 1;
+        if (node_has_await(n->if_expr.else_branch)) return 1;
+        return 0;
+    case NODE_BINOP:      return node_has_await(n->binop.left) ||
+                                 node_has_await(n->binop.right);
+    case NODE_UNARY:      return node_has_await(n->unary.expr);
+    case NODE_CALL:
+        if (node_has_await(n->call.callee)) return 1;
+        for (int j = 0; j < n->call.args.len; j++)
+            if (node_has_await(n->call.args.items[j])) return 1;
+        return 0;
+    case NODE_METHOD_CALL:
+        if (node_has_await(n->method_call.obj)) return 1;
+        for (int j = 0; j < n->method_call.args.len; j++)
+            if (node_has_await(n->method_call.args.items[j])) return 1;
+        return 0;
     default:
         return 0;
     }
@@ -2717,6 +2942,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                       n->struct_decl.fields.items[i].key,
                       n->struct_decl.fields.items[i].key);
         }
+        /* Tag instances so struct match patterns
+           (`Point { x, y }`) can recognise them by name. */
+        sb_indent(s, depth + 2);
+        sb_printf(s, "this.__type__ = \"%s\";\n", n->struct_decl.name);
         sb_indent(s, depth + 1);
         sb_add(s, "}\n");
         sb_indent(s, depth);
@@ -2792,6 +3021,53 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 emit_stmt(s, m, depth);
             }
         }
+        /* Inherit trait default-method bodies for any method this impl
+           didn't override. Without this, calling a default-only method
+           on the impl type throws "no method on object". */
+        if (n->impl_decl.trait_name) {
+            Node *trait = js_find_trait(n->impl_decl.trait_name);
+            if (trait) {
+                for (int ti = 0; ti < trait->trait_decl.methods.len; ti++) {
+                    Node *defm = trait->trait_decl.methods.items[ti];
+                    if (!defm || VAL_TAG(defm) != NODE_FN_DECL) continue;
+                    if (!defm->fn_decl.body) continue;  /* required, no default */
+                    int overridden = 0;
+                    for (int j = 0; j < n->impl_decl.members.len; j++) {
+                        Node *im = n->impl_decl.members.items[j];
+                        if (im && VAL_TAG(im) == NODE_FN_DECL && im->fn_decl.name &&
+                            defm->fn_decl.name &&
+                            strcmp(im->fn_decl.name, defm->fn_decl.name) == 0) {
+                            overridden = 1; break;
+                        }
+                    }
+                    if (overridden) continue;
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s.prototype.%s = function",
+                              n->impl_decl.type_name, defm->fn_decl.name);
+                    emit_params_ex(s, &defm->fn_decl.params, 1);
+                    sb_add(s, " {\n");
+                    int save_cm = in_class_method;
+                    in_class_method = 1;
+                    if (VAL_TAG(defm->fn_decl.body) == NODE_BLOCK) {
+                        emit_block_body(s, defm->fn_decl.body, depth + 1);
+                        if (defm->fn_decl.body->block.expr) {
+                            sb_indent(s, depth + 1);
+                            sb_add(s, "return ");
+                            emit_expr(s, defm->fn_decl.body->block.expr, depth + 1);
+                            sb_add(s, ";\n");
+                        }
+                    } else {
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "return ");
+                        emit_expr(s, defm->fn_decl.body, depth + 1);
+                        sb_add(s, ";\n");
+                    }
+                    in_class_method = save_cm;
+                    sb_indent(s, depth);
+                    sb_add(s, "};\n");
+                }
+            }
+        }
         sb_addc(s, '\n');
         break;
     }
@@ -2812,6 +3088,9 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             }
             sb_addc(s, '\n');
         }
+        /* Record so impls can pick up default bodies for methods they
+           don't override. */
+        js_register_trait(n);
         break;
     }
     case NODE_TYPE_ALIAS:
@@ -2906,6 +3185,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_printf(s, "class %s extends %s {\n", n->class_decl.name, n->class_decl.bases[0]);
         else
             sb_printf(s, "class %s {\n", n->class_decl.name);
+        /* Class field that lets struct-style match patterns recognise
+           instances by name. Auto-runs before the user constructor body. */
+        sb_indent(s, depth + 1);
+        sb_printf(s, "__type__ = \"%s\";\n", n->class_decl.name);
         for (int i = 0; i < n->class_decl.members.len; i++) {
             Node *m = n->class_decl.members.items[i];
             if (m && VAL_TAG(m) == NODE_FN_DECL) {
@@ -3077,6 +3360,92 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         } else {
             sb_add(s, "; /* del without name */\n");
         }
+        break;
+    case NODE_USE: {
+        if (n->use_.is_plugin) {
+            sb_indent(s, depth);
+            sb_printf(s, "// use plugin \"%s\" (no JS equivalent)\n",
+                      n->use_.path ? n->use_.path : "?");
+            break;
+        }
+        if (!n->use_.path) break;
+        char resolved[2048];
+        js_resolve_use_path(n->use_.path, resolved, sizeof(resolved));
+        Node *modprog = js_load_use_module(resolved);
+        if (!modprog) {
+            sb_indent(s, depth);
+            sb_printf(s, "// use \"%s\": load failed\n", n->use_.path);
+            break;
+        }
+        JsExports exp;
+        js_collect_exports(modprog, &exp);
+        int is_selective = (n->use_.nnames > 0);
+        /* Emit the inlined body + return object once. The header line
+           differs depending on whether this is a namespace import
+           (`const util = (() => {...})()`) or a selective destructure
+           (`const { shout, public_const: pc } = (() => {...})()`). */
+        sb_indent(s, depth);
+        if (is_selective) {
+            sb_add(s, "const { ");
+            for (int i = 0; i < n->use_.nnames; i++) {
+                if (i) sb_add(s, ", ");
+                const char *src = n->use_.names[i];
+                const char *dst = (n->use_.name_aliases && n->use_.name_aliases[i])
+                                      ? n->use_.name_aliases[i] : src;
+                if (src && dst && strcmp(src, dst) != 0)
+                    sb_printf(s, "%s: %s", src, dst);
+                else if (src)
+                    sb_add(s, src);
+            }
+            sb_add(s, " } = (() => {\n");
+        } else {
+            char alias[256];
+            if (n->use_.alias && n->use_.alias[0]) {
+                snprintf(alias, sizeof(alias), "%s", n->use_.alias);
+            } else {
+                js_derive_use_alias(n->use_.path, alias, sizeof(alias));
+            }
+            sb_printf(s, "const %s = (() => {\n", alias);
+        }
+        for (int i = 0; i < modprog->program.stmts.len; i++) {
+            Node *st = modprog->program.stmts.items[i];
+            if (!st) continue;
+            if (VAL_TAG(st) == NODE_EXPORT) continue;
+            emit_node(s, st, depth + 1);
+        }
+        sb_indent(s, depth + 1);
+        sb_add(s, "return {");
+        if (exp.any) {
+            for (int i = 0; i < exp.n; i++) {
+                if (i) sb_add(s, ",");
+                sb_addc(s, ' ');
+                if (exp.aliases[i] && exp.locals[i] &&
+                    strcmp(exp.aliases[i], exp.locals[i]) != 0) {
+                    sb_printf(s, "%s: %s", exp.aliases[i], exp.locals[i]);
+                } else {
+                    sb_add(s, exp.locals[i]);
+                }
+            }
+        } else {
+            int first = 1;
+            for (int i = 0; i < modprog->program.stmts.len; i++) {
+                const char *nm = js_stmt_binds_name(modprog->program.stmts.items[i]);
+                if (!nm) continue;
+                if (!first) sb_add(s, ",");
+                sb_addc(s, ' ');
+                sb_add(s, nm);
+                first = 0;
+            }
+        }
+        sb_add(s, " };\n");
+        sb_indent(s, depth);
+        sb_add(s, "})();\n");
+        break;
+    }
+    case NODE_EXPORT:
+        /* Top-level `export { ... }` in the importer is a publish list,
+           not runnable code. The IIFE wrapper for `use` already reads the
+           list to build the namespace object; emit nothing here. */
         break;
     case NODE_TAG_DECL:
         /* Emit as a regular function with __block as last param */
@@ -3440,11 +3809,16 @@ char *transpile_js(Node *program, const char *filename) {
        key on a Map literal returns undefined under .foo. Probe both. */
     sb_add(&s, "const __xs_field = (o, k, optional) => {\n");
     sb_add(&s, "    if (o === null || o === undefined) return optional ? undefined : o;\n");
+    sb_add(&s, "    let v;\n");
     sb_add(&s, "    if (o instanceof Map) {\n");
-    sb_add(&s, "        if (o.has(k)) return o.get(k);\n");
-    sb_add(&s, "        return o[k];\n");
+    sb_add(&s, "        v = o.has(k) ? o.get(k) : o[k];\n");
+    sb_add(&s, "    } else {\n");
+    sb_add(&s, "        v = o[k];\n");
     sb_add(&s, "    }\n");
-    sb_add(&s, "    return o[k];\n");
+    /* Normalise to null. XS programs treat a missing field as null, so
+       leaking JS's `undefined` makes (m.k == null) false even though XS
+       semantics say otherwise. */
+    sb_add(&s, "    return v === undefined ? null : v;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_setfield = (o, k, v) => {\n");
     sb_add(&s, "    if (o instanceof Map) { o.set(k, v); return v; }\n");
@@ -3875,8 +4249,10 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "};\n");
     /* Builtin globals from the XS runtime that don't exist in JS but
        are used unqualified (range, len already covered, etc.). range
-       returns an Array so for-of, .map, .to_array all work. */
-    sb_add(&s, "const range = (a, b, step) => {\n");
+       returns an Array so for-of, .map, .to_array all work. Bound on
+       globalThis with `??=` so user code can shadow it with a local
+       `fn range` declaration without hitting the JS double-decl error. */
+    sb_add(&s, "globalThis.range ?\?= (a, b, step) => {\n");
     sb_add(&s, "    const start = (b === undefined) ? 0 : a;\n");
     sb_add(&s, "    const end   = (b === undefined) ? a : b;\n");
     sb_add(&s, "    const stp   = step === undefined ? 1 : step;\n");
@@ -4008,6 +4384,19 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    }\n");
     sb_add(&s, "    return false;\n");
     sb_add(&s, "};\n");
+    /* Tolerant equality for assert_eq: floats compare with the same
+       relative+absolute slack as the native runtime so chained arithmetic
+       (e.g. summing 3.14*r*r across shapes) still matches a literal. */
+    sb_add(&s, "const __xs_eq_assert = (a, b) => {\n");
+    sb_add(&s, "    if (__xs_eq(a, b)) return true;\n");
+    sb_add(&s, "    if (typeof a === 'number' && typeof b === 'number'\n");
+    sb_add(&s, "        && !Number.isNaN(a) && !Number.isNaN(b)) {\n");
+    sb_add(&s, "        const diff = Math.abs(a - b);\n");
+    sb_add(&s, "        const scale = Math.max(Math.abs(a), Math.abs(b));\n");
+    sb_add(&s, "        if (diff <= 1e-9 + 1e-9 * scale) return true;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return false;\n");
+    sb_add(&s, "};\n");
     /* channel runtime */
     sb_add(&s, "function __xs_channel() {\n");
     sb_add(&s, "    const buf = [];\n");
@@ -4028,6 +4417,28 @@ char *transpile_js(Node *program, const char *filename) {
 
     /* reset class method state */
     in_class_method = 0;
+    js_n_traits = 0;
+    /* free any leftover use-modules from a previous transpile call */
+    for (int i = 0; i < js_n_use_mods; i++) {
+        if (js_use_mods[i].prog) node_free(js_use_mods[i].prog);
+        free(js_use_mods[i].path);
+        free(js_use_mods[i].src);
+        js_use_mods[i].prog = NULL;
+        js_use_mods[i].path = NULL;
+        js_use_mods[i].src  = NULL;
+    }
+    js_n_use_mods = 0;
+    /* derive importer's directory so `use "./util.xs"` resolves */
+    g_js_src_dir[0] = '\0';
+    if (filename) {
+        const char *slash = strrchr(filename, '/');
+        if (slash && slash != filename) {
+            size_t n = (size_t)(slash - filename);
+            if (n >= sizeof(g_js_src_dir)) n = sizeof(g_js_src_dir) - 1;
+            memcpy(g_js_src_dir, filename, n);
+            g_js_src_dir[n] = '\0';
+        }
+    }
 
     int has_main = 0;
     /* Detect top-level await (outside any async fn) by walking the
