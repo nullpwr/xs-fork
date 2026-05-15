@@ -144,6 +144,27 @@ static int seen_main = 0;
 /* track defers for goto-based cleanup */
 static int defer_label_counter = 0;
 
+/* Names that have been `del`'d in the current emit scope. NODE_IDENT
+ * loads consult this so the read traps with a catchable error instead
+ * of returning the sentinel transparently. Reset per transpile_c run
+ * and saved/restored across function bodies. */
+#define MAX_DELETED_VARS 64
+static const char *deleted_vars[MAX_DELETED_VARS];
+static int n_deleted_vars = 0;
+
+static int is_deleted_var(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < n_deleted_vars; i++)
+        if (strcmp(deleted_vars[i], name) == 0) return 1;
+    return 0;
+}
+static void mark_deleted_var(const char *name) {
+    if (!name) return;
+    if (is_deleted_var(name)) return;
+    if (n_deleted_vars < MAX_DELETED_VARS)
+        deleted_vars[n_deleted_vars++] = name;
+}
+
 /* actor tracking for type-aware dispatch */
 #define MAX_ACTORS 32
 static struct { const char *name; } actors[MAX_ACTORS];
@@ -843,6 +864,50 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_LIT_MAP: {
+        /* Spread (key=NODE_SPREAD, val=NULL) means "copy all entries from
+         * source into the result, then layer this literal's other pairs on
+         * top." Walk once to detect; if we find a spread, lower to a stmt-
+         * expr that builds an empty map and inserts one pair at a time.
+         * Otherwise the cheap xs_map(n, k1, v1, ...) varargs path. */
+        int has_spread = 0;
+        for (int i = 0; i < n->lit_map.keys.len; i++) {
+            Node *mk = n->lit_map.keys.items[i];
+            if (mk && VAL_TAG(mk) == NODE_SPREAD) { has_spread = 1; break; }
+        }
+        if (has_spread) {
+            int mid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __mr_%d = xs_map(0);\n", mid);
+            for (int i = 0; i < n->lit_map.keys.len; i++) {
+                Node *mk = n->lit_map.keys.items[i];
+                if (mk && VAL_TAG(mk) == NODE_SPREAD) {
+                    sb_indent(s, depth + 1);
+                    sb_printf(s, "{ xs_val __sp_%d = ", mid);
+                    emit_expr(s, mk->spread.expr, depth);
+                    sb_printf(s, "; if (__sp_%d.tag == 6 && __sp_%d.p) {\n", mid, mid);
+                    sb_indent(s, depth + 2);
+                    sb_printf(s, "xs_hmap *__hm_%d = (xs_hmap*)__sp_%d.p;\n", mid, mid);
+                    sb_indent(s, depth + 2);
+                    sb_printf(s, "for (int __k = 0; __k < __hm_%d->len; __k++)\n", mid);
+                    sb_indent(s, depth + 3);
+                    sb_printf(s, "xs_map_put(&__mr_%d, XS_STR(__hm_%d->keys[__k]), __hm_%d->vals[__k]);\n", mid, mid, mid);
+                    sb_indent(s, depth + 1);
+                    sb_add(s, "} }\n");
+                } else {
+                    sb_indent(s, depth + 1);
+                    sb_printf(s, "xs_map_put(&__mr_%d, ", mid);
+                    if (mk && VAL_TAG(mk) == NODE_IDENT)
+                        sb_printf(s, "XS_STR(\"%s\")", mk->ident.name);
+                    else
+                        emit_expr(s, mk, depth);
+                    sb_add(s, ", ");
+                    emit_expr(s, n->lit_map.vals.items[i], depth);
+                    sb_add(s, ");\n");
+                }
+            }
+            sb_indent(s, depth);
+            sb_printf(s, "__mr_%d; })", mid);
+            break;
+        }
         sb_printf(s, "xs_map(%d", n->lit_map.keys.len);
         for (int i = 0; i < n->lit_map.keys.len; i++) {
             sb_add(s, ", ");
@@ -858,7 +923,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_addc(s, ')');
         break;
     }
-    case NODE_IDENT:
+    case NODE_IDENT: {
+        int wrap_del = is_deleted_var(n->ident.name);
+        if (wrap_del) sb_printf(s, "xs_check_deleted(");
         if (n_actor_fields > 0 && is_actor_field(n->ident.name))
             sb_printf(s, "self->%s", n->ident.name);
         else if (current_lambda) {
@@ -881,7 +948,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_printf(s, "xs_fn_new(__xs_wrap_%s, NULL)", n->ident.name);
         } else
             emit_safe_name(s, n->ident.name);
+        if (wrap_del) sb_printf(s, ", \"%s\")", n->ident.name);
         break;
+    }
     case NODE_BINOP: {
         const char *op = n->binop.op;
         if (strcmp(op, "+") == 0) {
@@ -2878,7 +2947,13 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
         emit_pattern_cond(s, pat->pat_capture.pattern, subject, depth);
         break;
     case NODE_PAT_TUPLE: {
-        sb_printf(s, "(%s.tag == 5", subject); /* tag 5 = array/tuple */
+        /* Tuples are xs_arr with is_tuple set. Without that guard a tuple
+         * pattern would also fire on a plain array of the right length,
+         * which is bug011's exact failure mode. Length check too so a
+         * 2-elem pattern doesn't bind nulls from a 1-elem subject. */
+        sb_printf(s, "(%s.tag == 5 && %s.p && ((xs_arr*)%s.p)->is_tuple"
+                     " && ((xs_arr*)%s.p)->len == %d",
+                  subject, subject, subject, subject, pat->pat_tuple.elems.len);
         for (int i = 0; i < pat->pat_tuple.elems.len; i++) {
             char sub[256];
             snprintf(sub, sizeof sub, "xs_index(%s, XS_INT(%d))", subject, i);
@@ -2924,7 +2999,11 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
         break;
     }
     case NODE_PAT_SLICE: {
-        sb_printf(s, "(%s.tag == 5", subject);
+        /* Plain array pattern - reject tuples (is_tuple set). bug011 had a
+         * tuple slipping through `[a, b]` because the tag-5 check matched
+         * both shapes. */
+        sb_printf(s, "(%s.tag == 5 && %s.p && !((xs_arr*)%s.p)->is_tuple",
+                  subject, subject, subject);
         for (int i = 0; i < pat->pat_slice.elems.len; i++) {
             char sub[256];
             snprintf(sub, sizeof sub, "xs_index(%s, XS_INT(%d))", subject, i);
@@ -3218,6 +3297,10 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, ";\n");
         break;
     case NODE_FN_DECL: {
+        /* Each function body is its own del scope - bug058's check_fn_del
+         * 's `del y` shouldn't shadow a `var y` in main. Snapshot the
+         * outer set, emit the body, restore. */
+        int __saved_n_deleted = n_deleted_vars;
         if (is_main_fn(n)) {
             seen_main = 1;
             sb_indent(s, depth);
@@ -3423,6 +3506,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 sb_add(s, "}\n\n");
             }
         }
+        n_deleted_vars = __saved_n_deleted; /* unwind del scope on fn exit */
         break;
     }
     case NODE_RETURN:
@@ -3987,6 +4071,15 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
+    case NODE_DEL:
+        sb_indent(s, depth);
+        if (n->del_.name) {
+            sb_printf(s, "%s = (xs_val){.tag = 99}; /* del */\n", n->del_.name);
+            mark_deleted_var(n->del_.name);
+        } else {
+            sb_add(s, "; /* del without name */\n");
+        }
+        break;
     case NODE_ASSIGN:
         sb_indent(s, depth);
         /* tuple destructuring assign: (a, b) = (b, a). xs_array(...)
@@ -4161,6 +4254,7 @@ char *transpile_c(Node *program, const char *filename) {
     sb_init(&s);
     seen_main = 0;
     defer_label_counter = 0;
+    n_deleted_vars = 0;
 
     /* preamble */
     sb_add(&s, "/* Generated by xs transpile --target c */\n");
@@ -4249,6 +4343,18 @@ char *transpile_c(Node *program, const char *filename) {
         "        return (af > bf) - (af < bf);\n"
         "    }\n"
         "    if (a.tag == 2 && b.tag == 2) return strcmp(a.s ? a.s : \"\", b.s ? b.s : \"\");\n"
+        "    /* Lexicographic compare for arrays + tuples - shorter prefix ranks\n"
+        "     * less. Matches the interp's value_cmp; the tag-only fallthrough\n"
+        "     * silently returned 0 and made [1] < [2] evaluate false. */\n"
+        "    if (a.tag == 5 && b.tag == 5 && a.p && b.p) {\n"
+        "        xs_arr *aa = (xs_arr*)a.p, *bb = (xs_arr*)b.p;\n"
+        "        int n = aa->len < bb->len ? aa->len : bb->len;\n"
+        "        for (int i = 0; i < n; i++) {\n"
+        "            int c = xs_cmp(aa->items[i], bb->items[i]);\n"
+        "            if (c != 0) return c;\n"
+        "        }\n"
+        "        return (aa->len > bb->len) - (aa->len < bb->len);\n"
+        "    }\n"
         "    return 0;\n"
         "}\n\n"
         "static xs_val xs_add(xs_val a, xs_val b) {\n"
@@ -4583,6 +4689,17 @@ char *transpile_c(Node *program, const char *filename) {
         "    exit(1);\n"
         "}\n\n"
 
+        "/* del sentinel - any read of a `del`'d local lands here, throws a\n"
+        " * catchable string error matching the interp / VM behaviour. */\n"
+        "static void xs_throw(xs_val v);\n"
+        "static xs_val xs_check_deleted(xs_val v, const char *name) {\n"
+        "    if (v.tag == 99) {\n"
+        "        char *msg = (char*)malloc(64 + strlen(name));\n"
+        "        sprintf(msg, \"name '%s' is not defined (deleted)\", name);\n"
+        "        xs_throw(XS_STR(msg));\n"
+        "    }\n"
+        "    return v;\n"
+        "}\n\n"
         "/* throw / rethrow */\n"
         "static void xs_throw(xs_val v) {\n"
         "    __xs_exception = v;\n"
@@ -5038,9 +5155,20 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (a->len <= 0) return XS_NULL;\n"
         "    return a->items[--a->len];\n"
         "}\n\n"
+        "/* contains / index_of accept either a value (equality) or a callable\n"
+        " * (run as predicate - first item where pred(item) is truthy). The\n"
+        " * predicate path mirrors arr.find / arr.find_index so the methods stay\n"
+        " * consistent across callsites. */\n"
         "static xs_val xs_arr_contains(xs_val v, xs_val needle) {\n"
         "    if (v.tag == 5 && v.p) {\n"
         "        xs_arr *a = (xs_arr*)v.p;\n"
+        "        if (needle.tag == 8) {\n"
+        "            for (int i = 0; i < a->len; i++) {\n"
+        "                xs_val r = xs_call(needle, &a->items[i], 1);\n"
+        "                if (xs_truthy(r)) return XS_BOOL(1);\n"
+        "            }\n"
+        "            return XS_BOOL(0);\n"
+        "        }\n"
         "        for (int i = 0; i < a->len; i++)\n"
         "            if (xs_eq(a->items[i], needle)) return XS_BOOL(1);\n"
         "        return XS_BOOL(0);\n"
@@ -5052,6 +5180,13 @@ char *transpile_c(Node *program, const char *filename) {
         "static xs_val xs_arr_index_of(xs_val v, xs_val needle) {\n"
         "    if (v.tag == 5 && v.p) {\n"
         "        xs_arr *a = (xs_arr*)v.p;\n"
+        "        if (needle.tag == 8) {\n"
+        "            for (int i = 0; i < a->len; i++) {\n"
+        "                xs_val r = xs_call(needle, &a->items[i], 1);\n"
+        "                if (xs_truthy(r)) return XS_INT(i);\n"
+        "            }\n"
+        "            return XS_INT(-1);\n"
+        "        }\n"
         "        for (int i = 0; i < a->len; i++)\n"
         "            if (xs_eq(a->items[i], needle)) return XS_INT(i);\n"
         "        return XS_INT(-1);\n"
