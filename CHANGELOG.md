@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.12
+
+JS transpiler stopped crashing on six conformance cases. Trait default
+methods get copied onto every impl that doesn't override them, so
+`square.name()` returning `"shape"` works the same under `--emit js`
+as under the interpreter. Struct match patterns (`Point { x, y, .. }`)
+recognise instances by name because the constructor tags
+`this.__type__`; class declarations get the same field. Cross-file
+`use "./mod.xs"` actually emits something now: the imported file
+inlines into an IIFE and the result binds to the namespace alias,
+the `as` rename, or the selective destructure -- whichever shape the
+use site asked for. Field reads on missing keys return `null` instead
+of `undefined` so XS-style `m.k == null` checks match the runtime.
+`assert_eq` does the same tolerant float compare as the native
+runtime, so chained arithmetic across shapes still matches a literal.
+Top-level `await` inside an `assert_eq` arg auto-wraps the assertion
+IIFE as an awaited async function. The prelude's builtin `range` now
+lives on `globalThis` so a user-declared `fn* range` doesn't trip
+"Identifier already declared". Effect handlers that don't call
+`resume` terminate the handle block with the arm's value instead of
+looping forever.
+
+The exhaustiveness analyser stopped warning on `(a, b)` and
+`Point { x, y, .. }`; both are catchall for their shape.
+
 ## 1.2.11
 
 Cross-file `use` actually does something on the VM now -- it was a

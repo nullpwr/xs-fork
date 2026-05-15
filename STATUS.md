@@ -181,8 +181,16 @@ diffs the three outputs.
 | Variables, functions, control flow | works |
 | Closures, arrow lambdas | works |
 | Arrays, maps | works |
+| Structs / classes / trait dispatch (incl. trait default methods) | works |
+| Match patterns (struct, tuple, slice with rest, OR, guards) | works |
+| `assert_eq` (float comparisons use the same tolerance as the runtime) | works |
+| Cross-file `use "./mod.xs"` (namespace, alias, selective destructure) | works |
+| Algebraic effects (perform/handle, handlers that don't resume) | works |
+| Top-level `await` (assertion wrappers auto-async-wrap) | works |
+| Generators, including user-defined ones that shadow builtin `range` | works |
 | Concurrency | partial |
-| Algebraic effects (perform/handle) | works: handle body lowers to `function*()` and `yield*` delegates through nested performs |
+| Postfix `?` try-operator | not yet -- use `--vm` |
+| Reactive `bind`, wrapping decorators | refused with a clear error |
 | Everything else | rough |
 
 ## WebAssembly
