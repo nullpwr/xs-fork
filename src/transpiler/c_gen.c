@@ -15,6 +15,130 @@ static void emit_block_body(SB *s, Node *block, int depth);
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth);
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth);
 
+/* Walk the AST looking for constructs the C target genuinely can't represent
+ * (as opposed to "should work but doesn't"). Returns the first reason found
+ * or NULL if everything is supportable. Refused at emit time so the user
+ * gets a clear message instead of generated code that traps at runtime. */
+static const char *find_unsupported_for_c(Node *n) {
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_FN_DECL:
+        if (n->fn_decl.is_generator)
+            return "fn* generator declarations";
+        return find_unsupported_for_c(n->fn_decl.body);
+    case NODE_LAMBDA:
+        if (n->lambda.is_generator)
+            return "fn*() generator lambdas";
+        return find_unsupported_for_c(n->lambda.body);
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++) {
+            const char *r = find_unsupported_for_c(n->program.stmts.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++) {
+            const char *r = find_unsupported_for_c(n->block.stmts.items[i]);
+            if (r) return r;
+        }
+        return find_unsupported_for_c(n->block.expr);
+    case NODE_BINOP:
+        { const char *r = find_unsupported_for_c(n->binop.left); if (r) return r; }
+        return find_unsupported_for_c(n->binop.right);
+    case NODE_UNARY:    return find_unsupported_for_c(n->unary.expr);
+    case NODE_CALL:
+        { const char *r = find_unsupported_for_c(n->call.callee); if (r) return r; }
+        for (int i = 0; i < n->call.args.len; i++) {
+            const char *r = find_unsupported_for_c(n->call.args.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_METHOD_CALL:
+        { const char *r = find_unsupported_for_c(n->method_call.obj); if (r) return r; }
+        for (int i = 0; i < n->method_call.args.len; i++) {
+            const char *r = find_unsupported_for_c(n->method_call.args.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_INDEX:
+        { const char *r = find_unsupported_for_c(n->index.obj); if (r) return r; }
+        return find_unsupported_for_c(n->index.index);
+    case NODE_FIELD:    return find_unsupported_for_c(n->field.obj);
+    case NODE_ASSIGN:
+        { const char *r = find_unsupported_for_c(n->assign.target); if (r) return r; }
+        return find_unsupported_for_c(n->assign.value);
+    case NODE_IF:
+        { const char *r = find_unsupported_for_c(n->if_expr.cond); if (r) return r; }
+        { const char *r = find_unsupported_for_c(n->if_expr.then); if (r) return r; }
+        return find_unsupported_for_c(n->if_expr.else_branch);
+    case NODE_FOR:
+        { const char *r = find_unsupported_for_c(n->for_loop.iter); if (r) return r; }
+        return find_unsupported_for_c(n->for_loop.body);
+    case NODE_WHILE:
+        { const char *r = find_unsupported_for_c(n->while_loop.cond); if (r) return r; }
+        return find_unsupported_for_c(n->while_loop.body);
+    case NODE_RETURN:   return find_unsupported_for_c(n->ret.value);
+    case NODE_LET:
+    case NODE_VAR:      return find_unsupported_for_c(n->let.value);
+    case NODE_CONST:    return find_unsupported_for_c(n->const_.value);
+    case NODE_EXPR_STMT: return find_unsupported_for_c(n->expr_stmt.expr);
+    case NODE_TRY:
+        { const char *r = find_unsupported_for_c(n->try_.body); if (r) return r; }
+        return find_unsupported_for_c(n->try_.finally_block);
+    case NODE_THROW:    return find_unsupported_for_c(n->throw_.value);
+    case NODE_MATCH:
+        { const char *r = find_unsupported_for_c(n->match.subject); if (r) return r; }
+        for (int i = 0; i < n->match.arms.len; i++) {
+            { const char *r = find_unsupported_for_c(n->match.arms.items[i].guard); if (r) return r; }
+            { const char *r = find_unsupported_for_c(n->match.arms.items[i].body); if (r) return r; }
+        }
+        return NULL;
+    case NODE_LIT_ARRAY:
+    case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++) {
+            const char *r = find_unsupported_for_c(n->lit_array.elems.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.vals.len; i++) {
+            const char *r = find_unsupported_for_c(n->lit_map.vals.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++) {
+            const char *r = find_unsupported_for_c(n->impl_decl.members.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_ACTOR_DECL:
+        for (int i = 0; i < n->actor_decl.methods.len; i++) {
+            const char *r = find_unsupported_for_c(n->actor_decl.methods.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_NURSERY:  return find_unsupported_for_c(n->nursery_.body);
+    case NODE_SPAWN:    return find_unsupported_for_c(n->spawn_.expr);
+    case NODE_AWAIT:    return find_unsupported_for_c(n->await_.expr);
+    case NODE_RANGE:
+        { const char *r = find_unsupported_for_c(n->range.start); if (r) return r; }
+        return find_unsupported_for_c(n->range.end);
+    case NODE_LIST_COMP:
+        { const char *r = find_unsupported_for_c(n->list_comp.element); if (r) return r; }
+        for (int i = 0; i < n->list_comp.clause_iters.len; i++) {
+            const char *r = find_unsupported_for_c(n->list_comp.clause_iters.items[i]);
+            if (r) return r;
+        }
+        for (int i = 0; i < n->list_comp.clause_conds.len; i++) {
+            const char *r = find_unsupported_for_c(n->list_comp.clause_conds.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    default: return NULL;
+    }
+}
+
 /* track if we've seen a main function */
 static int seen_main = 0;
 /* track defers for goto-based cleanup */
@@ -1312,7 +1436,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
         } else if (strcmp(meth, "is_empty") == 0) {
-            sb_add(s, "xs_channel_is_empty(");
+            sb_add(s, "xs_is_empty(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
         } else if (strcmp(meth, "is_full") == 0) {
@@ -4026,6 +4150,13 @@ static void emit_stmt(SB *s, Node *n, int depth) {
 
 /* public entry point */
 char *transpile_c(Node *program, const char *filename) {
+    const char *unsupported = find_unsupported_for_c(program);
+    if (unsupported) {
+        fprintf(stderr, "xs --emit c: %s not supported on this target. "
+                "Use --vm or --interp.\n", unsupported);
+        return NULL;
+    }
+
     SB s;
     sb_init(&s);
     seen_main = 0;
@@ -4064,7 +4195,10 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "}\n\n"
         "/* forward declare heap types */\n"
-        "typedef struct { xs_val *items; int len; int cap; int is_tuple; } xs_arr;\n"
+        "typedef struct { xs_val *items; int len; int cap; int is_tuple;\n"
+        "                 /* range metadata - keeps the original bound after materialisation */\n"
+        "                 int is_range; int64_t range_start; int64_t range_end; int range_inclusive;\n"
+        "               } xs_arr;\n"
         "typedef struct { char **keys; xs_val *vals; int len; int cap; } xs_hmap;\n\n"
         "static const char *xs_to_str(xs_val v);\n\n"
         "static int xs_eq(xs_val a, xs_val b) {\n"
@@ -4573,8 +4707,8 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static xs_val xs_range(xs_val start, xs_val end, int inclusive) {\n"
         "    int64_t s = start.tag == 0 ? start.i : 0;\n"
-        "    int64_t e = end.tag == 0 ? end.i : 0;\n"
-        "    if (inclusive) e += 1;\n"
+        "    int64_t e_raw = end.tag == 0 ? end.i : 0;\n"
+        "    int64_t e = inclusive ? e_raw + 1 : e_raw;\n"
         "    int64_t step = s <= e ? 1 : -1;\n"
         "    int64_t count = (e - s) * step;\n"
         "    if (count < 0) count = 0;\n"
@@ -4582,6 +4716,10 @@ char *transpile_c(Node *program, const char *filename) {
         "    a->cap = (int)(count > 4 ? count : 4);\n"
         "    a->items = (xs_val*)malloc(sizeof(xs_val) * a->cap);\n"
         "    a->len = 0;\n"
+        "    a->is_range = 1;\n"
+        "    a->range_start = s;\n"
+        "    a->range_end = e_raw;\n"
+        "    a->range_inclusive = inclusive;\n"
         "    for (int64_t i = s; step > 0 ? i < e : i > e; i += step) {\n"
         "        if (a->len >= a->cap) {\n"
         "            a->cap *= 2;\n"
@@ -4930,6 +5068,12 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (v.tag == 2 && v.s) return XS_BOOL(v.s[0] == 0);\n"
         "    return XS_BOOL(1);\n"
         "}\n\n"
+        "/* generic .is_empty() dispatch - channels go through their own helper,\n"
+        " * everything else (array, map, range, string) uses xs_arr_is_empty. */\n"
+        "static xs_val xs_is_empty(xs_val v) {\n"
+        "    if (v.tag == 7) return xs_channel_is_empty(v);\n"
+        "    return xs_arr_is_empty(v);\n"
+        "}\n\n"
         "/* recursive flatten: arrays of arrays collapse to a single level\n"
         "   for .flatten(); .flat() does the same one-level collapse the\n"
         "   stdlib promises. Both share an impl since the test corpus\n"
@@ -5186,18 +5330,22 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    va_end(ap); return best;\n"
         "}\n\n"
-        "/* range methods: a range is just an array, so start/end peek */\n"
+        "/* range methods: ranges are materialised as arrays but keep the\n"
+        " * original (start, end, inclusive) so .start/.end return the bound\n"
+        " * the user wrote, not the last materialised element. */\n"
         "static xs_val xs_range_start(xs_val v) {\n"
         "    if (v.tag == 5 && v.p) {\n"
         "        xs_arr *a = (xs_arr*)v.p;\n"
-        "        if (a->len > 0) return a->items[0];\n"
+        "        if (a->is_range) return XS_INT(a->range_start);\n"
+        "        if (a->len > 0)   return a->items[0];\n"
         "    }\n"
         "    return XS_NULL;\n"
         "}\n"
         "static xs_val xs_range_end(xs_val v) {\n"
         "    if (v.tag == 5 && v.p) {\n"
         "        xs_arr *a = (xs_arr*)v.p;\n"
-        "        if (a->len > 0) return a->items[a->len - 1];\n"
+        "        if (a->is_range) return XS_INT(a->range_end);\n"
+        "        if (a->len > 0)   return a->items[a->len - 1];\n"
         "    }\n"
         "    return XS_NULL;\n"
         "}\n\n"
