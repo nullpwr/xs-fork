@@ -1,7 +1,6 @@
 # Contributing to XS
 
-Thanks for wanting to help out. This doc is short on ceremony and long on
-what you actually need to know.
+Short on ceremony, long on what actually needs to be true before a PR lands.
 
 ## Build
 

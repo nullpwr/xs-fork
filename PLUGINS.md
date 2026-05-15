@@ -1,14 +1,14 @@
 # XS Plugin System
 
-Guide to writing and using plugins in XS. Plugins let you inject globals, add methods to built-in types, define new syntax, hook into the interpreter, and generally reshape the language to fit your domain. If you've used Babel plugins or Rust proc macros, same idea -- but simpler.
+Plugins inject globals, add methods to built-in types, define new syntax, hook into the interpreter, and reshape the language for a domain. The model is closer to Babel plugins or Rust proc macros than to a runtime hook system.
 
-> This doc assumes you know the basics of XS. See LANGUAGE.md for the language reference.
+> Assumes the basics of XS. See LANGUAGE.md for the language reference.
 
 ---
 
 ## What's a Plugin?
 
-A plugin is a regular `.xs` file that gets access to a special `plugin` object. That object has surfaces for the runtime, parser, lexer, and AST -- you use them to extend the host program that loaded you.
+A plugin is a regular `.xs` file that gets access to a special `plugin` object. That object has surfaces for the runtime, parser, lexer, and AST; the plugin uses them to extend the host program that loaded it.
 
 ```xs
 -- my_plugin.xs

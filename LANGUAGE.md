@@ -1,6 +1,6 @@
 # XS Language Reference
 
-Complete reference for the XS programming language. Covers syntax, semantics, the standard library, and the weird corners. If something here doesn't match what the interpreter does, the interpreter wins.
+Reference for the XS programming language. Covers syntax, semantics, the standard library, and the corners. The implementation is the source of truth; if a detail here disagrees with the running compiler, the compiler wins.
 
 > **Notation:** Examples use `-- output` comments to show what a line prints.
 

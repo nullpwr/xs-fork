@@ -1,6 +1,6 @@
 # XS Command Reference
 
-Reference for the `xs` command-line tool. Most of these work, some are rough around the edges.
+Reference for the `xs` command-line tool. See [STATUS.md](STATUS.md) for which subcommands are stable, partial, or planned.
 
 > **Convention:** Optional arguments are shown in `[brackets]`, required
 > arguments in `<angle brackets>`. Flags can appear before or after positional

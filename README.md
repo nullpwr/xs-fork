@@ -1,6 +1,8 @@
 # XS
 
-A general-purpose programming language. Gradual typing, multiple execution backends, plugin system. Written in C. Builds on Linux, macOS, and Windows with zero dependencies.
+A programming language. Anywhere, anytime, by anyone.
+
+One statically-linked binary contains the compiler, the language server, the debugger, the formatter, the linter, the test runner, the profiler, and the package manager. Source compiles to native machine code, JavaScript, or WebAssembly, and runs unchanged on Linux, macOS, Windows, WASI, iOS, Android, ESP32, and Raspberry Pi.
 
 ```xs
 -- types are optional. add them when you want enforcement.
@@ -35,42 +37,24 @@ fn describe(val) {
     }
 }
 
--- reactive bindings: auto-update when dependencies change
-var price = 10
-var qty = 3
-bind total = price * qty         -- total is 30
-price = 20                       -- total is now 60
-
--- contracts: gradual runtime checks
-fn safe_div(a: int, b: int where b != 0) {
-    return a / b
-}
+-- duration as a real type
+let warmup = 30s
+let frame  = 16ms
+println(warmup + frame)          -- 30.016s
 
 -- function overloading
 fn area(r) = 3.14 * r * r
 fn area(w, h) = w * h
-
--- tagged blocks: custom control structures
-tag retry(n) {
-    var attempts = 0
-    loop {
-        try { let r = yield; return r }
-        catch e { attempts += 1; if attempts >= n { throw e } }
-    }
-}
-retry(3) { http_get("https://api.example.com") }
 ```
 
 ## Install
-
-Install with a single command:
 
 ```bash
 curl -fsSL https://xslang.org/install | sh        # linux/macos
 irm https://xslang.org/install.ps1 | iex          # windows (powershell)
 ```
 
-This downloads the XS installer (xsi), which sets up `/usr/local/xs/` (or `C:\xs\` on Windows) with the compiler, VM, and all built-in tools. Requires sudo/admin. After install:
+The installer downloads `xsi`, which sets up `/usr/local/xs/` (or `C:\xs\` on Windows) with the compiler, the VM, and every built-in tool. Requires sudo / admin.
 
 ```
 /usr/local/xs/
@@ -80,164 +64,106 @@ This downloads the XS installer (xsi), which sets up `/usr/local/xs/` (or `C:\xs
   env      shell environment setup
 ```
 
-Or build from source:
+Both installers verify the GitHub release against its published SHA-256 sums before running anything. Static binaries with checksums also live at [xslang.org/downloads](https://xslang.org/downloads).
+
+## Build from source
 
 ```bash
 make            # produces ./xs (or xs.exe on Windows)
 make debug      # -g -O0 with AddressSanitizer + UBSan
 make release    # -O3 with LTO, stripped
-make test       # runs tests/run-all.sh (7 layers: behavioural + adversarial + property + fuzz + golden + regression + conformance)
+make test       # tests/run-all.sh: 7 layers
 make install    # install release build to /usr/local/bin/xs
 make wasm       # produces xs.wasm via wasi-sdk (needs WASI_SDK env var)
 ```
 
-Needs gcc or clang and GNU make. No other build or runtime dependencies. HTTPS is handled by the bundled BearSSL tree under src/tls/bearssl/.
+Needs gcc or clang and GNU make. No other build or runtime dependencies. HTTPS goes through the bundled BearSSL tree under `src/tls/bearssl/`.
 
 ## Run
 
 ```bash
-xs file.xs              # run a script (bytecode VM, default)
+xs file.xs              # bytecode VM (default)
 xs                      # interactive REPL
 xs -e 'println(42)'     # eval one-liner
-xs --interp file.xs     # tree-walk interpreter (REPL/plugin debugging)
-xs --jit file.xs        # JIT backend (x86-64 and aarch64; see STATUS.md)
+xs --interp file.xs     # tree-walk interpreter (REPL / plugin debugging)
+xs --jit file.xs        # JIT (x86-64 + aarch64; see STATUS.md)
 xs --emit js file.xs    # transpile to JavaScript
 xs --emit c file.xs     # transpile to C
 xs --check file.xs      # static type check without running
 xs --strict file.xs     # require type annotations everywhere
 ```
 
-The bytecode VM is the default. Use `--jit` for hot loops; the
-JIT compiles opcodes that fit its supported set and falls back to
-the VM for the rest. Use `--interp` for plugin debugging or
-anything that hooks AST-level evaluation. See [STATUS.md](STATUS.md)
-for the backend matrix.
+The bytecode VM is the default. Use `--jit` for hotspots that have actually been profiled; the JIT compiles opcodes that fit its supported set and falls back to the VM for the rest. Use `--interp` for plugin debugging or anything that hooks AST-level evaluation. See [STATUS.md](STATUS.md) for the per-feature backend matrix.
 
-## What's in the box
+## Backends
 
-**Language features:**
-- Gradual typing with `--check` and `--strict`
-- Reactive bindings (`bind`) that auto-update when dependencies change
-- Gradual contracts (`where` clauses) for runtime-checked type conditions
-- Structs, traits, enums, classes with inheritance
-- Pattern matching with destructuring and guards
-- Closures, generators (`fn*`/`yield`), arrow lambdas
-- Function overloading (dispatch by argument count)
-- Tagged blocks (`tag`) for user-defined control structures
-- First-class `Duration` type with native suffixes (`5s`, `200ms`, `1ns`, `2m30s`)
-- Decorators on fn declarations: `@on_start`, `@on_exit`, `@on_signal`, `@on_panic`, `@every(d)`, `@cron(...)`, `@delayed(d)`, `@watch(path)`, `@bench`, `@example`, `@export(name)`, `@once`
-- Temporal primitives: `every`, `after`, `timeout`, `debounce` for scheduling
-- Algebraic effects (`effect`/`perform`/`handle`/`resume`)
-- All the concurrency: spawn, async/await, actors, channels, nurseries
-- First-class regex (`/pattern/` literals, `.test()`, `.match()`, `.replace()`)
-- List/map comprehensions, spread, pipe operator
-- try/catch/finally, defer, throw
+| flag           | what it does                                                                          |
+| -------------- | ------------------------------------------------------------------------------------- |
+| (default)      | bytecode VM                                                                           |
+| `--interp`     | tree-walk interpreter, for the REPL and AST-level plugin hooks                        |
+| `--jit`        | register-allocating JIT for x86-64 and aarch64; unsupported opcodes fall back to VM   |
+| `--emit c`     | self-contained C source                                                               |
+| `--emit js`    | JavaScript for Node or the browser                                                    |
+| `make wasm`    | runtime build (`xs.wasm`); the same compiler running in any WASI host or the browser  |
 
-**Backends:**
-- Bytecode VM (default; `--vm` for explicit)
-- Tree-walk interpreter (`--interp`, REPL / plugin debugging)
-- JIT compiler (`--jit`, x86-64 and aarch64): register-allocating specialiser; opcodes outside the supported set drop to the VM step path
-- Transpilers: JavaScript, C, WebAssembly
+Both the interp and the VM run against the same test suite on every commit and their outputs are diff'd; a divergence fails the test even when each backend passes on its own.
 
-**Tooling:**
-- REPL with syntax highlighting
-- LSP server (`xs lsp`)
-- Formatter (`xs fmt`), linter (`xs lint`)
-- Test runner (`xs test`), benchmarks (`xs bench`)
-- Profiler (`xs profile`), coverage (`xs coverage`)
-- Package manager (`xs install`, `xs remove`)
-- Doc generator (`xs doc`)
+## Stdlib
 
-**Standard library** (36 built-in modules, lazy-loaded on first `import`):
-math, time, io, string, path, base64, hash, uuid, collections, process, random, os, json, log, fmt, test, csv, url, re, msgpack, Promise, async, net, crypto, thread, buf, encode, db, cli, ffi, reflect, gc, toml, http, fs, tracing
+Lazy-loaded on first `import`. 36 built-in modules:
 
-**Plugin system:**
-Plugins are XS scripts with direct access to the lexer, parser, and runtime. Add keywords, inject globals, hook evaluation, override syntax, intercept imports -- written in XS, not C.
+`math`, `time`, `io`, `string`, `path`, `base64`, `hash`, `uuid`, `collections`, `process`, `random`, `os`, `json`, `log`, `fmt`, `test`, `csv`, `url`, `re`, `msgpack`, `Promise`, `async`, `net`, `crypto`, `thread`, `buf`, `encode`, `db`, `cli`, `ffi`, `reflect`, `gc`, `toml`, `http`, `fs`, `tracing`.
 
-**Networking:**
-HTTP / HTTPS client and HTTP/1.1 server. TLS via the bundled BearSSL
-tree, no external dependency. Server has per-server body / header /
-connection caps and idle culling.
+HTTP / HTTPS client and HTTP/1.1 server. Per-server body / header / connection caps and idle culling. The HTTPS client parses certificates but does not validate the trust chain; suitable for talking to known endpoints, not general public HTTPS in production. Trust-chain validation is on the roadmap.
 
-**Mobile and embedded:**
-`make ios`, `make android`, `make esp32`.
+## Plugins
 
-## Quick examples
+Plugins are XS scripts with direct access to the lexer, parser, and runtime. They can add keywords, inject globals, hook evaluation, override syntax, and intercept imports. Written in XS, not C. See [PLUGINS.md](PLUGINS.md).
 
-```xs
--- http request
-import net
-let resp = net.http_get("https://httpbin.org/get")
-println(resp["status"])   -- 200
+## Mobile and embedded
 
--- file operations
-import fs
-fs.write("/tmp/hello.txt", "hi from xs")
-println(fs.read("/tmp/hello.txt"))
+`make ios`, `make android`, `make esp32`. The mobile builds drop the JIT (App Store policy and Android NDK constraints); ESP32 is VM-only.
 
--- actors
-actor Counter {
-    var count = 0
-    fn increment() { count = count + 1 }
-    fn get() { count }
-}
-let c = spawn Counter
-c.increment()
-c.increment()
-println(c.get())  -- 2
+## Concurrency
 
--- gradual typing catches mistakes
-let n: int = "oops"     -- error: expected 'int', got 'str'
-```
+`spawn` creates real OS threads. The bytecode VM holds a global lock during its dispatch loop, so two pure-compute threads take turns rather than running in parallel. The lock releases around sleep, I/O, channel receive, and the like, so spawn-and-block parallelises the way you would expect. Same model that CPython uses. Removing the lock is on the roadmap; it is not a 1.x change.
+
+`channel`, `actor`, `nursery`, `async` / `await` are all available. See [docs/concurrency](https://xslang.org/docs/guide/concurrency).
+
+## Benchmarks
+
+Linux x86-64, AMD Ryzen 7, best of three runs, each binary cold from disk. Treat as indicative, not authoritative.
+
+| program               | `--interp` | `--vm` | `--jit` | node 20 | python 3.13 |
+| --------------------- | ---------: | -----: | ------: | ------: | ----------: |
+| hello world (startup) |       3 ms |   3 ms |    3 ms |   57 ms |       15 ms |
+| `fib(30)`             |     950 ms | 180 ms |   31 ms |   62 ms |       71 ms |
+
+Reproduce with `bash tests/bench_backends.sh` or `xs bench`.
 
 ## Project layout
 
 ```
 src/             compiler and runtime, one subdirectory per subsystem
 src/tls/         bundled BearSSL for HTTPS
-tests/           behavioural tests (test_*.xs) and shell drivers (test_cli.sh, test_lint.sh, test_errors.sh, test_transpiler.sh)
-tests/*/         adversarial, conformance, fuzz, golden, lint_samples, negative, plugins, property, regression
+tests/           behavioural tests (test_*.xs) and shell drivers
+tests/*/         adversarial, conformance, fuzz, golden, lint_samples,
+                 negative, plugins, property, regression
 benchmarks/      benchmark programs
 editors/vscode/  VS Code extension
 Makefile         build system
 xs.toml          project config
 ```
 
-## Benchmarks
-
-Wall-clock numbers from a single Linux x86_64 machine, O2 release build,
-warm caches. Treat as indicative, not authoritative.
-
-| Program               | Python 3 | Node.js | xs --interp | xs (default --vm) |
-|-----------------------|---------|---------|-------------|-------------------|
-| Hello world (startup) | ~15 ms  | ~54 ms  | ~4 ms       | **~4 ms**         |
-| `fib(25)` recursion   | ~21 ms  | ~54 ms  | ~85 ms      | **~18 ms**        |
-| `fib(30)` recursion   | ~160 ms | ~60 ms  | ~900 ms     | **~170 ms**       |
-
-A tight numeric loop shows where `--jit` pays off relative to `--vm`:
-
-| Program              | `--vm`  | `--jit` | gcc -O2 | node   |
-|----------------------|---------|---------|---------|--------|
-| `fib(30)`            |  170 ms |   30 ms |   <1 ms | 110 ms |
-| `fib(35)`            | 1900 ms |  315 ms |   80 ms | 210 ms |
-| 10M-iter `while` sum |  535 ms |   60 ms |   20 ms | 110 ms |
-
-Startup is around 3 ms on this box. The default backend (bytecode VM)
-sits in the same ballpark as CPython on loops and a few times slower
-on hot recursion; `--jit` closes the gap. Stick with the default for
-everyday work; `--jit` is for hotspots you've actually profiled.
-
-Reproduce with `benchmarks/bench_fib.xs`, `benchmarks/bench_sort.xs`,
-`benchmarks/bench_strings.xs`, or `xs bench`.
-
 ## Docs
 
-- [LANGUAGE.md](LANGUAGE.md) -- full language reference
-- [COMMANDS.md](COMMANDS.md) -- every CLI command, flag, and subcommand
-- [PLUGINS.md](PLUGINS.md) -- plugin system guide with working examples
-- [STATUS.md](STATUS.md) -- what works, what's partial, what's planned
-- [CONTRIBUTING.md](CONTRIBUTING.md) -- how to contribute
+- [LANGUAGE.md](LANGUAGE.md) — full language reference
+- [COMMANDS.md](COMMANDS.md) — every CLI command, flag, and subcommand
+- [PLUGINS.md](PLUGINS.md) — plugin system guide with working examples
+- [STATUS.md](STATUS.md) — what works, what's partial, what's planned
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute
+- [xslang.org](https://xslang.org) — the website, with a browser playground
 
 ## License
 
-Apache 2.0
+Apache 2.0.
