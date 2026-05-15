@@ -2314,6 +2314,43 @@ println(helper())
 
 For directories, `use "dir/"` imports all `.xs` files in the directory.
 
+### Exporting Names
+
+Cross-file imports respect `pub`. A name from the imported file is
+visible through the namespace only if its declaration is marked
+public; everything else stays file-local.
+
+```xs
+-- math_utils.xs
+pub fn double(x) { return x * 2 }      -- visible
+pub let TAU = 6.2831                   -- visible
+pub const E  = 2.71828                 -- visible
+pub struct Point { x: int, y: int }    -- visible
+pub enum Status { Ok, Failed }         -- visible (variants too)
+
+fn _helper(x) { return x + 1 }         -- private, file-local
+let _seed = 42                         -- private, file-local
+```
+
+```xs
+use "math_utils.xs"
+println(math_utils.double(5))          -- 10
+println(math_utils.TAU)                -- 6.2831
+println(math_utils._helper)            -- null (private)
+```
+
+`@export("alias")` on a function exposes it under a public name distinct
+from the local one. Both names work at the call site.
+
+```xs
+@export("rgbToHex")
+fn rgb_to_hex(r, g, b) { ... }
+```
+
+A file with no `pub` or `@export` anywhere falls back to exposing every
+top-level binding. As soon as a single declaration is marked public,
+strict filtering kicks in.
+
 ### Declaring Modules Inline
 
 ```xs
