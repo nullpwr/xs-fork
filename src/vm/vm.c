@@ -893,6 +893,292 @@ extern XSProto *compile_program(Node *program);
 
 #include "core/lexer.h"
 #include "core/parser.h"
+#include <sys/stat.h>
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* Walk a program node's top-level statements and return the names that
+   should be exposed publicly. Mirrors the same rule the interp loader
+   uses: pub fn / pub let / pub var / pub const / pub struct / pub enum
+   / pub type / pub module / pub tag are exported, plus @export("alias")
+   on functions exposes both the local name and the alias. If the file
+   has zero pub/@export anywhere, fall back to exposing every top-level
+   binding so that older code keeps working unchanged. */
+typedef struct PubList { char **names; int len; int cap; int any_pub; } PubList;
+
+static void publist_push(PubList *pl, const char *name) {
+    if (!name) return;
+    for (int i = 0; i < pl->len; i++) if (strcmp(pl->names[i], name) == 0) return;
+    if (pl->len >= pl->cap) {
+        pl->cap = pl->cap ? pl->cap * 2 : 8;
+        pl->names = xs_realloc(pl->names, sizeof(char*) * pl->cap);
+    }
+    pl->names[pl->len++] = xs_strdup(name);
+}
+
+static void publist_free(PubList *pl) {
+    for (int i = 0; i < pl->len; i++) free(pl->names[i]);
+    free(pl->names);
+}
+
+static void publist_collect(Node *prog, PubList *out) {
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return;
+    for (int j = 0; j < prog->program.stmts.len; j++) {
+        Node *s = prog->program.stmts.items[j];
+        if (!s) continue;
+        switch (VAL_TAG(s)) {
+            case NODE_FN_DECL: {
+                int has_export = 0;
+                const char *export_name = NULL;
+                for (int d = 0; d < s->fn_decl.n_decorators; d++) {
+                    if (s->fn_decl.decorators[d].name &&
+                        strcmp(s->fn_decl.decorators[d].name, "export") == 0) {
+                        has_export = 1;
+                        if (s->fn_decl.decorators[d].n_args > 0 &&
+                            s->fn_decl.decorators[d].args[0] &&
+                            VAL_TAG(s->fn_decl.decorators[d].args[0]) == NODE_LIT_STRING) {
+                            export_name = s->fn_decl.decorators[d].args[0]->lit_string.sval;
+                        }
+                    }
+                }
+                if (s->fn_decl.is_pub || has_export) {
+                    out->any_pub = 1;
+                    publist_push(out, s->fn_decl.name);
+                    if (export_name) publist_push(out, export_name);
+                }
+                break;
+            }
+            case NODE_LET: case NODE_VAR:
+                if (s->let.is_pub) { out->any_pub = 1; publist_push(out, s->let.name); }
+                break;
+            case NODE_CONST:
+                if (s->const_.is_pub) { out->any_pub = 1; publist_push(out, s->const_.name); }
+                break;
+            case NODE_STRUCT_DECL:
+                if (s->struct_decl.is_pub) { out->any_pub = 1; publist_push(out, s->struct_decl.name); }
+                break;
+            case NODE_ENUM_DECL:
+                if (s->enum_decl.is_pub) {
+                    out->any_pub = 1;
+                    publist_push(out, s->enum_decl.name);
+                    for (int v = 0; v < s->enum_decl.variants.len; v++) {
+                        EnumVariant *ev = &s->enum_decl.variants.items[v];
+                        if (ev->name) publist_push(out, ev->name);
+                    }
+                }
+                break;
+            case NODE_MODULE_DECL:
+                if (s->module_decl.is_pub) { out->any_pub = 1; publist_push(out, s->module_decl.name); }
+                break;
+            case NODE_TYPE_ALIAS:
+                if (s->type_alias.is_pub) { out->any_pub = 1; publist_push(out, s->type_alias.name); }
+                break;
+            case NODE_TAG_DECL:
+                if (s->tag_decl.is_pub) { out->any_pub = 1; publist_push(out, s->tag_decl.name); }
+                break;
+            default: break;
+        }
+    }
+}
+
+/* Compile a .xs file with the bytecode compiler and run it on a child VM
+   so the resulting top-level functions are XS_CLOSURE values the parent
+   VM can actually invoke. Returns a module value containing the file's
+   public bindings, or NULL on failure. The compiled program and any
+   captured closures live for the rest of the process -- modules are
+   loaded once and never unloaded. */
+static Value *vm_load_user_module_file(const char *filepath) {
+    if (!filepath) return NULL;
+    FILE *f = fopen(filepath, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *src = xs_malloc((size_t)sz + 1);
+    if (fread(src, 1, (size_t)sz, f) != (size_t)sz) {
+        free(src); fclose(f); return NULL;
+    }
+    src[sz] = '\0';
+    fclose(f);
+
+    char *path_owned = xs_strdup(filepath);
+    Lexer lex;  lexer_init(&lex, src, path_owned);
+    TokenArray ta = lexer_tokenize(&lex);
+    Parser psr; parser_init(&psr, &ta, path_owned);
+    Node *prog = parser_parse(&psr);
+    token_array_free(&ta);
+    comment_list_free(&lex.comments);
+    if (!prog || psr.had_error) {
+        if (prog) node_free(prog);
+        free(src); free(path_owned);
+        return NULL;
+    }
+
+    PubList pubs = {0};
+    publist_collect(prog, &pubs);
+
+    extern int g_compile_for_module;
+    int saved_module_flag = g_compile_for_module;
+    g_compile_for_module = 1;
+    XSProto *proto = compile_program(prog);
+    g_compile_for_module = saved_module_flag;
+    /* prog and src are referenced by the compiled chunk via spans; keep
+       them alive intentionally. node_free() would tear out the AST nodes
+       function bodies still point to. */
+
+    /* Run the file in a fresh VM with its own globals. We seed the
+       child's globals with copies of the parent's stdlib bindings so
+       things like `import math` and built-in calls work; new bindings
+       added by the file stay isolated to this child. */
+    VM *child = vm_new();
+    if (g_plugin_vm && g_plugin_vm->globals) {
+        XSMap *parent = g_plugin_vm->globals;
+        for (int i = 0; i < parent->cap; i++) {
+            if (parent->keys[i] && parent->vals[i]) {
+                if (!map_get(child->globals, parent->keys[i]))
+                    map_set(child->globals, parent->keys[i], parent->vals[i]);
+            }
+        }
+    }
+
+    VM *saved_main = g_plugin_vm;
+    VM *saved_invoke = g_vm_for_invoke;
+    g_plugin_vm = child;
+    g_vm_for_invoke = child;
+    int rc = vm_run(child, proto);
+    g_plugin_vm = saved_main;
+    g_vm_for_invoke = saved_invoke;
+
+    Value *mod = NULL;
+    if (rc == 0) {
+        XSMap *m = map_new();
+        if (pubs.any_pub) {
+            for (int i = 0; i < pubs.len; i++) {
+                Value *v = map_get(child->globals, pubs.names[i]);
+                if (v) map_set(m, pubs.names[i], value_incref(v));
+            }
+        } else {
+            /* No pub anywhere: expose everything the file added. We
+               diff against the seeded parent globals to skip keys that
+               came from the stdlib seed. */
+            XSMap *parent = (g_plugin_vm && g_plugin_vm->globals) ? g_plugin_vm->globals : NULL;
+            for (int i = 0; i < child->globals->cap; i++) {
+                const char *k = child->globals->keys[i];
+                Value *v = child->globals->vals[i];
+                if (!k || !v) continue;
+                if (parent && map_get(parent, k)) continue;
+                map_set(m, k, value_incref(v));
+            }
+        }
+        mod = xs_module(m);
+    }
+    publist_free(&pubs);
+
+    /* Detach the child's globals: closures captured by the module map
+       still reference protos from this child, and they need to outlive
+       this loader. We zero the pointer so vm_free skips it. */
+    child->globals = NULL;
+    vm_free(child);
+    /* proto, prog, src and path_owned all leak by design. */
+    (void)proto;
+
+    return mod;
+}
+
+/* `use "file.xs"` lowering. The compiler emits:
+       __use_file(use_path, source_file_or_null)
+   We do the same path resolution the AST interp does (relative to the
+   importing file's dir, then a few package-search fallbacks), then
+   compile and execute the file on a child VM so its functions land as
+   XS_CLOSURE values the parent VM can invoke. */
+static Value *vm_use_file(Interp *interp, Value **args, int argc) {
+    (void)interp;
+    if (argc < 1 || VAL_TAG(args[0]) != XS_STR) return xs_null();
+    const char *use_path = args[0]->s;
+    const char *src_file = (argc >= 2 && args[1] && VAL_TAG(args[1]) == XS_STR)
+                            ? args[1]->s : NULL;
+
+    /* Bare name (no slash, no .xs): try the global registry first.
+       Stdlib modules and plugin-injected names live there. */
+    if (!strchr(use_path, '/') && !strstr(use_path, ".xs") && g_plugin_vm) {
+        Value *registered = map_get(g_plugin_vm->globals, use_path);
+        if (registered && (VAL_TAG(registered) == XS_MODULE ||
+                           VAL_TAG(registered) == XS_MAP)) {
+            return value_incref(registered);
+        }
+        /* try lazy stdlib materialisation */
+        Value *built = stdlib_load_module(NULL, use_path);
+        if (built) {
+            map_set(g_plugin_vm->globals, use_path, built);
+            return built;  /* map_set incref'd, so this is the caller's ref */
+        }
+    }
+
+    char resolved[PATH_MAX];
+    if (use_path[0] != '/' && src_file) {
+        const char *last_slash = strrchr(src_file, '/');
+        if (!last_slash) last_slash = strrchr(src_file, '\\');
+        if (last_slash) {
+            int dirlen = (int)(last_slash - src_file);
+            snprintf(resolved, sizeof(resolved), "%.*s/%s", dirlen, src_file, use_path);
+        } else {
+            snprintf(resolved, sizeof(resolved), "%s", use_path);
+        }
+    } else {
+        snprintf(resolved, sizeof(resolved), "%s", use_path);
+    }
+
+    /* If the path resolves to a directory, look for mod.xs / index.xs. */
+    struct stat st;
+    if (stat(resolved, &st) == 0 && S_ISDIR(st.st_mode)) {
+        char dir_try[PATH_MAX];
+        snprintf(dir_try, sizeof(dir_try), "%.*s/mod.xs",
+                 (int)(sizeof(dir_try) - 9), resolved);
+        if (stat(dir_try, &st) == 0) {
+            snprintf(resolved, sizeof(resolved), "%s", dir_try);
+        } else {
+            snprintf(dir_try, sizeof(dir_try), "%.*s/index.xs",
+                     (int)(sizeof(dir_try) - 11), resolved);
+            if (stat(dir_try, &st) == 0)
+                snprintf(resolved, sizeof(resolved), "%s", dir_try);
+        }
+    }
+
+    Value *mod = vm_load_user_module_file(resolved);
+    if (mod) return mod;
+
+    /* Last resort: try the package search path with the bare name. */
+    if (!strchr(use_path, '/')) {
+        char pkg[PATH_MAX];
+        const char *bare = use_path;
+        char bare_buf[256];
+        size_t blen = strlen(bare);
+        if (blen > 3 && strcmp(bare + blen - 3, ".xs") == 0 && blen - 3 < sizeof(bare_buf)) {
+            snprintf(bare_buf, sizeof(bare_buf), "%.*s", (int)(blen - 3), bare);
+            bare = bare_buf;
+        }
+        static const char *lib_dirs[] = { ".xs_lib", "xs_lib", NULL };
+        static const char *entries[]  = { "main.xs", "lib.xs", NULL };
+        for (int d = 0; lib_dirs[d]; d++) {
+            for (int e = 0; entries[e]; e++) {
+                int n = snprintf(pkg, sizeof(pkg), "%s/%s/%s", lib_dirs[d], bare, entries[e]);
+                if (n > 0 && (size_t)n < sizeof(pkg) && stat(pkg, &st) == 0) {
+                    Value *m = vm_load_user_module_file(pkg);
+                    if (m) return m;
+                }
+            }
+            int n = snprintf(pkg, sizeof(pkg), "%s/%s/%s.xs", lib_dirs[d], bare, bare);
+            if (n > 0 && (size_t)n < sizeof(pkg) && stat(pkg, &st) == 0) {
+                Value *m = vm_load_user_module_file(pkg);
+                if (m) return m;
+            }
+        }
+    }
+
+    fprintf(stderr, "use: failed to load module '%s'\n", use_path);
+    return xs_null();
+}
 
 static Value *vm_load_plugin(Interp *interp, Value **args, int argc) {
     (void)interp;
@@ -1189,6 +1475,7 @@ static void vm_register_stdlib(VM *vm) {
         REG("select",  native_async_select);
     }
     REG("__load_plugin", vm_load_plugin);
+    REG("__use_file",    vm_use_file);
     REG("is_int",      vm_is_int);
     REG("is_float",    vm_is_float);
     REG("is_str",      vm_is_str);
@@ -4112,6 +4399,65 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             if (call_frame_push(vm, sv, mc_argc)) { value_decref(sv); return 1; }
                             value_decref(sv); frame = FRAME;
                             mc_called = 1;
+                        }
+                        break;
+                    }
+                    /* If the looked-up name is a class/struct constructor
+                       (XS_MAP with __fields), treat `mod.Name(args)` as
+                       `(mod.Name)(args)` and construct an instance the
+                       same way OP_CALL would. Mirrors the struct branch
+                       of OP_CALL, scoped to the no-`init` case which is
+                       how plain structs declared with `struct` work. */
+                    if (fn && VAL_TAG(fn) == XS_MAP && fn->map &&
+                        map_get(fn->map, "__fields")) {
+                        Value *cls = fn;
+                        Value *fields = map_get(cls->map, "__fields");
+                        Value *methods = map_get(cls->map, "__methods");
+                        Value *init_fn = (methods && VAL_TAG(methods) == XS_MAP)
+                                         ? map_get(methods->map, "init") : NULL;
+                        Value *inst = xs_map_new();
+                        if (fields && VAL_TAG(fields) == XS_MAP) {
+                            for (int j = 0; j < fields->map->cap; j++) {
+                                if (!fields->map->keys[j]) continue;
+                                Value *fv = fields->map->vals[j];
+                                Value *cv = (fv && (VAL_TAG(fv) == XS_ARRAY ||
+                                                    VAL_TAG(fv) == XS_MAP))
+                                            ? value_copy(fv) : value_incref(fv);
+                                map_set(inst->map, fields->map->keys[j], cv);
+                                if (fv && (VAL_TAG(fv) == XS_ARRAY || VAL_TAG(fv) == XS_MAP))
+                                    value_decref(cv);
+                            }
+                            if (!init_fn && mc_argc > 0) {
+                                int fi = 0;
+                                for (int oi = 0; oi < fields->map->len && fi < mc_argc; oi++) {
+                                    int j = fields->map->order ? fields->map->order[oi] : oi;
+                                    if (j < fields->map->cap && fields->map->keys[j])
+                                        map_set(inst->map, fields->map->keys[j],
+                                                value_incref(mc_args[fi++]));
+                                }
+                            }
+                        }
+                        if (methods && VAL_TAG(methods) == XS_MAP) {
+                            for (int j = 0; j < methods->map->cap; j++)
+                                if (methods->map->keys[j])
+                                    map_set(inst->map, methods->map->keys[j],
+                                            value_incref(methods->map->vals[j]));
+                        }
+                        Value *cls_name = map_get(cls->map, "__name");
+                        if (cls_name) map_set(inst->map, "__type", value_incref(cls_name));
+                        for (int j = 0; j < mc_argc; j++) value_decref(POP());
+                        value_decref(POP());
+                        PUSH(inst);
+                        if (init_fn && VAL_TAG(init_fn) == XS_CLOSURE) {
+                            /* re-call with init: push inst, push args, call */
+                            PUSH(value_incref(inst));
+                            for (int j = 0; j < mc_argc; j++)
+                                PUSH(value_incref(mc_args[j]));
+                            Value *r = vm_invoke(vm, init_fn,
+                                                 vm->sp - mc_argc - 1, mc_argc + 1);
+                            if (r) value_decref(r);
+                            for (int j = 0; j < mc_argc + 1; j++) value_decref(POP());
+                            frame = FRAME;
                         }
                         break;
                     }

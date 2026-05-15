@@ -378,11 +378,13 @@ struct Node {
             int          mutable;
             int          is_scoped;  /* @scoped: bound value is forbidden
                                         to escape its enclosing block */
+            int          is_pub;     /* `pub let`/`pub var` exposes through
+                                        cross-file `use` */
             TypeExpr    *type_ann;
             Node        *contract;   /* where clause, may be NULL */
         } let;
 
-        struct { char *name; Node *value; TypeExpr *type_ann; Node *contract; } const_;
+        struct { char *name; Node *value; TypeExpr *type_ann; Node *contract; int is_pub; } const_;
         struct { Node *expr; int has_semicolon; } expr_stmt;
 
         struct {
@@ -423,6 +425,7 @@ struct Node {
             int          n_type_params;
             char       **derives;
             int          n_derives;
+            int          is_pub;
         } struct_decl;
 
         struct {
@@ -431,6 +434,7 @@ struct Node {
             char          **type_params;
             int            *type_param_variance;
             int             n_type_params;
+            int             is_pub;
         } enum_decl;
 
         struct {
@@ -471,9 +475,10 @@ struct Node {
         struct {
             char    *name;
             NodeList body;
+            int      is_pub;
         } module_decl;
 
-        struct { char *name; char *target; } type_alias;
+        struct { char *name; char *target; int is_pub; } type_alias;
 
         struct {
             char     *name;

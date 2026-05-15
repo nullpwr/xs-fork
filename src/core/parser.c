@@ -4326,6 +4326,7 @@ static Node *parse_stmt(Parser *p) {
     if (tok->kind == TK_ACTOR) return parse_actor_decl(p);
     if (tok->kind == TK_STRUCT) {
         Node *sd = parse_struct_decl(p);
+        if (sd) sd->struct_decl.is_pub = is_pub;
         /* Merge #[derive(...)] attributes into struct's derives list */
         if (sd && attr_n_derives > 0) {
             for (int di = 0; di < attr_n_derives; di++) {
@@ -4340,7 +4341,11 @@ static Node *parse_stmt(Parser *p) {
         if (attr_derives) { for (int di=0; di<attr_n_derives; di++) free(attr_derives[di]); free(attr_derives); }
         return sd;
     }
-    if (tok->kind == TK_ENUM)   return parse_enum_decl(p);
+    if (tok->kind == TK_ENUM) {
+        Node *ed = parse_enum_decl(p);
+        if (ed) ed->enum_decl.is_pub = is_pub;
+        return ed;
+    }
     if (tok->kind == TK_IMPL)   return parse_impl_decl(p);
     if (tok->kind == TK_TRAIT) {
         pp_advance(p); /* consume 'trait' */
@@ -4450,6 +4455,7 @@ static Node *parse_stmt(Parser *p) {
         Node *n = node_new(NODE_MODULE_DECL, span);
         n->module_decl.name = mod_name;
         n->module_decl.body = body;
+        n->module_decl.is_pub = is_pub;
         return n;
     }
 
@@ -4538,6 +4544,7 @@ static Node *parse_stmt(Parser *p) {
         Node *n = node_new(NODE_TYPE_ALIAS, name_tok->span);
         n->type_alias.name   = xs_strdup(name_tok->sval ? name_tok->sval : "");
         n->type_alias.target = target;
+        n->type_alias.is_pub = is_pub;
         return n;
     }
 
@@ -4579,6 +4586,7 @@ static Node *parse_stmt(Parser *p) {
         n->let.value    = val;
         n->let.mutable  = mutable;
         n->let.is_scoped = decl_is_scoped;
+        n->let.is_pub   = is_pub;
         n->let.type_ann = ann;
         n->let.contract = contract;
         return n;
@@ -4610,6 +4618,7 @@ static Node *parse_stmt(Parser *p) {
         n->let.value    = val;
         n->let.mutable  = 1;
         n->let.is_scoped = decl_is_scoped;
+        n->let.is_pub   = is_pub;
         n->let.type_ann = ann;
         n->let.contract = contract;
         return n;
@@ -4638,6 +4647,7 @@ static Node *parse_stmt(Parser *p) {
         n->const_.value    = val;
         n->const_.type_ann = ann;
         n->const_.contract = contract;
+        n->const_.is_pub   = is_pub;
         return n;
     }
 

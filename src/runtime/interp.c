@@ -7513,6 +7513,106 @@ do_call: ;
     }
 }
 
+/* Walk a parsed program's top-level statements to find names the file
+   wants exported. A name is public when:
+     - the decl carries `pub` (fn, let, var, const, struct, enum, type
+       alias, module, tag), or
+     - a fn carries an `@export("alias")` decorator (both the local name
+       and the alias become public).
+   If a file has zero pub/@export declarations we fall back to exposing
+   every top-level binding -- this preserves the old (loose) behaviour
+   for code written before `pub` did anything, and gives users a
+   migration path. The fallback is a one-liner: as soon as someone adds
+   `pub fn` to the file, the loose mode flips off and only-pub wins. */
+typedef struct PubName { char *name; struct PubName *next; } PubName;
+
+static int pubname_has(PubName *list, const char *name) {
+    for (PubName *p = list; p; p = p->next)
+        if (strcmp(p->name, name) == 0) return 1;
+    return 0;
+}
+
+static void pubname_add(PubName **list, const char *name) {
+    if (!name || pubname_has(*list, name)) return;
+    PubName *n = xs_malloc(sizeof(*n));
+    n->name = xs_strdup(name);
+    n->next = *list;
+    *list = n;
+}
+
+static void pubname_free(PubName *list) {
+    while (list) {
+        PubName *next = list->next;
+        free(list->name);
+        free(list);
+        list = next;
+    }
+}
+
+static PubName *collect_public_names(Node *prog, int *any_pub) {
+    PubName *out = NULL;
+    *any_pub = 0;
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return out;
+    for (int j = 0; j < prog->program.stmts.len; j++) {
+        Node *s = prog->program.stmts.items[j];
+        if (!s) continue;
+        switch (VAL_TAG(s)) {
+            case NODE_FN_DECL: {
+                int has_export = 0;
+                const char *export_name = NULL;
+                for (int d = 0; d < s->fn_decl.n_decorators; d++) {
+                    if (s->fn_decl.decorators[d].name &&
+                        strcmp(s->fn_decl.decorators[d].name, "export") == 0) {
+                        has_export = 1;
+                        if (s->fn_decl.decorators[d].n_args > 0 &&
+                            s->fn_decl.decorators[d].args[0] &&
+                            VAL_TAG(s->fn_decl.decorators[d].args[0]) == NODE_LIT_STRING) {
+                            export_name = s->fn_decl.decorators[d].args[0]->lit_string.sval;
+                        }
+                    }
+                }
+                if (s->fn_decl.is_pub || has_export) {
+                    *any_pub = 1;
+                    pubname_add(&out, s->fn_decl.name);
+                    if (export_name) pubname_add(&out, export_name);
+                }
+                break;
+            }
+            case NODE_LET: case NODE_VAR:
+                if (s->let.is_pub) { *any_pub = 1; pubname_add(&out, s->let.name); }
+                break;
+            case NODE_CONST:
+                if (s->const_.is_pub) { *any_pub = 1; pubname_add(&out, s->const_.name); }
+                break;
+            case NODE_STRUCT_DECL:
+                if (s->struct_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->struct_decl.name); }
+                break;
+            case NODE_ENUM_DECL:
+                if (s->enum_decl.is_pub) {
+                    *any_pub = 1;
+                    pubname_add(&out, s->enum_decl.name);
+                    /* variant constructors live in the same namespace */
+                    for (int v = 0; v < s->enum_decl.variants.len; v++) {
+                        EnumVariant *ev = &s->enum_decl.variants.items[v];
+                        if (ev->name) pubname_add(&out, ev->name);
+                    }
+                }
+                break;
+            case NODE_MODULE_DECL:
+                if (s->module_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->module_decl.name); }
+                break;
+            case NODE_TYPE_ALIAS:
+                if (s->type_alias.is_pub) { *any_pub = 1; pubname_add(&out, s->type_alias.name); }
+                break;
+            case NODE_TAG_DECL:
+                if (s->tag_decl.is_pub) { *any_pub = 1; pubname_add(&out, s->tag_decl.name); }
+                break;
+            default: break;
+        }
+    }
+    return out;
+}
+
 static Value *load_xs_module_file(Interp *i, const char *filepath) {
     FILE *f = fopen(filepath, "rb");
     if (!f) return NULL;
@@ -7545,17 +7645,44 @@ static Value *load_xs_module_file(Interp *i, const char *filepath) {
 
     Env *saved = i->env;
     i->env = env_new(i->globals);
+    /* Hoist top-level fn decls so wrapping decorators and @export
+       aliases run, same as interp_run does for the main program.
+       Without this, `pub fn` lands in env but @export("name") never
+       binds the alias into globals, and the loader can't expose it. */
+    hoist_functions(i, &prog->program.stmts);
     for (int j = 0; j < prog->program.stmts.len; j++) {
-        interp_exec(i, prog->program.stmts.items[j]);
+        Node *s = prog->program.stmts.items[j];
+        if (s && VAL_TAG(s) == NODE_FN_DECL) continue; /* already hoisted */
+        interp_exec(i, s);
         if (i->cf.signal == CF_RETURN) CF_CLEAR(i);
         else if (i->cf.signal) break;
     }
     if (i->cf.signal == CF_ERROR || i->cf.signal == CF_PANIC || i->cf.signal == CF_THROW)
         CF_CLEAR(i);
 
+    int any_pub = 0;
+    PubName *pubs = collect_public_names(prog, &any_pub);
+
     XSMap *m = map_new();
-    for (int j = 0; j < i->env->len; j++)
-        map_set(m, i->env->bindings[j].name, value_incref(i->env->bindings[j].value));
+    for (int j = 0; j < i->env->len; j++) {
+        const char *bname = i->env->bindings[j].name;
+        /* Only expose names the author marked public. If the file has no
+           pub/@export anywhere, fall back to exposing everything so that
+           older code keeps working unchanged. */
+        if (any_pub && !pubname_has(pubs, bname)) continue;
+        map_set(m, bname, value_incref(i->env->bindings[j].value));
+    }
+    /* @export("alias") binds the fn into globals (not env) under the
+       alias. Pull those in too so `mod.alias` resolves through the
+       module map. */
+    if (any_pub) {
+        for (PubName *pn = pubs; pn; pn = pn->next) {
+            if (map_get(m, pn->name)) continue;
+            Value *v = env_get(i->globals, pn->name);
+            if (v) map_set(m, pn->name, value_incref(v));
+        }
+    }
+    pubname_free(pubs);
 
     env_decref(i->env);
     i->env = saved;
@@ -7565,6 +7692,22 @@ static Value *load_xs_module_file(Interp *i, const char *filepath) {
     (void)src;
 
     return xs_module(m);
+}
+
+/* VM-callable wrapper: spin up a fresh interpreter to load a user
+   module file. Used by the bytecode VM's `use "file.xs"` lowering --
+   it doesn't have a long-lived Interp of its own. The caller is
+   responsible for path resolution; we just open whatever it gives us. */
+Value *xs_load_user_module_file(const char *filepath) {
+    if (!filepath) return NULL;
+    Interp *tmp = interp_new(filepath);
+    Value *mod = load_xs_module_file(tmp, filepath);
+    /* The Interp owns a globals env that holds incref'd values pulled
+       in by the module; freeing it now would tear those down before
+       callers can use them. We leak the Interp on purpose -- modules
+       are loaded once per process and never unloaded. */
+    (void)tmp;
+    return mod;
 }
 
 static Value *try_load_xs_module(Interp *i, const char *modname) {

@@ -7,6 +7,13 @@
 #include <stdint.h>
 #include <string.h>
 
+/* Set by the cross-file `use` loader before invoking compile_program on
+   an imported file. Tells the top-level let/var/const cases to also
+   STORE_GLOBAL (in addition to the local slot) so the loader can
+   extract the file's bindings after the program runs. Cleared after.
+   No-op when compiling a normal script. */
+int g_compile_for_module = 0;
+
 #define MAX_LOCALS   256
 #define MAX_UPVALUES 256
 
@@ -1036,9 +1043,19 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
             compile_let_pat(c, pat);
             if (want_value) emit_a(c, OP_LOAD_LOCAL, val_slot);
         } else {
-            if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
+            /* Top-level `pub let X = ...`, OR any top-level let when
+               compiling for module-load (g_compile_for_module): stash a
+               copy in globals so the cross-file `use` loader can extract
+               it. The local slot keeps in-file references hot; the
+               global is the export channel. */
+            int is_top = c->current->enclosing == NULL && n->let.name;
+            int is_top_pub = is_top && n->let.is_pub;
+            int expose_global = is_top_pub || (is_top && g_compile_for_module);
+            if (want_value || expose_global) emit(c, MAKE_A(OP_DUP, 0, 0));
             int slot = local_add(c->current, n->let.name ? n->let.name : "<anon>");
             emit_a(c, OP_STORE_LOCAL, slot);
+            if (expose_global)
+                emit_a(c, OP_STORE_GLOBAL, emit_global_name(c, n->let.name));
             /* `let x where pred = expr` -- check pred with x in scope */
             if (n->let.contract) {
                 compile_node(c, n->let.contract, 1);
@@ -1060,9 +1077,14 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
             compile_node(c, n->const_.value, 1);
         else
             emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
-        if (want_value) emit(c, MAKE_A(OP_DUP, 0, 0));
+        int is_top = c->current->enclosing == NULL && n->const_.name;
+        int is_top_pub = is_top && n->const_.is_pub;
+        int expose_global = is_top_pub || (is_top && g_compile_for_module);
+        if (want_value || expose_global) emit(c, MAKE_A(OP_DUP, 0, 0));
         int slot = local_add(c->current, n->const_.name);
         emit_a(c, OP_STORE_LOCAL, slot);
+        if (expose_global)
+            emit_a(c, OP_STORE_GLOBAL, emit_global_name(c, n->const_.name));
         return;
     }
 
@@ -3041,7 +3063,36 @@ static void compile_node_inner(Compiler *c, Node *n, int want_value) {
             emit(c, MAKE_B(OP_CALL, 0, 0, 1));
             if (!want_value) emit(c, MAKE_A(OP_POP, 0, 0));
         } else if (n->use_.path) {
-            /* regular use: treat as no-op in VM for now */
+            /* `use "file.xs"` (or bare module name): hand off to the
+               __use_file native, which resolves the path and returns a
+               module value. The compiler passes the importing file's
+               path so the native can resolve relatives. */
+            emit_a(c, OP_LOAD_GLOBAL, emit_global_name(c, "__use_file"));
+            emit_const(c, xs_str(n->use_.path));
+            const char *src = c->current && c->current->proto
+                              ? c->current->proto->source_file : NULL;
+            if (src) emit_const(c, xs_str(src));
+            else     emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
+            emit(c, MAKE_B(OP_CALL, 0, 0, 2));
+            /* result on stack: a module value (or null on failure) */
+
+            if (n->use_.nnames > 0) {
+                /* selective: for each name, re-load the module and pull
+                   the field. We stash the module in a hidden local so
+                   each access doesn't re-run the loader. */
+                int mod_slot = local_add_hidden(c);
+                emit_a(c, OP_STORE_LOCAL, mod_slot);
+                for (int j = 0; j < n->use_.nnames; j++) {
+                    emit_a(c, OP_LOAD_LOCAL, mod_slot);
+                    int ni = emit_global_name(c, n->use_.names[j]);
+                    emit_a(c, OP_LOAD_FIELD, ni);
+                    compile_name_store(c, n->use_.name_aliases[j]);
+                }
+            } else if (n->use_.import_all && n->use_.alias) {
+                compile_name_store(c, n->use_.alias);
+            } else {
+                emit(c, MAKE_A(OP_POP, 0, 0));
+            }
             if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));
         } else {
             if (want_value) emit(c, MAKE_A(OP_PUSH_NULL, 0, 0));

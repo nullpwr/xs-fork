@@ -157,6 +157,12 @@ void    interp_run(Interp *i, Node *program);
 void    interp_exec(Interp *i, Node *stmt);
 void    interp_setup_tracer_suppress(Interp *i);
 
+/* Load an .xs file and return a module Value containing its public
+   bindings. Used by the bytecode VM's `use "file.xs"` codegen, which
+   has no Interp of its own. Returns NULL if the file can't be opened
+   or fails to parse. */
+Value  *xs_load_user_module_file(const char *filepath);
+
 /* caller does NOT own the refcount; incref to keep */
 Value  *interp_eval(Interp *i, Node *expr);
 
