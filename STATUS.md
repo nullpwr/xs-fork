@@ -209,7 +209,9 @@ with a virtual filesystem, captured stdout/stderr, and a `loadXS()` /
 static repo's daily sync workflow picks up the browser build.
 
 `xs --emit wasm` is a small AOT path for leaf programs: arithmetic,
-control flow, lambdas, closure capture (with mutation), tuple / slice /
+control flow, lambdas, closure capture *with* write-through, indirect
+closure calls (`fns[i]()`), string equality by content, UTF-8
+codepoint-aware `.len`, struct match by type name, tuple / slice /
 literal / OR patterns, try/catch, struct field access, divide-by-zero,
 and direct calls. Anything beyond that is refused upfront with a clear
 diagnostic that points at the runtime build (`make wasm`) or the
@@ -231,13 +233,15 @@ The pre-check refuses, with a one-line message:
   `.fold` / `.each` / `.some` / `.every` / `.find` / `.sort_with` /
   `.flat_map` / `.group_by` / `.partition` / `.sum` / `.product` /
   `.min_by` / `.max_by` / `.count`)
+- string-iteration methods (`.chars` / `.bytes` / `.lines` / `.graphemes`)
+- bigint literals and integer literals beyond i32 range
+- named nested fn declarations (use `let f = fn() {...}` instead)
 
-A handful of subtler gaps still trap with `wasm 'unreachable'` rather
-than refuse upfront: equality on heap-allocated strings (compares the
-data pointer, not the bytes), `String.len` returning UTF-8 byte count
-instead of codepoint count, struct match by type name (`Point { x, y }`
-needs the runtime to tag instances), and bigint promotion. The
-`make wasm` runtime build covers all of these; this AOT path does not.
+The full conformance suite (17 tests) now either runs end-to-end (4)
+or refuses upfront with a clear pointer (13). Nothing produces wrong
+output silently and nothing traps in the `wasm 'unreachable'` style.
+The `make wasm` runtime build is the production path for everything
+not covered above.
 
 ## Tooling
 
