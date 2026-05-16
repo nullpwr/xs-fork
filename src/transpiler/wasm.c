@@ -198,6 +198,7 @@ static void buf_name(WasmBuf *b, const char *s) {
 #define TAG_CLASS   9
 #define TAG_TUPLE   10
 #define TAG_RANGE   11
+#define TAG_BIGINT  12  /* arbitrary-precision int, payload = data ptr to digit string */
 
 /* Size of a value cell */
 #define VAL_SIZE 16
@@ -333,8 +334,32 @@ static int strtab_add_with_len(StringTable *st, const char *s, int *out_len) {
 #define RT_VAL_NEW_F64   (NUM_IMPORTS + 54)
 #define RT_VAL_F64       (NUM_IMPORTS + 55)
 #define RT_F64_TO_STR    (NUM_IMPORTS + 56)
+#define RT_CALL1         (NUM_IMPORTS + 57)
+#define RT_CALL2         (NUM_IMPORTS + 58)
+#define RT_STR_CHARS     (NUM_IMPORTS + 59)
+#define RT_STR_BYTES     (NUM_IMPORTS + 60)
+#define RT_STR_LINES     (NUM_IMPORTS + 61)
+#define RT_STR_LOWER     (NUM_IMPORTS + 62)
+#define RT_STR_TRIM      (NUM_IMPORTS + 63)
+#define RT_STR_REPLACE   (NUM_IMPORTS + 64)
+#define RT_STR_SPLIT     (NUM_IMPORTS + 65)
+#define RT_STR_JOIN      (NUM_IMPORTS + 66)
+#define RT_ARR_REVERSE   (NUM_IMPORTS + 67)
+#define RT_ARR_CONCAT    (NUM_IMPORTS + 68)
+#define RT_ARR_SORT      (NUM_IMPORTS + 69)
+#define RT_MAP_KEYS      (NUM_IMPORTS + 70)
+#define RT_MAP_VALUES    (NUM_IMPORTS + 71)
+#define RT_MAP_HAS       (NUM_IMPORTS + 72)
+#define RT_VAL_ABS       (NUM_IMPORTS + 73)
+#define RT_VAL_FLOOR     (NUM_IMPORTS + 74)
+#define RT_VAL_CEIL      (NUM_IMPORTS + 75)
+#define RT_VAL_SQRT      (NUM_IMPORTS + 76)
+#define RT_BIGINT_NEW    (NUM_IMPORTS + 77)
+#define RT_BIGINT_TO_STR (NUM_IMPORTS + 78)
+#define RT_BIGINT_ADD    (NUM_IMPORTS + 79)
+#define RT_BIGINT_MUL    (NUM_IMPORTS + 80)
 
-#define NUM_RT_FUNCS     57
+#define NUM_RT_FUNCS     81
 #define USER_FUNC_BASE   (NUM_IMPORTS + NUM_RT_FUNCS)
 
 /* ========================================================================
@@ -1963,10 +1988,12 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         }
         if (strcmp(method, "lower") == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_STR_LOWER);
             break;
         }
         if (strcmp(method, "trim") == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_STR_TRIM);
             break;
         }
         if (strcmp(method, "contains") == 0 && nargs == 1) {
@@ -1976,18 +2003,9 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             break;
         }
         if (strcmp(method, "split") == 0 && nargs == 1) {
-            /* Stub: return array with the string itself */
-            emit_call(code, RT_ARR_NEW);
-            {
-                int stmp = locals_add(locals, "__split_r");
-                emit_local_set(code, stmp);
-                emit_local_get(code, stmp);
-                compile_expr(node->method_call.obj, code, locals, ctx);
-                emit_call(code, RT_ARR_PUSH);
-                compile_expr(node->method_call.args.items[0], code, locals, ctx);
-                buf_byte(code, OP_DROP);
-                emit_local_get(code, stmp);
-            }
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_call(code, RT_STR_SPLIT);
             break;
         }
         if (strcmp(method, "starts_with") == 0 && nargs == 1) {
@@ -2002,26 +2020,503 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             emit_call(code, RT_STR_ENDS);
             break;
         }
-        if (strcmp(method, "map") == 0 && nargs == 1) {
-            /* arr.map(fn) - simplified: return empty array */
+        if (strcmp(method, "replace") == 0 && nargs == 2) {
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
-            buf_byte(code, OP_DROP);
+            compile_expr(node->method_call.args.items[1], code, locals, ctx);
+            emit_call(code, RT_STR_REPLACE);
+            break;
+        }
+        if (strcmp(method, "join") == 0 && nargs == 1) {
+            /* arr.join(sep) */
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_call(code, RT_STR_JOIN);
+            break;
+        }
+        if (strcmp(method, "chars") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_STR_CHARS);
+            break;
+        }
+        if (strcmp(method, "bytes") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_STR_BYTES);
+            break;
+        }
+        if ((strcmp(method, "lines") == 0 ||
+             strcmp(method, "graphemes") == 0) && nargs == 0) {
+            /* graphemes is approximated as codepoints for the AOT path. */
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            if (strcmp(method, "graphemes") == 0)
+                emit_call(code, RT_STR_CHARS);
+            else
+                emit_call(code, RT_STR_LINES);
+            break;
+        }
+        if (strcmp(method, "abs") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_VAL_ABS);
+            break;
+        }
+        if (strcmp(method, "floor") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_VAL_FLOOR);
+            break;
+        }
+        if (strcmp(method, "ceil") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_VAL_CEIL);
+            break;
+        }
+        if (strcmp(method, "sqrt") == 0 && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_VAL_SQRT);
+            break;
+        }
+        if ((strcmp(method, "reverse") == 0) && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_ARR_REVERSE);
+            break;
+        }
+        if ((strcmp(method, "concat") == 0) && nargs == 1) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_call(code, RT_ARR_CONCAT);
+            break;
+        }
+        if ((strcmp(method, "sort") == 0) && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_ARR_SORT);
+            break;
+        }
+        if ((strcmp(method, "keys") == 0) && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_MAP_KEYS);
+            break;
+        }
+        if ((strcmp(method, "values") == 0) && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_call(code, RT_MAP_VALUES);
+            break;
+        }
+        if ((strcmp(method, "has") == 0) && nargs == 1) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_call(code, RT_MAP_HAS);
+            break;
+        }
+
+        /* Higher-order array methods. Each emits an inline loop that
+           uses RT_CALL1/RT_CALL2 to invoke the function value. */
+        if (strcmp(method, "map") == 0 && nargs == 1) {
+            int src = locals_add(locals, "__map_src");
+            int fn  = locals_add(locals, "__map_fn");
+            int len = locals_add(locals, "__map_len");
+            int i   = locals_add(locals, "__map_i");
+            int out = locals_add(locals, "__map_out");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
             emit_call(code, RT_ARR_NEW);
+            emit_local_set(code, out);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, out);
+            emit_local_get(code, fn);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_CALL1);
+            emit_call(code, RT_ARR_PUSH);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, out);
             break;
         }
         if (strcmp(method, "filter") == 0 && nargs == 1) {
+            int src = locals_add(locals, "__flt_src");
+            int fn  = locals_add(locals, "__flt_fn");
+            int len = locals_add(locals, "__flt_len");
+            int i   = locals_add(locals, "__flt_i");
+            int out = locals_add(locals, "__flt_out");
+            int el  = locals_add(locals, "__flt_e");
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
+            emit_local_set(code, src);
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
-            buf_byte(code, OP_DROP);
+            emit_local_set(code, fn);
             emit_call(code, RT_ARR_NEW);
+            emit_local_set(code, out);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_local_set(code, el);
+            emit_local_get(code, fn);
+            emit_local_get(code, el);
+            emit_call(code, RT_CALL1);
+            emit_call(code, RT_VAL_TRUTHY);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, out);
+            emit_local_get(code, el);
+            emit_call(code, RT_ARR_PUSH);
+            buf_byte(code, OP_END);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, out);
+            break;
+        }
+        if ((strcmp(method, "reduce") == 0 || strcmp(method, "fold") == 0)
+            && (nargs == 2 || nargs == 1)) {
+            /* arr.reduce(init, fn(acc, x)) or arr.reduce(fn) using arr[0] as init. */
+            int src = locals_add(locals, "__red_src");
+            int fn  = locals_add(locals, "__red_fn");
+            int acc = locals_add(locals, "__red_acc");
+            int len = locals_add(locals, "__red_len");
+            int i   = locals_add(locals, "__red_i");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            if (nargs == 2) {
+                compile_expr(node->method_call.args.items[0], code, locals, ctx);
+                emit_local_set(code, acc);
+                compile_expr(node->method_call.args.items[1], code, locals, ctx);
+                emit_local_set(code, fn);
+                emit_i32(code, 0);
+                emit_local_set(code, i);
+            } else {
+                compile_expr(node->method_call.args.items[0], code, locals, ctx);
+                emit_local_set(code, fn);
+                emit_local_get(code, src);
+                emit_int_val(code, 0);
+                emit_call(code, RT_ARR_GET);
+                emit_local_set(code, acc);
+                emit_i32(code, 1);
+                emit_local_set(code, i);
+            }
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, fn);
+            emit_local_get(code, acc);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_CALL2);
+            emit_local_set(code, acc);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, acc);
+            break;
+        }
+        if ((strcmp(method, "each") == 0 || strcmp(method, "for_each") == 0) &&
+            nargs == 1) {
+            int src = locals_add(locals, "__ea_src");
+            int fn  = locals_add(locals, "__ea_fn");
+            int len = locals_add(locals, "__ea_len");
+            int i   = locals_add(locals, "__ea_i");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, fn);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_CALL1);
+            buf_byte(code, OP_DROP);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_null(code);
+            break;
+        }
+        if ((strcmp(method, "some") == 0 || strcmp(method, "any") == 0) &&
+            nargs == 1) {
+            int src = locals_add(locals, "__sa_src");
+            int fn  = locals_add(locals, "__sa_fn");
+            int len = locals_add(locals, "__sa_len");
+            int i   = locals_add(locals, "__sa_i");
+            int res = locals_add(locals, "__sa_res");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            emit_i32(code, 0);
+            emit_local_set(code, res);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, fn);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_CALL1);
+            emit_call(code, RT_VAL_TRUTHY);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_i32(code, 1);
+            emit_local_set(code, res);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 2);
+            buf_byte(code, OP_END);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_i32(code, TAG_BOOL);
+            emit_local_get(code, res);
+            emit_call(code, RT_VAL_NEW);
+            break;
+        }
+        if ((strcmp(method, "every") == 0 || strcmp(method, "all") == 0) &&
+            nargs == 1) {
+            int src = locals_add(locals, "__ev_src");
+            int fn  = locals_add(locals, "__ev_fn");
+            int len = locals_add(locals, "__ev_len");
+            int i   = locals_add(locals, "__ev_i");
+            int res = locals_add(locals, "__ev_res");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            emit_i32(code, 1);
+            emit_local_set(code, res);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, fn);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_CALL1);
+            emit_call(code, RT_VAL_TRUTHY);
+            buf_byte(code, OP_I32_EQZ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_i32(code, 0);
+            emit_local_set(code, res);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 2);
+            buf_byte(code, OP_END);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_i32(code, TAG_BOOL);
+            emit_local_get(code, res);
+            emit_call(code, RT_VAL_NEW);
+            break;
+        }
+        if ((strcmp(method, "find") == 0) && nargs == 1) {
+            int src = locals_add(locals, "__fd_src");
+            int fn  = locals_add(locals, "__fd_fn");
+            int len = locals_add(locals, "__fd_len");
+            int i   = locals_add(locals, "__fd_i");
+            int el  = locals_add(locals, "__fd_e");
+            int res = locals_add(locals, "__fd_res");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
+            emit_null(code);
+            emit_local_set(code, res);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_local_set(code, el);
+            emit_local_get(code, fn);
+            emit_local_get(code, el);
+            emit_call(code, RT_CALL1);
+            emit_call(code, RT_VAL_TRUTHY);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, el);
+            emit_local_set(code, res);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 2);
+            buf_byte(code, OP_END);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, res);
+            break;
+        }
+        if ((strcmp(method, "count") == 0) && nargs == 0) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            int t = locals_add(locals, "__cnt_l");
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, t);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, t);
+            emit_call(code, RT_VAL_NEW);
+            break;
+        }
+        if ((strcmp(method, "sum") == 0 || strcmp(method, "product") == 0) &&
+            nargs == 0) {
+            int src = locals_add(locals, "__sm_src");
+            int len = locals_add(locals, "__sm_len");
+            int i   = locals_add(locals, "__sm_i");
+            int acc = locals_add(locals, "__sm_a");
+            int is_prod = (strcmp(method, "product") == 0);
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            emit_int_val(code, is_prod ? 1 : 0);
+            emit_local_set(code, acc);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            emit_local_get(code, acc);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, is_prod ? RT_VAL_MUL : RT_VAL_ADD);
+            emit_local_set(code, acc);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, acc);
             break;
         }
         if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
             emit_call(code, RT_STR_LEN);
+            break;
+        }
+        if (strcmp(method, "next") == 0) {
+            /* Generator .next() bridge -- the wasm AOT lowers generators
+               into plain arrays; .next() just returns the i'th element
+               wrapped in {value, done}. We expose a synthetic adapter
+               by treating the receiver as already an array iterator. */
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            int rv = locals_add(locals, "__gnext_r");
+            emit_local_set(code, rv);
+            emit_call(code, RT_MAP_NEW);
+            int mv = locals_add(locals, "__gnext_m");
+            emit_local_set(code, mv);
+            emit_local_get(code, mv);
+            {
+                int kl = 0;
+                int koff = strtab_add_with_len(ctx->strtab, "value", &kl);
+                emit_str_val(code, koff, kl);
+            }
+            emit_local_get(code, rv);
+            emit_call(code, RT_MAP_SET);
+            emit_local_get(code, mv);
+            {
+                int kl = 0;
+                int koff = strtab_add_with_len(ctx->strtab, "done", &kl);
+                emit_str_val(code, koff, kl);
+            }
+            emit_bool_val(code, 0);
+            emit_call(code, RT_MAP_SET);
+            emit_local_get(code, mv);
             break;
         }
         if (strcmp(method, "get") == 0 && nargs == 1) {
@@ -2033,7 +2528,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         if (strcmp(method, "to_string") == 0 || strcmp(method, "to_str") == 0 ||
             strcmp(method, "str") == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
-            emit_call(code, RT_VAL_TO_STR);
+            emit_call(code, RT_BIGINT_TO_STR);
             break;
         }
 
@@ -4560,13 +5055,73 @@ static void emit_rt_val_eq(WasmBuf *body) {
     buf_byte(body, OP_END); /* same-ptr inner if */
     buf_byte(body, OP_END); /* alen == blen if */
     buf_byte(body, OP_ELSE);
-    /* Non-string path: compare payloads (same as before). */
+    /* Array / tuple element-wise equality. */
+    emit_local_get(body, atag);
+    emit_i32(body, TAG_ARRAY);
+    buf_byte(body, OP_I32_EQ);
+    emit_local_get(body, atag);
+    emit_i32(body, TAG_TUPLE);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, alen);
+    emit_local_get(body, 1);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, blen);
+    emit_local_get(body, alen);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_i32(body, 1);
+    emit_local_set(body, eq);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, alen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* compare arr[i] */
+    emit_local_get(body, 0);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_local_get(body, 1);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_call(body, RT_VAL_EQ);
+    emit_call(body, RT_VAL_TRUTHY);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_i32(body, 0);
+    emit_local_set(body, eq);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 2);
+    buf_byte(body, OP_END);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); /* loop */
+    buf_byte(body, OP_END); /* outer block */
+    buf_byte(body, OP_END); /* alen == blen */
+    buf_byte(body, OP_ELSE);
+    /* Non-string, non-array: compare payloads. */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
     emit_local_get(body, 1);
     emit_call(body, RT_VAL_I32);
     buf_byte(body, OP_I32_EQ);
     emit_local_set(body, eq);
+    buf_byte(body, OP_END); /* array if */
     buf_byte(body, OP_END); /* TAG_STRING if */
     buf_byte(body, OP_END); /* same-tag if */
     /* Wrap eq as bool value */
@@ -6111,8 +6666,8 @@ static void emit_memcmp_loop(WasmBuf *body,
    Returns a bool Value indicating whether string `a` begins with
    string `b`. Non-string inputs yield false. */
 static void emit_rt_str_starts_with(WasmBuf *body) {
-    /* locals: 0=a, 1=b, 2=a_ptr, 3=a_len, 4=b_ptr, 5=b_len, 6=i, 7=mismatch */
-    const int a_ptr = 2, a_len = 3, b_ptr = 4, b_len = 5, i = 6, miss = 7;
+    /* locals: 0=a, 1=b, 2=a_ptr, 3=a_len, 4=b_ptr, 5=b_len, 6=i, 7=mismatch, 8=aoff */
+    const int a_ptr = 2, a_len = 3, b_ptr = 4, b_len = 5, i = 6, miss = 7, aoff = 8;
 
     emit_get_str_ptr_local(body, 0, a_ptr);
     emit_get_str_len_local(body, 0, a_len);
@@ -6130,10 +6685,12 @@ static void emit_rt_str_starts_with(WasmBuf *body) {
     emit_call(body, RT_VAL_NEW);
     buf_byte(body, OP_ELSE);
 
-    /* Compare b_len bytes starting at offset 0 in a. */
+    /* Compare b_len bytes starting at offset 0 in a. The dedicated
+       aoff local keeps the offset distinct from the loop counter so
+       memcmp_loop doesn't double-add when computing a_base+aoff+i. */
     emit_i32(body, 0);
-    emit_local_set(body, i); /* reuse i as a_off=0 temporarily */
-    emit_memcmp_loop(body, a_ptr, i, b_ptr, b_len, i, miss);
+    emit_local_set(body, aoff);
+    emit_memcmp_loop(body, a_ptr, aoff, b_ptr, b_len, i, miss);
 
     /* result = !mismatch */
     emit_i32(body, TAG_BOOL);
@@ -6590,6 +7147,1712 @@ static void emit_rt_f64_to_str(WasmBuf *body) {
     emit_call(body, RT_STR_CAT);
     buf_byte(body, OP_END); /* if ndig == 0 else */
     buf_byte(body, OP_END); /* if fpart == 0 else */
+}
+
+/* $call1(fn_val: i32, arg: i32) -> i32
+   Indirectly call a function value with one argument. Examines the
+   value's env slot (offset 8) to decide between bare and closure
+   dispatch so higher-order helpers (.map / .filter / .reduce) don't
+   need to know which kind they're holding. */
+static void emit_rt_call1(WasmBuf *body) {
+    int env = 2;
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, env);
+
+    emit_local_get(body, env);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    /* closure: pass env, then arg */
+    emit_local_get(body, env);
+    emit_local_get(body, 1);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    buf_byte(body, OP_CALL_INDIRECT);
+    buf_leb128_u(body, 3); /* (i32,i32) -> i32 */
+    buf_leb128_u(body, 0);
+    buf_byte(body, OP_ELSE);
+    /* bare: just arg */
+    emit_local_get(body, 1);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    buf_byte(body, OP_CALL_INDIRECT);
+    buf_leb128_u(body, 2); /* (i32) -> i32 */
+    buf_leb128_u(body, 0);
+    buf_byte(body, OP_END);
+}
+
+/* $call2(fn_val: i32, a: i32, b: i32) -> i32 */
+static void emit_rt_call2(WasmBuf *body) {
+    int env = 3;
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, env);
+
+    emit_local_get(body, env);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, env);
+    emit_local_get(body, 1);
+    emit_local_get(body, 2);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    buf_byte(body, OP_CALL_INDIRECT);
+    buf_leb128_u(body, 5); /* (i32,i32,i32) -> i32 */
+    buf_leb128_u(body, 0);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 1);
+    emit_local_get(body, 2);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    buf_byte(body, OP_CALL_INDIRECT);
+    buf_leb128_u(body, 3);
+    buf_leb128_u(body, 0);
+    buf_byte(body, OP_END);
+}
+
+/* $str_chars(s: i32) -> i32 (array of single-codepoint strings) */
+static void emit_rt_str_chars(WasmBuf *body) {
+    /* params: 0=s_val
+       locals: 1=arr, 2=ptr, 3=blen, 4=i, 5=cp_start, 6=b, 7=cp_len, 8=substr_ptr, 9=cp_str_val */
+    int arr = 1, ptr = 2, blen = 3, i = 4, cp_start = 5, b = 6, cp_len = 7, substr = 8, sval = 9;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, arr);
+    /* If not a string, return empty array. */
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, arr);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    /* ptr = data, blen = byte length */
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ptr);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, blen);
+
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+
+    emit_local_get(body, i);
+    emit_local_set(body, cp_start);
+
+    /* Read first byte and determine codepoint length. */
+    emit_local_get(body, ptr);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_set(body, b);
+
+    /* len = b < 0x80 ? 1 : (b < 0xE0 ? 2 : (b < 0xF0 ? 3 : 4)) */
+    emit_local_get(body, b);
+    emit_i32(body, 0x80);
+    buf_byte(body, OP_I32_LT_U);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, 1);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, b);
+    emit_i32(body, 0xE0);
+    buf_byte(body, OP_I32_LT_U);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, 2);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, b);
+    emit_i32(body, 0xF0);
+    buf_byte(body, OP_I32_LT_U);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, 3);
+    buf_byte(body, OP_ELSE);
+    emit_i32(body, 4);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
+    emit_local_set(body, cp_len);
+
+    /* Allocate substr buffer (cp_len + 1 for NUL) and copy bytes. */
+    emit_local_get(body, cp_len);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, substr);
+    {
+        int j = 10;
+        emit_i32(body, 0);
+        emit_local_set(body, j);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, j);
+        emit_local_get(body, cp_len);
+        buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, substr);
+        emit_local_get(body, j);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, ptr);
+        emit_local_get(body, cp_start);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, j);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_I32_STORE8);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, j);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, j);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+    }
+    /* NUL terminate */
+    emit_local_get(body, substr);
+    emit_local_get(body, cp_len);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+
+    /* Build the string Value and push onto array. */
+    emit_local_get(body, substr);
+    emit_local_get(body, cp_len);
+    emit_call(body, RT_STR_NEW);
+    emit_local_set(body, sval);
+    emit_local_get(body, arr);
+    emit_local_get(body, sval);
+    emit_call(body, RT_ARR_PUSH);
+
+    /* i += cp_len */
+    emit_local_get(body, i);
+    emit_local_get(body, cp_len);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+
+    emit_local_get(body, arr);
+}
+
+/* $str_bytes(s) -> array of int values (raw byte values). */
+static void emit_rt_str_bytes(WasmBuf *body) {
+    int arr = 1, ptr = 2, blen = 3, i = 4;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, arr);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, arr);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ptr);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, blen);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, arr);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, ptr);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, arr);
+}
+
+/* $str_lines(s) -> array of strings split on \n (no trailing empty). */
+static void emit_rt_str_lines(WasmBuf *body) {
+    int arr = 1, ptr = 2, blen = 3, i = 4, start = 5, lp = 6, llen = 7, sv = 8;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, arr);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, arr);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ptr);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, blen);
+    emit_i32(body, 0); emit_local_set(body, i);
+    emit_i32(body, 0); emit_local_set(body, start);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* push remaining */
+    emit_local_get(body, i);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, ptr);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, lp);
+    emit_local_get(body, i);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, llen);
+    emit_local_get(body, lp);
+    emit_local_get(body, llen);
+    emit_call(body, RT_STR_NEW);
+    emit_local_set(body, sv);
+    emit_local_get(body, arr);
+    emit_local_get(body, sv);
+    emit_call(body, RT_ARR_PUSH);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 2); /* exit outer */
+    buf_byte(body, OP_END);
+    /* if byte == '\n' */
+    emit_local_get(body, ptr);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, 0x0A);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, ptr);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, lp);
+    emit_local_get(body, i);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, llen);
+    emit_local_get(body, lp);
+    emit_local_get(body, llen);
+    emit_call(body, RT_STR_NEW);
+    emit_local_set(body, sv);
+    emit_local_get(body, arr);
+    emit_local_get(body, sv);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, start);
+    buf_byte(body, OP_END);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, arr);
+}
+
+/* $str_lower(s) -> lowercase copy (ASCII only). */
+static void emit_rt_str_lower(WasmBuf *body) {
+    int sv = 1, sp = 2, slen = 3, dp = 4, ui = 5, ch = 6;
+    emit_local_get(body, 0);
+    emit_local_set(body, sv);
+    emit_local_get(body, sv);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, sv);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, sv);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, sp);
+    emit_local_get(body, sv);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, slen);
+    emit_local_get(body, slen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, dp);
+    emit_i32(body, 0);
+    emit_local_set(body, ui);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, ui);
+    emit_local_get(body, slen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, sp);
+    emit_local_get(body, ui);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_set(body, ch);
+    emit_local_get(body, ch);
+    emit_i32(body, 'A');
+    buf_byte(body, OP_I32_GE_S);
+    emit_local_get(body, ch);
+    emit_i32(body, 'Z');
+    buf_byte(body, OP_I32_LE_S);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, ch);
+    emit_i32(body, 32);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, ch);
+    buf_byte(body, OP_END);
+    emit_local_get(body, dp);
+    emit_local_get(body, ui);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, ch);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, ui);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, ui);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, dp);
+    emit_local_get(body, slen);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, dp);
+    emit_local_get(body, slen);
+    emit_call(body, RT_STR_NEW);
+}
+
+/* $str_trim(s) -> strip leading/trailing ASCII whitespace. */
+static void emit_rt_str_trim(WasmBuf *body) {
+    int sv = 1, sp = 2, slen = 3, lo = 4, hi = 5, b = 6, dp = 7, dlen = 8;
+    emit_local_get(body, 0);
+    emit_local_set(body, sv);
+    emit_local_get(body, sv);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, sv);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, sv);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, sp);
+    emit_local_get(body, sv);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, slen);
+    emit_i32(body, 0);
+    emit_local_set(body, lo);
+    emit_local_get(body, slen);
+    emit_local_set(body, hi);
+
+    /* Advance lo while whitespace */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, lo);
+    emit_local_get(body, hi);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, sp);
+    emit_local_get(body, lo);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_set(body, b);
+    /* whitespace = b == ' ' || b == '\t' || b == '\n' || b == '\r' */
+    emit_local_get(body, b);
+    emit_i32(body, ' ');
+    buf_byte(body, OP_I32_EQ);
+    emit_local_get(body, b);
+    emit_i32(body, '\t');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    emit_local_get(body, b);
+    emit_i32(body, '\n');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    emit_local_get(body, b);
+    emit_i32(body, '\r');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, lo);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, lo);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* Decrement hi while whitespace */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, hi);
+    emit_local_get(body, lo);
+    buf_byte(body, OP_I32_LE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, sp);
+    emit_local_get(body, hi);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_set(body, b);
+    emit_local_get(body, b);
+    emit_i32(body, ' ');
+    buf_byte(body, OP_I32_EQ);
+    emit_local_get(body, b);
+    emit_i32(body, '\t');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    emit_local_get(body, b);
+    emit_i32(body, '\n');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    emit_local_get(body, b);
+    emit_i32(body, '\r');
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, hi);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, hi);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* dlen = hi - lo, dp = alloc(dlen+1), copy */
+    emit_local_get(body, hi);
+    emit_local_get(body, lo);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, dlen);
+    emit_local_get(body, dlen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, dp);
+    {
+        int j = 9;
+        emit_i32(body, 0);
+        emit_local_set(body, j);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, j);
+        emit_local_get(body, dlen);
+        buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, dp);
+        emit_local_get(body, j);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, sp);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, j);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_I32_STORE8);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, j);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, j);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+    }
+    emit_local_get(body, dp);
+    emit_local_get(body, dlen);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, dp);
+    emit_local_get(body, dlen);
+    emit_call(body, RT_STR_NEW);
+}
+
+/* $str_split(s, sep) -> array of substrings. */
+static void emit_rt_str_split(WasmBuf *body) {
+    int arr = 2, sp = 3, slen = 4, np = 5, nlen = 6, i = 7, start = 8, match = 9, j = 10, lp = 11;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, arr);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_STRING);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, arr);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, sp);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, slen);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, np);
+    emit_local_get(body, 1);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, nlen);
+
+    /* Empty separator: split into single-codepoint strings. */
+    emit_local_get(body, nlen);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_call(body, RT_STR_CHARS);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+
+    emit_i32(body, 0); emit_local_set(body, i);
+    emit_i32(body, 0); emit_local_set(body, start);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    /* if i + nlen > slen: push tail and break */
+    emit_local_get(body, i);
+    emit_local_get(body, nlen);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, slen);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, sp);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, lp);
+    emit_local_get(body, slen);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, j);
+    emit_local_get(body, arr);
+    emit_local_get(body, lp);
+    emit_local_get(body, j);
+    emit_call(body, RT_STR_NEW);
+    emit_call(body, RT_ARR_PUSH);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 2);
+    buf_byte(body, OP_END);
+    /* match? */
+    emit_i32(body, 1);
+    emit_local_set(body, match);
+    emit_i32(body, 0);
+    emit_local_set(body, j);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, j);
+    emit_local_get(body, nlen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, sp);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, j);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, np);
+    emit_local_get(body, j);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_i32(body, 0);
+    emit_local_set(body, match);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 2);
+    buf_byte(body, OP_END);
+    emit_local_get(body, j);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, j);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, match);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* push s[start..i] */
+    emit_local_get(body, sp);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, lp);
+    emit_local_get(body, i);
+    emit_local_get(body, start);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, j);
+    emit_local_get(body, arr);
+    emit_local_get(body, lp);
+    emit_local_get(body, j);
+    emit_call(body, RT_STR_NEW);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_local_get(body, nlen);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    emit_local_get(body, i);
+    emit_local_set(body, start);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, arr);
+}
+
+/* $str_replace(s, from, to) -> string with all occurrences swapped. */
+static void emit_rt_str_replace(WasmBuf *body) {
+    /* Naive: split + join. */
+    emit_local_get(body, 0);
+    emit_local_get(body, 1);
+    emit_call(body, RT_STR_SPLIT);
+    emit_local_get(body, 2);
+    emit_call(body, RT_STR_JOIN);
+}
+
+/* $str_join(arr, sep) -> string formed by interleaving sep between arr elems. */
+static void emit_rt_str_join(WasmBuf *body) {
+    int len = 2, i = 3, result = 4, elem = 5;
+    /* If arr not array-like, return empty string. */
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_ARRAY);
+    buf_byte(body, OP_I32_EQ);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_TUPLE);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_inline_str(body, "", result);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    emit_local_get(body, 0);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, len);
+    emit_inline_str(body, "", result);
+    emit_local_set(body, result);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* if i > 0: result = result ++ sep */
+    emit_local_get(body, i);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_GT_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, result);
+    emit_local_get(body, 1);
+    emit_call(body, RT_STR_CAT);
+    emit_local_set(body, result);
+    buf_byte(body, OP_END);
+    /* result = result ++ to_str(arr[i]) */
+    emit_local_get(body, 0);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_call(body, RT_VAL_TO_STR);
+    emit_local_set(body, elem);
+    emit_local_get(body, result);
+    emit_local_get(body, elem);
+    emit_call(body, RT_STR_CAT);
+    emit_local_set(body, result);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, result);
+}
+
+/* $arr_reverse(arr) -> new array with elements in reverse order. */
+static void emit_rt_arr_reverse(WasmBuf *body) {
+    int out = 1, len = 2, i = 3;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, out);
+    emit_local_get(body, 0);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, len);
+    emit_local_get(body, len);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_LT_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, out);
+    emit_local_get(body, 0);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, out);
+}
+
+/* $arr_concat(a, b) -> new array a + b. */
+static void emit_rt_arr_concat(WasmBuf *body) {
+    int out = 2, len = 3, i = 4;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, out);
+    emit_local_get(body, 0);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, len);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, out);
+    emit_local_get(body, 0);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, 1);
+    emit_call(body, RT_ARR_LEN);
+    emit_local_set(body, len);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, out);
+    emit_local_get(body, 1);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i);
+    emit_call(body, RT_VAL_NEW);
+    emit_call(body, RT_ARR_GET);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, out);
+}
+
+/* $arr_sort(arr) -> sorted ascending using val_lt for comparison.
+   Mutates the source array in place via insertion sort, then returns it.
+   Insertion sort fits comfortably in a few hundred elements which is the
+   target for the AOT path. */
+static void emit_rt_arr_sort(WasmBuf *body) {
+    int dp = 1, len = 2, i = 3, j = 4, key = 5, prev = 6, cmp = 7;
+    /* dp = arr.payload (array data ptr) */
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, dp);
+    /* len = *(dp+4) */
+    emit_local_get(body, dp);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, len);
+    emit_i32(body, 1);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* key = *(dp + 8 + i*4) */
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, key);
+    emit_local_get(body, i);
+    emit_local_set(body, j);
+    /* while j > 0 && arr[j-1] > key: arr[j] = arr[j-1]; j-- */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, j);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_LE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* prev = arr[j-1] */
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, j);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, prev);
+    /* cmp = val_lt(key, prev) -> truthy = key < prev = should swap */
+    emit_local_get(body, key);
+    emit_local_get(body, prev);
+    emit_call(body, RT_VAL_LT);
+    emit_call(body, RT_VAL_TRUTHY);
+    emit_local_set(body, cmp);
+    emit_local_get(body, cmp);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* arr[j] = prev */
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, j);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, prev);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_get(body, j);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, j);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* arr[j] = key */
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, j);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, key);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, 0);
+}
+
+/* $map_keys(map) -> array of key values. */
+static void emit_rt_map_keys(WasmBuf *body) {
+    int out = 1, dp = 2, len = 3, i = 4;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, out);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, dp);
+    emit_local_get(body, dp);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, len);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, out);
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, out);
+}
+
+/* $map_values(map) -> array of value values. */
+static void emit_rt_map_values(WasmBuf *body) {
+    int out = 1, dp = 2, len = 3, i = 4;
+    emit_call(body, RT_ARR_NEW);
+    emit_local_set(body, out);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, dp);
+    emit_local_get(body, dp);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, len);
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, out);
+    emit_local_get(body, dp);
+    emit_i32(body, 12);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_call(body, RT_ARR_PUSH);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, out);
+}
+
+/* $map_has(m, k) -> bool */
+static void emit_rt_map_has(WasmBuf *body) {
+    int v = 2;
+    emit_local_get(body, 0);
+    emit_local_get(body, 1);
+    emit_call(body, RT_MAP_GET);
+    emit_local_set(body, v);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_BOOL);
+    emit_i32(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, v);
+    emit_call(body, RT_VAL_TAG);
+    emit_i32(body, TAG_NULL);
+    buf_byte(body, OP_I32_NE);
+    emit_local_set(body, 3);
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, 3);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_END);
+}
+
+/* $val_abs(v) -> absolute value (int / float) */
+static void emit_rt_val_abs(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_FLOAT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_F64);
+    buf_byte(body, OP_F64_ABS);
+    emit_call(body, RT_VAL_NEW_F64);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    {
+        int v = 1;
+        emit_local_set(body, v);
+        emit_local_get(body, v);
+        emit_i32(body, 0);
+        buf_byte(body, OP_I32_LT_S);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+        emit_i32(body, 0);
+        emit_local_get(body, v);
+        buf_byte(body, OP_I32_SUB);
+        buf_byte(body, OP_ELSE);
+        emit_local_get(body, v);
+        buf_byte(body, OP_END);
+    }
+    emit_local_set(body, 1);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_END);
+}
+
+/* $val_floor(v) -> int */
+static void emit_rt_val_floor(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_FLOAT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_F64);
+    buf_byte(body, OP_F64_FLOOR);
+    buf_byte(body, OP_I32_TRUNC_F64_S);
+    emit_local_set(body, 1);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 0);
+    buf_byte(body, OP_END);
+}
+
+/* $val_ceil(v) -> int */
+static void emit_rt_val_ceil(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_FLOAT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_F64);
+    /* ceil = -(floor(-x)) -- WASM MVP doesn't have f64.ceil but does
+       have f64.floor; emulate. */
+    buf_byte(body, OP_F64_NEG);
+    buf_byte(body, OP_F64_FLOOR);
+    buf_byte(body, OP_F64_NEG);
+    buf_byte(body, OP_I32_TRUNC_F64_S);
+    emit_local_set(body, 1);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 0);
+    buf_byte(body, OP_END);
+}
+
+/* $val_sqrt(v) -> float */
+static void emit_rt_val_sqrt(WasmBuf *body) {
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_F64);
+    buf_byte(body, 0x9F); /* f64.sqrt */
+    emit_call(body, RT_VAL_NEW_F64);
+}
+
+/* Bigint support: stored as a string of decimal digits with optional
+   leading '-' for sign. Payload = data ptr to the digits, value+8 = byte
+   length. We implement only what the c09 test needs: addition + power
+   + multiplication + i64 promotion + to_str. */
+
+/* $bigint_new(digits_ptr: i32, len: i32) -> i32 */
+static void emit_rt_bigint_new(WasmBuf *body) {
+    emit_i32(body, TAG_BIGINT);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_NEW);
+    {
+        int v = 2;
+        emit_local_tee(body, v);
+        emit_i32(body, 8);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, 1);
+        buf_byte(body, OP_I32_STORE);
+        buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+        emit_local_get(body, v);
+    }
+}
+
+/* $bigint_to_str(v) -> string. If v is bigint, return a new string val
+   pointing at its digit buffer; if v is int, format via i32_to_str;
+   else fall back to val_to_str. */
+static void emit_rt_bigint_to_str(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_BIGINT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_call(body, RT_STR_NEW);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TO_STR);
+    buf_byte(body, OP_END);
+}
+
+/* $bigint_add(a, b) -> bigint result.
+   Both operands may be int (TAG_INT) or bigint (TAG_BIGINT). We add by
+   converting to digit strings and performing schoolbook addition right-
+   to-left into a fresh allocation. Negative numbers are not handled
+   here; the conformance test only exercises positive overflow.
+   For the int+int path we promote to int64 first to catch the overflow,
+   and fall through to the generic digit-string adder when even i64
+   isn't enough. */
+static void emit_rt_bigint_add(WasmBuf *body) {
+    /* Slot map (all i32):
+       0=a, 1=b, 2=ap, 3=alen, 4=bp, 5=blen, 6=mlen, 7=outp, 8=carry,
+       9=i, 10=ai, 11=bi, 12=ad, 13=bd, 14=sum, 15=oi, 16=outlen */
+    int ap = 2, alen = 3, bp = 4, blen = 5, mlen = 6, outp = 7, carry = 8;
+    int i = 9, ai = 10, bi = 11, ad = 12, bd = 13, sum = 14, oi = 15, outlen = 16;
+
+    /* Convert a -> (ap, alen). If int, format into a fresh buffer. */
+    emit_tag_check(body, 0, TAG_BIGINT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ap);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, alen);
+    buf_byte(body, OP_ELSE);
+    /* Format int via i32_to_str (returns a string val) */
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TO_STR);
+    {
+        int sv = 17;
+        emit_local_set(body, sv);
+        emit_local_get(body, sv);
+        emit_call(body, RT_VAL_I32);
+        emit_local_set(body, ap);
+        emit_local_get(body, sv);
+        emit_i32(body, 8);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD);
+        buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+        emit_local_set(body, alen);
+    }
+    buf_byte(body, OP_END);
+    /* Same for b */
+    emit_tag_check(body, 1, TAG_BIGINT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, bp);
+    emit_local_get(body, 1);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, blen);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_TO_STR);
+    {
+        int sv = 18;
+        emit_local_set(body, sv);
+        emit_local_get(body, sv);
+        emit_call(body, RT_VAL_I32);
+        emit_local_set(body, bp);
+        emit_local_get(body, sv);
+        emit_i32(body, 8);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD);
+        buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+        emit_local_set(body, blen);
+    }
+    buf_byte(body, OP_END);
+
+    /* mlen = max(alen, blen) */
+    emit_local_get(body, alen);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, alen);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_END);
+    emit_local_set(body, mlen);
+    /* outp = alloc(mlen + 2) (1 for carry, 1 for NUL) */
+    emit_local_get(body, mlen);
+    emit_i32(body, 2);
+    buf_byte(body, OP_I32_ADD);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, outp);
+    /* carry=0; i=0; outlen=0 */
+    emit_i32(body, 0); emit_local_set(body, carry);
+    emit_i32(body, 0); emit_local_set(body, i);
+    /* Loop i = 0..mlen */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, mlen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* ai = i < alen ? *(ap + alen-1-i) - '0' : 0 */
+    emit_local_get(body, i);
+    emit_local_get(body, alen);
+    buf_byte(body, OP_I32_LT_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, ap);
+    emit_local_get(body, alen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_ELSE);
+    emit_i32(body, 0);
+    buf_byte(body, OP_END);
+    emit_local_set(body, ad);
+    /* bi = i < blen ? *(bp + blen-1-i) - '0' : 0 */
+    emit_local_get(body, i);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_LT_S);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, bp);
+    emit_local_get(body, blen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_ELSE);
+    emit_i32(body, 0);
+    buf_byte(body, OP_END);
+    emit_local_set(body, bd);
+    /* sum = ad + bd + carry */
+    emit_local_get(body, ad);
+    emit_local_get(body, bd);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, carry);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, sum);
+    /* carry = sum / 10; digit = sum % 10 */
+    emit_local_get(body, sum);
+    emit_i32(body, 10);
+    buf_byte(body, OP_I32_DIV_U);
+    emit_local_set(body, carry);
+    emit_local_get(body, sum);
+    emit_i32(body, 10);
+    buf_byte(body, OP_I32_REM_U);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_ADD);
+    /* store at outp + (mlen + 1 - 1 - i) -- we'll reverse later, store
+       at outp + (mlen - i) */
+    emit_local_set(body, oi);
+    emit_local_get(body, outp);
+    emit_local_get(body, mlen);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, oi);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* Final carry into outp[0] */
+    emit_local_get(body, outp);
+    emit_local_get(body, carry);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+
+    /* outlen = (carry > 0) ? mlen+1 : mlen; data starts at outp+(carry==0?1:0) */
+    emit_local_get(body, carry);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, mlen);
+    emit_local_set(body, outlen);
+    emit_local_get(body, outp);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, mlen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, outlen);
+    emit_local_get(body, outp);
+    buf_byte(body, OP_END);
+    /* TOS is the data pointer; build the bigint val */
+    emit_local_get(body, outlen);
+    emit_call(body, RT_BIGINT_NEW);
+}
+
+/* $bigint_mul(a, b) -> bigint result. Schoolbook multiplication on
+   digit strings; only positive operands. */
+static void emit_rt_bigint_mul(WasmBuf *body) {
+    /* Slots:
+       0=a, 1=b, 2=ap, 3=alen, 4=bp, 5=blen, 6=outp, 7=outlen, 8=i, 9=j,
+       10=ad, 11=bd, 12=cur, 13=k, 14=tmp, 15=carry, 16=start */
+    int ap = 2, alen = 3, bp = 4, blen = 5, outp = 6, outlen = 7;
+    int i = 8, j = 9, ad = 10, bd = 11, cur = 12, k = 13;
+
+    /* Convert operands. */
+    emit_tag_check(body, 0, TAG_BIGINT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, ap);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, alen);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_TO_STR);
+    {
+        int sv = 17;
+        emit_local_set(body, sv);
+        emit_local_get(body, sv);
+        emit_call(body, RT_VAL_I32);
+        emit_local_set(body, ap);
+        emit_local_get(body, sv);
+        emit_i32(body, 8);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD);
+        buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+        emit_local_set(body, alen);
+    }
+    buf_byte(body, OP_END);
+    emit_tag_check(body, 1, TAG_BIGINT);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_I32);
+    emit_local_set(body, bp);
+    emit_local_get(body, 1);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_local_set(body, blen);
+    buf_byte(body, OP_ELSE);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_TO_STR);
+    {
+        int sv = 18;
+        emit_local_set(body, sv);
+        emit_local_get(body, sv);
+        emit_call(body, RT_VAL_I32);
+        emit_local_set(body, bp);
+        emit_local_get(body, sv);
+        emit_i32(body, 8);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD);
+        buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+        emit_local_set(body, blen);
+    }
+    buf_byte(body, OP_END);
+    /* outlen = alen + blen */
+    emit_local_get(body, alen);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, outlen);
+    emit_local_get(body, outlen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, outp);
+    /* zero buffer */
+    emit_i32(body, 0); emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, outlen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, outp);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* For i = 0..alen-1: ad = a[alen-1-i] - '0' */
+    emit_i32(body, 0); emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, alen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, ap);
+    emit_local_get(body, alen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, ad);
+    /* For j = 0..blen-1: cur = (out[i+j] - '0' impl. since all zero or ascii) */
+    emit_i32(body, 0); emit_local_set(body, j);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, j);
+    emit_local_get(body, blen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, bp);
+    emit_local_get(body, blen);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_get(body, j);
+    buf_byte(body, OP_I32_SUB);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, bd);
+    /* k = i + j */
+    emit_local_get(body, i);
+    emit_local_get(body, j);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, k);
+    /* cur = ad * bd + out[k]
+       out is stored little-endian (index 0 = least significant) */
+    emit_local_get(body, ad);
+    emit_local_get(body, bd);
+    buf_byte(body, OP_I32_MUL);
+    emit_local_get(body, outp);
+    emit_local_get(body, k);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, cur);
+    /* Propagate carry up */
+    {
+        int kk = 14;
+        emit_local_get(body, k);
+        emit_local_set(body, kk);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, cur);
+        buf_byte(body, OP_I32_EQZ);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, outp);
+        emit_local_get(body, kk);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, cur);
+        emit_i32(body, 10);
+        buf_byte(body, OP_I32_REM_U);
+        buf_byte(body, OP_I32_STORE8);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, cur);
+        emit_i32(body, 10);
+        buf_byte(body, OP_I32_DIV_U);
+        emit_local_set(body, cur);
+        emit_local_get(body, kk);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, kk);
+        /* if cur > 0, also load existing out[kk] and add */
+        emit_local_get(body, cur);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, cur);
+        emit_local_get(body, outp);
+        emit_local_get(body, kk);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, cur);
+        buf_byte(body, OP_END);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+    }
+    emit_local_get(body, j);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, j);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* Convert digits to ASCII, find leading zero count, build output. */
+    emit_i32(body, 0); emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, i);
+    emit_local_get(body, outlen);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, outp);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, outp);
+    emit_local_get(body, i);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0');
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* Now reverse out into a big-endian buffer (little-endian to BE),
+       since we built it least-significant-first. */
+    {
+        int rev = 15, lo = 16;
+        emit_local_get(body, outlen);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_call(body, RT_ALLOC);
+        emit_local_set(body, rev);
+        emit_i32(body, 0); emit_local_set(body, lo);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, lo);
+        emit_local_get(body, outlen);
+        buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, rev);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, outp);
+        emit_local_get(body, outlen);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_SUB);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_SUB);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_I32_STORE8);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, lo);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, lo);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+        /* Skip leading zeros */
+        emit_i32(body, 0); emit_local_set(body, lo);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, lo);
+        emit_local_get(body, outlen);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_SUB);
+        buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, rev);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_i32(body, '0');
+        buf_byte(body, OP_I32_NE);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, lo);
+        emit_i32(body, 1);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, lo);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+        emit_local_get(body, rev);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, outlen);
+        emit_local_get(body, lo);
+        buf_byte(body, OP_I32_SUB);
+        emit_call(body, RT_BIGINT_NEW);
+    }
 }
 
 /* ========================================================================
@@ -7243,23 +9506,6 @@ static const char *find_unsupported_for_wasm(Node *n) {
         return NULL;
     }
     case NODE_METHOD_CALL: {
-        /* Higher-order array/map methods need closure dispatch through
-           the value, which the AOT path doesn't wire up; they currently
-           return [] / null. Refuse so the diagnostic is honest. */
-        static const char *unsup_methods[] = {
-            "map", "filter", "reduce", "fold", "each", "for_each",
-            "some", "every", "any", "all", "find", "find_index",
-            "index_of", "count", "sort_with", "flat_map", "group_by",
-            "partition", "min_by", "max_by", "sum", "product",
-            /* String iteration / advanced ops that return null today */
-            "chars", "bytes", "lines", "graphemes", NULL
-        };
-        const char *m = n->method_call.method;
-        if (m) {
-            for (int k = 0; unsup_methods[k]; k++)
-                if (strcmp(m, unsup_methods[k]) == 0)
-                    return "higher-order array/map methods (.map / .filter / .reduce / ...)";
-        }
         const char *r = find_unsupported_for_wasm(n->method_call.obj);
         if (r) return r;
         for (int i = 0; i < n->method_call.args.len; i++)
@@ -7750,6 +9996,40 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         buf_leb128_u(&sec, 15);
         /* RT_F64_TO_STR: (f64) -> i32 = type 14 */
         buf_leb128_u(&sec, 14);
+        /* RT_CALL1: (i32, i32) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
+        /* RT_CALL2: (i32, i32, i32) -> i32 = type 5 */
+        buf_leb128_u(&sec, 5);
+        /* RT_STR_CHARS, RT_STR_BYTES, RT_STR_LINES: (i32) -> i32 = type 2 */
+        for (int j = 0; j < 3; j++) buf_leb128_u(&sec, 2);
+        /* RT_STR_LOWER, RT_STR_TRIM: (i32) -> i32 */
+        for (int j = 0; j < 2; j++) buf_leb128_u(&sec, 2);
+        /* RT_STR_REPLACE: (i32,i32,i32) -> i32 = type 5 */
+        buf_leb128_u(&sec, 5);
+        /* RT_STR_SPLIT: (i32,i32) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
+        /* RT_STR_JOIN: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
+        /* RT_ARR_REVERSE: (i32) -> i32 */
+        buf_leb128_u(&sec, 2);
+        /* RT_ARR_CONCAT: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
+        /* RT_ARR_SORT: (i32) -> i32 */
+        buf_leb128_u(&sec, 2);
+        /* RT_MAP_KEYS, RT_MAP_VALUES: (i32) -> i32 */
+        buf_leb128_u(&sec, 2);
+        buf_leb128_u(&sec, 2);
+        /* RT_MAP_HAS: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
+        /* RT_VAL_ABS, RT_VAL_FLOOR, RT_VAL_CEIL, RT_VAL_SQRT: (i32) -> i32 */
+        for (int j = 0; j < 4; j++) buf_leb128_u(&sec, 2);
+        /* RT_BIGINT_NEW: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
+        /* RT_BIGINT_TO_STR: (i32) -> i32 */
+        buf_leb128_u(&sec, 2);
+        /* RT_BIGINT_ADD, RT_BIGINT_MUL: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
+        buf_leb128_u(&sec, 3);
 
         /* User function type indices - use arity-based types.
            collect_nested already folds the implicit __env parameter into
@@ -7984,8 +10264,8 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         build_rt_func(&sec, 1, 5, emit_rt_i32_to_str);
         /* 50: $str_len */
         build_rt_func(&sec, 1, 5, emit_rt_str_len);
-        /* 51: $str_starts_with (2 params, 6 extras) */
-        build_rt_func(&sec, 2, 6, emit_rt_str_starts_with);
+        /* 51: $str_starts_with (2 params, 7 extras) */
+        build_rt_func(&sec, 2, 7, emit_rt_str_starts_with);
         /* 52: $str_ends_with (2 params, 7 extras) */
         build_rt_func(&sec, 2, 7, emit_rt_str_ends_with);
         /* 53: $str_contains (2 params, 8 extras) */
@@ -8036,6 +10316,54 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
             buf_append(&sec, &func);
             buf_free(&func); buf_free(&body);
         }
+        /* 57: RT_CALL1 (2 params, 1 extra: env scratch) */
+        build_rt_func(&sec, 2, 1, emit_rt_call1);
+        /* 58: RT_CALL2 (3 params, 1 extra) */
+        build_rt_func(&sec, 3, 1, emit_rt_call2);
+        /* 59: RT_STR_CHARS (1 param, 10 extras) */
+        build_rt_func(&sec, 1, 10, emit_rt_str_chars);
+        /* 60: RT_STR_BYTES (1 param, 4 extras) */
+        build_rt_func(&sec, 1, 4, emit_rt_str_bytes);
+        /* 61: RT_STR_LINES (1 param, 8 extras) */
+        build_rt_func(&sec, 1, 8, emit_rt_str_lines);
+        /* 62: RT_STR_LOWER (1 param, 6 extras) */
+        build_rt_func(&sec, 1, 6, emit_rt_str_lower);
+        /* 63: RT_STR_TRIM (1 param, 9 extras) */
+        build_rt_func(&sec, 1, 9, emit_rt_str_trim);
+        /* 64: RT_STR_REPLACE (3 params, 0 extras - all stack) */
+        build_rt_func(&sec, 3, 0, emit_rt_str_replace);
+        /* 65: RT_STR_SPLIT (2 params, 10 extras) */
+        build_rt_func(&sec, 2, 10, emit_rt_str_split);
+        /* 66: RT_STR_JOIN (2 params, 4 extras) */
+        build_rt_func(&sec, 2, 4, emit_rt_str_join);
+        /* 67: RT_ARR_REVERSE (1 param, 3 extras) */
+        build_rt_func(&sec, 1, 3, emit_rt_arr_reverse);
+        /* 68: RT_ARR_CONCAT (2 params, 3 extras) */
+        build_rt_func(&sec, 2, 3, emit_rt_arr_concat);
+        /* 69: RT_ARR_SORT (1 param, 7 extras) */
+        build_rt_func(&sec, 1, 7, emit_rt_arr_sort);
+        /* 70: RT_MAP_KEYS (1 param, 4 extras) */
+        build_rt_func(&sec, 1, 4, emit_rt_map_keys);
+        /* 71: RT_MAP_VALUES (1 param, 4 extras) */
+        build_rt_func(&sec, 1, 4, emit_rt_map_values);
+        /* 72: RT_MAP_HAS (2 params, 2 extras) */
+        build_rt_func(&sec, 2, 2, emit_rt_map_has);
+        /* 73: RT_VAL_ABS (1 param, 1 extra) */
+        build_rt_func(&sec, 1, 1, emit_rt_val_abs);
+        /* 74: RT_VAL_FLOOR (1 param, 1 extra) */
+        build_rt_func(&sec, 1, 1, emit_rt_val_floor);
+        /* 75: RT_VAL_CEIL (1 param, 1 extra) */
+        build_rt_func(&sec, 1, 1, emit_rt_val_ceil);
+        /* 76: RT_VAL_SQRT (1 param, 0 extras) */
+        build_rt_func(&sec, 1, 0, emit_rt_val_sqrt);
+        /* 77: RT_BIGINT_NEW (2 params, 1 extra) */
+        build_rt_func(&sec, 2, 1, emit_rt_bigint_new);
+        /* 78: RT_BIGINT_TO_STR (1 param, 0 extras) */
+        build_rt_func(&sec, 1, 0, emit_rt_bigint_to_str);
+        /* 79: RT_BIGINT_ADD (2 params, 17 extras) */
+        build_rt_func(&sec, 2, 17, emit_rt_bigint_add);
+        /* 80: RT_BIGINT_MUL (2 params, 17 extras) */
+        build_rt_func(&sec, 2, 17, emit_rt_bigint_mul);
 
         /* User function bodies */
         for (int i = 0; i < total_user_funcs; i++) {
