@@ -86,6 +86,8 @@ extern char *strdup(const char *);
 #define OP_F64_SUB       0xA1
 #define OP_F64_MUL       0xA2
 #define OP_F64_DIV       0xA3
+#define OP_F64_MIN       0xA4
+#define OP_F64_MAX       0xA5
 #define OP_I32_TRUNC_F64_S 0xAA
 #define OP_F64_CONVERT_I32_S 0xB7
 #define OP_I32_REINTERPRET_F32 0xBC
@@ -358,8 +360,9 @@ static int strtab_add_with_len(StringTable *st, const char *s, int *out_len) {
 #define RT_BIGINT_TO_STR (NUM_IMPORTS + 78)
 #define RT_BIGINT_ADD    (NUM_IMPORTS + 79)
 #define RT_BIGINT_MUL    (NUM_IMPORTS + 80)
+#define RT_VAL_EQ_ASSERT (NUM_IMPORTS + 81)
 
-#define NUM_RT_FUNCS     81
+#define NUM_RT_FUNCS     82
 #define USER_FUNC_BASE   (NUM_IMPORTS + NUM_RT_FUNCS)
 
 /* ========================================================================
@@ -925,13 +928,27 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Literals ---- */
 
     case NODE_LIT_INT:
-        emit_int_val(code, (int32_t)node->lit_int.ival);
+        if (node->lit_int.ival > 2147483647LL || node->lit_int.ival < -2147483648LL) {
+            /* Overflows i32: store as bigint via decimal-string payload. */
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%lld", (long long)node->lit_int.ival);
+            int slen = 0;
+            int off = strtab_add_with_len(ctx->strtab, strdup(buf), &slen);
+            emit_i32(code, off);
+            emit_i32(code, slen);
+            emit_call(code, RT_BIGINT_NEW);
+        } else {
+            emit_int_val(code, (int32_t)node->lit_int.ival);
+        }
         break;
 
     case NODE_LIT_BIGINT: {
-        /* truncate to i32 */
-        int32_t v = (int32_t)strtol(node->lit_bigint.bigint_str, NULL, 10);
-        emit_int_val(code, v);
+        const char *s = node->lit_bigint.bigint_str ? node->lit_bigint.bigint_str : "0";
+        int slen = 0;
+        int off = strtab_add_with_len(ctx->strtab, s, &slen);
+        emit_i32(code, off);
+        emit_i32(code, slen);
+        emit_call(code, RT_BIGINT_NEW);
         break;
     }
 
@@ -1464,7 +1481,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             if (strcmp(name, "assert_eq") == 0 && nargs >= 2) {
                 compile_expr(node->call.args.items[0], code, locals, ctx);
                 compile_expr(node->call.args.items[1], code, locals, ctx);
-                emit_call(code, RT_VAL_EQ);
+                emit_call(code, RT_VAL_EQ_ASSERT);
                 emit_call(code, RT_VAL_TRUTHY);
                 buf_byte(code, OP_I32_EQZ);
                 buf_byte(code, OP_IF);
@@ -5055,6 +5072,19 @@ static void emit_rt_val_eq(WasmBuf *body) {
     buf_byte(body, OP_END); /* same-ptr inner if */
     buf_byte(body, OP_END); /* alen == blen if */
     buf_byte(body, OP_ELSE);
+    /* TAG_FLOAT: compare by f64 value (NaN must compare unequal). */
+    emit_local_get(body, atag);
+    emit_i32(body, TAG_FLOAT);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_F64);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_F64);
+    buf_byte(body, OP_F64_EQ);
+    emit_local_set(body, eq);
+    buf_byte(body, OP_ELSE);
     /* Array / tuple element-wise equality. */
     emit_local_get(body, atag);
     emit_i32(body, TAG_ARRAY);
@@ -5114,7 +5144,7 @@ static void emit_rt_val_eq(WasmBuf *body) {
     buf_byte(body, OP_END); /* outer block */
     buf_byte(body, OP_END); /* alen == blen */
     buf_byte(body, OP_ELSE);
-    /* Non-string, non-array: compare payloads. */
+    /* Non-string, non-array, non-float: compare payloads. */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
     emit_local_get(body, 1);
@@ -5122,6 +5152,7 @@ static void emit_rt_val_eq(WasmBuf *body) {
     buf_byte(body, OP_I32_EQ);
     emit_local_set(body, eq);
     buf_byte(body, OP_END); /* array if */
+    buf_byte(body, OP_END); /* float if */
     buf_byte(body, OP_END); /* TAG_STRING if */
     buf_byte(body, OP_END); /* same-tag if */
     /* Wrap eq as bool value */
@@ -5178,10 +5209,10 @@ static void emit_rt_val_arith_floataware(WasmBuf *body, uint8_t f64_op,
 
 /* $val_add: dispatch by tag.
    - either operand string -> concat
+   - either operand bigint -> bigint add
    - either operand float  -> f64 add
-   - else                  -> int add */
+   - else                  -> int add (with overflow promotion to bigint) */
 static void emit_rt_val_add(WasmBuf *body) {
-    /* local 0 = a, local 1 = b, local 2 = scratch */
     emit_tag_check(body, 0, TAG_STRING);
     emit_tag_check(body, 1, TAG_STRING);
     buf_byte(body, OP_I32_OR);
@@ -5191,7 +5222,59 @@ static void emit_rt_val_add(WasmBuf *body) {
     emit_local_get(body, 1);
     emit_call(body, RT_STR_CAT);
     buf_byte(body, OP_ELSE);
+    emit_tag_check(body, 0, TAG_BIGINT);
+    emit_tag_check(body, 1, TAG_BIGINT);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_local_get(body, 1);
+    emit_call(body, RT_BIGINT_ADD);
+    buf_byte(body, OP_ELSE);
+    /* Two TAG_INTs: detect overflow by comparing in i64. WASM has i64
+       arithmetic; promote, add, and if result doesn't fit in i32 fall
+       back to RT_BIGINT_ADD which formats both sides as decimal. */
+    emit_tag_check(body, 0, TAG_INT);
+    emit_tag_check(body, 1, TAG_INT);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    {
+        int sumlo = 2;
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, sumlo);
+        /* Overflow if sign of result differs from both operands' shared sign;
+           cheaper test: (a ^ sum) & (b ^ sum) < 0. */
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        emit_local_get(body, sumlo);
+        buf_byte(body, OP_I32_XOR);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        emit_local_get(body, sumlo);
+        buf_byte(body, OP_I32_XOR);
+        buf_byte(body, OP_I32_AND);
+        emit_i32(body, 0);
+        buf_byte(body, OP_I32_LT_S);
+        buf_byte(body, OP_IF);
+        buf_byte(body, WASM_TYPE_I32);
+        emit_local_get(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_BIGINT_ADD);
+        buf_byte(body, OP_ELSE);
+        emit_i32(body, TAG_INT);
+        emit_local_get(body, sumlo);
+        emit_call(body, RT_VAL_NEW);
+        buf_byte(body, OP_END);
+    }
+    buf_byte(body, OP_ELSE);
     emit_rt_val_arith_floataware(body, OP_F64_ADD, OP_I32_ADD);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
     buf_byte(body, OP_END);
 }
 
@@ -5199,7 +5282,56 @@ static void emit_rt_val_sub(WasmBuf *body) {
     emit_rt_val_arith_floataware(body, OP_F64_SUB, OP_I32_SUB);
 }
 static void emit_rt_val_mul(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_BIGINT);
+    emit_tag_check(body, 1, TAG_BIGINT);
+    buf_byte(body, OP_I32_OR);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_local_get(body, 1);
+    emit_call(body, RT_BIGINT_MUL);
+    buf_byte(body, OP_ELSE);
+    /* Two TAG_INTs: detect overflow by promoting to i64. */
+    emit_tag_check(body, 0, TAG_INT);
+    emit_tag_check(body, 1, TAG_INT);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    {
+        int prod32 = 2;
+        int hi = 3;
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, OP_I32_MUL);
+        emit_local_set(body, prod32);
+        /* Overflow check via i64 multiply: (i64)a * (i64)b */
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC); /* i64.extend_i32_s */
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x7E); /* i64.mul */
+        /* Compare to (i64)prod32 */
+        emit_local_get(body, prod32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x51); /* i64.eq */
+        emit_local_set(body, hi);
+        emit_local_get(body, hi);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+        emit_i32(body, TAG_INT);
+        emit_local_get(body, prod32);
+        emit_call(body, RT_VAL_NEW);
+        buf_byte(body, OP_ELSE);
+        emit_local_get(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_BIGINT_MUL);
+        buf_byte(body, OP_END);
+    }
+    buf_byte(body, OP_ELSE);
     emit_rt_val_arith_floataware(body, OP_F64_MUL, OP_I32_MUL);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
 }
 static void emit_rt_val_div(WasmBuf *body) {
     /* Float-aware division. For the integer path, dividing by zero would
@@ -5617,11 +5749,27 @@ static void emit_rt_val_to_str(WasmBuf *body) {
     }
     buf_byte(body, OP_ELSE);
 
+    /* TAG_BIGINT - wrap the underlying digit buffer in a string val */
+    emit_local_get(body, tag);
+    emit_i32(body, TAG_BIGINT);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_VAL_I32);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    emit_call(body, RT_STR_NEW);
+    buf_byte(body, OP_ELSE);
+
     /* TAG_INT and everything else */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
     emit_call(body, RT_I32_TO_STR);
 
+    buf_byte(body, OP_END); /* bigint */
     buf_byte(body, OP_END); /* tuple */
     buf_byte(body, OP_END); /* map */
     buf_byte(body, OP_END); /* array */
@@ -6185,76 +6333,68 @@ static void emit_rt_val_field_set(WasmBuf *body) {
    (same as the interpreter's integer pow path); callers that need
    fractional powers must upcast to float first. */
 static void emit_rt_val_pow(WasmBuf *body) {
-    /* locals 0,1 = a,b (params); 2 = base, 3 = exp, 4 = result */
-    /* extract int payloads */
+    /* params: 0=a (base value), 1=b (exp value)
+       locals: 2=base_val, 3=result_val, 4=exp_int */
+    int base_val = 2, result_val = 3, exp_int = 4;
+
     emit_local_get(body, 0);
-    emit_call(body, RT_VAL_I32);
-    emit_local_set(body, 2);        /* base = a.i */
+    emit_local_set(body, base_val);
+
     emit_local_get(body, 1);
     emit_call(body, RT_VAL_I32);
-    emit_local_set(body, 3);        /* exp = b.i */
+    emit_local_set(body, exp_int);
 
-    /* result = 1 */
+    /* result = 1 (TAG_INT) */
+    emit_i32(body, TAG_INT);
     emit_i32(body, 1);
-    emit_local_set(body, 4);
+    emit_call(body, RT_VAL_NEW);
+    emit_local_set(body, result_val);
 
-    /* if exp < 0 -> result = 0, skip loop */
-    emit_local_get(body, 3);
+    /* if exp < 0, force exp to 0 so the loop returns 1 (caller can
+       expect a value back; floats handle negative exponents). */
+    emit_local_get(body, exp_int);
     emit_i32(body, 0);
     buf_byte(body, OP_I32_LT_S);
     buf_byte(body, OP_IF);
     buf_byte(body, WASM_TYPE_VOID);
-      emit_i32(body, 0);
-      emit_local_set(body, 4);
-      emit_i32(body, 0);
-      emit_local_set(body, 3);
+    emit_i32(body, 0);
+    emit_local_set(body, exp_int);
     buf_byte(body, OP_END);
 
-    /* loop: while (exp > 0) { if (exp&1) result *= base; base *= base; exp >>= 1; } */
     buf_byte(body, OP_BLOCK);
     buf_byte(body, WASM_TYPE_VOID);
-      buf_byte(body, OP_LOOP);
-      buf_byte(body, WASM_TYPE_VOID);
-        /* exit when exp == 0 */
-        emit_local_get(body, 3);
-        buf_byte(body, OP_I32_EQZ);
-        buf_byte(body, OP_BR_IF);
-        buf_leb128_u(body, 1);  /* branch out of block */
+    buf_byte(body, OP_LOOP);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, exp_int);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
 
-        /* if (exp & 1) result *= base */
-        emit_local_get(body, 3);
-        emit_i32(body, 1);
-        buf_byte(body, OP_I32_AND);
-        buf_byte(body, OP_IF);
-        buf_byte(body, WASM_TYPE_VOID);
-          emit_local_get(body, 4);
-          emit_local_get(body, 2);
-          buf_byte(body, OP_I32_MUL);
-          emit_local_set(body, 4);
-        buf_byte(body, OP_END);
+    emit_local_get(body, exp_int);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, result_val);
+    emit_local_get(body, base_val);
+    emit_call(body, RT_VAL_MUL);
+    emit_local_set(body, result_val);
+    buf_byte(body, OP_END);
 
-        /* base *= base */
-        emit_local_get(body, 2);
-        emit_local_get(body, 2);
-        buf_byte(body, OP_I32_MUL);
-        emit_local_set(body, 2);
+    emit_local_get(body, base_val);
+    emit_local_get(body, base_val);
+    emit_call(body, RT_VAL_MUL);
+    emit_local_set(body, base_val);
 
-        /* exp >>= 1 */
-        emit_local_get(body, 3);
-        emit_i32(body, 1);
-        buf_byte(body, OP_I32_SHR_S);
-        emit_local_set(body, 3);
+    emit_local_get(body, exp_int);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SHR_S);
+    emit_local_set(body, exp_int);
 
-        /* continue loop */
-        buf_byte(body, OP_BR);
-        buf_leb128_u(body, 0);
-      buf_byte(body, OP_END);   /* loop */
-    buf_byte(body, OP_END);     /* block */
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
 
-    /* return val_new(TAG_INT, result) */
-    emit_i32(body, TAG_INT);
-    emit_local_get(body, 4);
-    emit_call(body, RT_VAL_NEW);
+    emit_local_get(body, result_val);
 }
 
 /* $struct_new(name_str, n_fields) -> i32 (struct value)
@@ -7015,7 +7155,9 @@ static void emit_rt_f64_to_str(WasmBuf *body) {
     emit_call(body, RT_STR_NEW);
     emit_local_set(body, local_int_str);
 
-    /* if fpart == 0: return (neg ? "-" : "") + int_str */
+    /* if fpart == 0: return (neg ? "-" : "") + int_str + ".0"
+       (matches the interp's display contract that float literals
+       round-trip with a decimal point). */
     emit_local_get(body, 3);
     emit_f64_const(body, 0.0);
     buf_byte(body, OP_F64_EQ);
@@ -7025,8 +7167,12 @@ static void emit_rt_f64_to_str(WasmBuf *body) {
     emit_inline_str(body, "-", local_tmp);
     emit_local_get(body, local_int_str);
     emit_call(body, RT_STR_CAT);
+    emit_inline_str(body, ".0", local_tmp);
+    emit_call(body, RT_STR_CAT);
     buf_byte(body, OP_ELSE);
     emit_local_get(body, local_int_str);
+    emit_inline_str(body, ".0", local_tmp);
+    emit_call(body, RT_STR_CAT);
     buf_byte(body, OP_END);
     buf_byte(body, OP_ELSE);
 
@@ -8312,6 +8458,53 @@ static void emit_rt_val_sqrt(WasmBuf *body) {
    length. We implement only what the c09 test needs: addition + power
    + multiplication + i64 promotion + to_str. */
 
+/* $val_eq_assert(a, b) -> i32 bool value
+   Strict eq first; if false and both operands are floats, fall back to
+   the same relative+absolute tolerance the native runtime uses for
+   assert_eq so chained float arithmetic (3.14*r*r summed across shapes)
+   still matches a literal. Body uses 3 extra i32 locals: eq=2 (only eq
+   is actually used; the other two reserve slots in case future eqs need
+   scratch). All f64 work happens on the operand stack -- no f64 locals
+   are declared in the function signature. */
+static void emit_rt_val_eq_assert(WasmBuf *body) {
+    int eq = 2;
+    emit_local_get(body, 0);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_EQ);
+    emit_call(body, RT_VAL_TRUTHY);
+    emit_local_set(body, eq);
+    /* If strict eq said no AND both args are TAG_FLOAT, do tolerance. */
+    emit_local_get(body, eq);
+    buf_byte(body, OP_I32_EQZ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_tag_check(body, 0, TAG_FLOAT);
+    emit_tag_check(body, 1, TAG_FLOAT);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* abs(a - b) on stack */
+    emit_local_get(body, 0); emit_call(body, RT_VAL_F64);
+    emit_local_get(body, 1); emit_call(body, RT_VAL_F64);
+    buf_byte(body, OP_F64_SUB);
+    buf_byte(body, OP_F64_ABS);
+    /* tol = 1e-9 + 1e-9 * max(|a|, |b|) */
+    emit_f64_const(body, 1e-9);
+    emit_f64_const(body, 1e-9);
+    emit_local_get(body, 0); emit_call(body, RT_VAL_F64); buf_byte(body, OP_F64_ABS);
+    emit_local_get(body, 1); emit_call(body, RT_VAL_F64); buf_byte(body, OP_F64_ABS);
+    buf_byte(body, OP_F64_MAX);
+    buf_byte(body, OP_F64_MUL);
+    buf_byte(body, OP_F64_ADD);
+    /* compare: diff <= tol */
+    buf_byte(body, OP_F64_LE);
+    emit_local_set(body, eq);
+    buf_byte(body, OP_END);  /* both float */
+    buf_byte(body, OP_END);  /* strict eq false */
+    /* Wrap eq as bool value */
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, eq);
+    emit_call(body, RT_VAL_NEW);
+}
+
 /* $bigint_new(digits_ptr: i32, len: i32) -> i32 */
 static void emit_rt_bigint_new(WasmBuf *body) {
     emit_i32(body, TAG_BIGINT);
@@ -9445,13 +9638,8 @@ static const char *find_unsupported_for_wasm(Node *n) {
         return find_unsupported_for_wasm(n->block.expr);
     case NODE_DEFER:        return NULL;
     case NODE_PAT_MAP:      return NULL;
-    case NODE_LIT_BIGINT:   return "bigint literals (overflow into arbitrary-precision int)";
-    case NODE_LIT_INT:
-        /* WASM ints are i32 here; anything beyond that silently wraps.
-           Refuse so users see the gap and pick another backend. */
-        if (n->lit_int.ival > 2147483647LL || n->lit_int.ival < -2147483648LL)
-            return "integer literals that don't fit in i32";
-        return NULL;
+    case NODE_LIT_BIGINT:   return NULL;
+    case NODE_LIT_INT:      return NULL;
     case NODE_AWAIT:        return "async/await";
     case NODE_SPAWN:        return "spawn / structured concurrency";
     case NODE_NURSERY:      return "nursery blocks";
@@ -10030,6 +10218,8 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* RT_BIGINT_ADD, RT_BIGINT_MUL: (i32,i32) -> i32 */
         buf_leb128_u(&sec, 3);
         buf_leb128_u(&sec, 3);
+        /* RT_VAL_EQ_ASSERT: (i32,i32) -> i32 */
+        buf_leb128_u(&sec, 3);
 
         /* User function type indices - use arity-based types.
            collect_nested already folds the implicit __env parameter into
@@ -10202,9 +10392,9 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* 13: $val_eq (2 params, 1 extra) */
         build_rt_func(&sec, 2, 8, emit_rt_val_eq);
         /* 14-18: $val_add (type-aware), $val_sub, $val_mul, $val_div, $val_mod */
-        build_rt_func(&sec, 2, 1, emit_rt_val_add);
+        build_rt_func(&sec, 2, 2, emit_rt_val_add);
         build_rt_func(&sec, 2, 1, emit_rt_val_sub);
-        build_rt_func(&sec, 2, 1, emit_rt_val_mul);
+        build_rt_func(&sec, 2, 2, emit_rt_val_mul);
         build_rt_func(&sec, 2, 2, emit_rt_val_div);
         build_rt_arith_func(&sec, 2, 1, OP_I32_REM_S);
         /* 19-22: $val_lt, $val_gt, $val_le, $val_ge (float-aware) */
@@ -10364,6 +10554,8 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         build_rt_func(&sec, 2, 17, emit_rt_bigint_add);
         /* 80: RT_BIGINT_MUL (2 params, 17 extras) */
         build_rt_func(&sec, 2, 17, emit_rt_bigint_mul);
+        /* 81: RT_VAL_EQ_ASSERT (2 params, 3 extras) */
+        build_rt_func(&sec, 2, 3, emit_rt_val_eq_assert);
 
         /* User function bodies */
         for (int i = 0; i < total_user_funcs; i++) {
