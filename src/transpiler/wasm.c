@@ -564,6 +564,42 @@ static int enum_variant_tag(EnumLayoutMap *m, const char *path) {
 }
 
 /* ========================================================================
+   Top-level binding tracker -- top-level `var`/`let`/`const` become
+   WASM globals so any function (top-level or nested) can read/write
+   them. Without this, top-level fns couldn't see module-scope state at
+   all.
+   ======================================================================== */
+
+#define MAX_TOP_BINDINGS 256
+
+typedef struct {
+    char *names[MAX_TOP_BINDINGS];
+    int   global_idx[MAX_TOP_BINDINGS];
+    int   count;
+} TopBindings;
+
+static void top_bindings_init(TopBindings *t) { t->count = 0; }
+
+static void top_bindings_free(TopBindings *t) {
+    for (int i = 0; i < t->count; i++) free(t->names[i]);
+    t->count = 0;
+}
+
+static int top_bindings_find(TopBindings *t, const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < t->count; i++)
+        if (t->names[i] && strcmp(t->names[i], name) == 0) return t->global_idx[i];
+    return -1;
+}
+
+static int top_bindings_add(TopBindings *t, const char *name, int global_idx) {
+    if (t->count >= MAX_TOP_BINDINGS) return -1;
+    t->names[t->count] = strdup(name);
+    t->global_idx[t->count] = global_idx;
+    return t->count++;
+}
+
+/* ========================================================================
    Compiler context (avoids globals, passed around)
    ======================================================================== */
 
@@ -579,6 +615,7 @@ typedef struct {
     int              continue_depth; /* br depth for continue (from body) */
     void            *fn_infos;      /* FuncInfo array for closure capture info */
     int              cur_fn_idx;    /* index of function being compiled (-1 for main) */
+    TopBindings     *top_bindings;  /* top-level var/let/const -> global idx */
 } CompilerCtx;
 
 /* ========================================================================
@@ -693,11 +730,81 @@ static void emit_defers(WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
    compile_block
    ======================================================================== */
 
+/* Patch any nested fn-decls in this block that captured a forward
+   reference to a sibling fn-decl. After the block is done, we know
+   all sibling closures exist as locals; walk each one's captures,
+   and for any captured name that names another sibling, write that
+   sibling's current local value into the closure's env map. Without
+   this, mutually recursive nested fns get null in each other's env
+   and crash on first cross-call. */
+static void patch_block_mutual_refs(Node *block, LocalMap *locals,
+                                    CompilerCtx *ctx, WasmBuf *code) {
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return;
+    if (!ctx->fn_infos) return;
+    FuncInfo *fis = (FuncInfo*)ctx->fn_infos;
+
+    /* Collect names of nested fn-decls in this block. */
+    char *fn_names[64];
+    int n_fn_names = 0;
+    for (int i = 0; i < block->block.stmts.len && n_fn_names < 64; i++) {
+        Node *s = block->block.stmts.items[i];
+        if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name &&
+            s->fn_decl.name[0]) {
+            fn_names[n_fn_names++] = s->fn_decl.name;
+        }
+    }
+    if (n_fn_names < 2) return;
+
+    /* For each fn-decl X in this block with captures, for each capture C
+       that names a sibling fn-decl Y, emit:
+           env_of_X = X.value+8 -> i32 load
+           map_set(env_of_X, "C", locals[Y])
+    */
+    for (int i = 0; i < block->block.stmts.len; i++) {
+        Node *s = block->block.stmts.items[i];
+        if (!s || VAL_TAG(s) != NODE_FN_DECL || !s->fn_decl.name) continue;
+        int fn_idx = (s->fn_decl.is_generator >> 16) & 0xFFFF;
+        if (fn_idx <= 0 || fn_idx >= MAX_FUNCS) continue;
+        FuncInfo *fi = &fis[fn_idx];
+        if (fi->n_captures == 0) continue;
+        int x_local = locals_find(locals, s->fn_decl.name);
+        if (x_local < 0) continue;
+        for (int ci = 0; ci < fi->n_captures; ci++) {
+            const char *cname = fi->captures[ci];
+            if (!cname) continue;
+            int is_sibling = 0;
+            for (int k = 0; k < n_fn_names; k++) {
+                if (strcmp(fn_names[k], cname) == 0) { is_sibling = 1; break; }
+            }
+            if (!is_sibling) continue;
+            int y_local = locals_find(locals, cname);
+            if (y_local < 0) continue;
+            /* env_of_X = *(X.value + 8) */
+            int env_tmp = locals_add(locals, "__pmrenv");
+            emit_local_get(code, x_local);
+            emit_i32(code, 8);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD);
+            buf_leb128_u(code, 2);
+            buf_leb128_u(code, 0);
+            emit_local_set(code, env_tmp);
+            /* map_set(env_of_X, "cname", locals[cname]) */
+            emit_local_get(code, env_tmp);
+            int kl = 0;
+            int koff = strtab_add_with_len(ctx->strtab, cname, &kl);
+            emit_str_val(code, koff, kl);
+            emit_local_get(code, y_local);
+            emit_call(code, RT_MAP_SET);
+        }
+    }
+}
+
 static void compile_block(Node *block, WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
     if (!block) return;
     if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++)
             compile_stmt(block->block.stmts.items[i], code, locals, ctx);
+        patch_block_mutual_refs(block, locals, ctx, code);
         /* Handle trailing expression (block as expression) */
         if (block->block.expr) {
             compile_expr(block->block.expr, code, locals, ctx);
@@ -714,6 +821,7 @@ static void compile_block_expr(Node *block, WasmBuf *code, LocalMap *locals, Com
     if (VAL_TAG(block) == NODE_BLOCK) {
         for (int i = 0; i < block->block.stmts.len; i++)
             compile_stmt(block->block.stmts.items[i], code, locals, ctx);
+        patch_block_mutual_refs(block, locals, ctx, code);
         if (block->block.expr)
             compile_expr(block->block.expr, code, locals, ctx);
         else
@@ -878,6 +986,13 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         if (idx >= 0) {
             emit_local_get(code, idx);
         } else {
+            /* Top-level binding stored in a WASM global */
+            int gidx = ctx->top_bindings ?
+                top_bindings_find(ctx->top_bindings, node->ident.name) : -1;
+            if (gidx >= 0) {
+                emit_global_get(code, gidx);
+                break;
+            }
             /* Check if it is a known function name */
             int fidx = funcs_find(ctx->funcs, node->ident.name);
             if (fidx >= 0) {
@@ -1010,6 +1125,31 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     case NODE_ASSIGN: {
         if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT) {
             const char *target = node->assign.target->ident.name;
+            /* Top-level binding -> route through the WASM global so
+               every function sees the same storage. */
+            int gidx = ctx->top_bindings ?
+                top_bindings_find(ctx->top_bindings, target) : -1;
+            if (gidx >= 0 && locals_find(locals, target) < 0) {
+                int val_tmp = locals_add(locals, "__gasn");
+                const char *op = node->assign.op;
+                if (strcmp(op, "=") == 0) {
+                    compile_expr(node->assign.value, code, locals, ctx);
+                } else {
+                    emit_global_get(code, gidx);
+                    compile_expr(node->assign.value, code, locals, ctx);
+                    if      (strcmp(op, "+=")  == 0) emit_call(code, RT_VAL_ADD);
+                    else if (strcmp(op, "-=")  == 0) emit_call(code, RT_VAL_SUB);
+                    else if (strcmp(op, "*=")  == 0) emit_call(code, RT_VAL_MUL);
+                    else if (strcmp(op, "/=")  == 0) emit_call(code, RT_VAL_DIV);
+                    else if (strcmp(op, "%=")  == 0) emit_call(code, RT_VAL_MOD);
+                    else if (strcmp(op, "++=") == 0) emit_call(code, RT_STR_CAT);
+                }
+                emit_local_set(code, val_tmp);
+                emit_local_get(code, val_tmp);
+                emit_global_set(code, gidx);
+                emit_local_get(code, val_tmp);
+                break;
+            }
             /* Captured variable: route the write through the env map so
                the next call to the same closure sees the update. Without
                this, `n = n + 1` inside `fn() { ... }` writes to a fresh
@@ -1261,15 +1401,90 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 break;
             }
 
-            /* Check user-defined function */
+            /* If this name is a captured variable in the current closure,
+               we have to load the value out of __env and call it through
+               the closure path. The bare USER_FUNC_BASE + fidx path
+               can't be used because the captured fn might itself need
+               an env (mutual recursion through nested fn-decls is the
+               common case). */
+            int is_capture_call = 0;
+            if (ctx->fn_infos && ctx->cur_fn_idx >= 0) {
+                FuncInfo *fi = &((FuncInfo*)ctx->fn_infos)[ctx->cur_fn_idx];
+                for (int ci = 0; ci < fi->n_captures; ci++) {
+                    if (fi->captures[ci] && strcmp(fi->captures[ci], name) == 0) {
+                        is_capture_call = 1; break;
+                    }
+                }
+            }
+
+            /* Check user-defined function. Skip the bare-call shortcut
+               if the function itself has captures: the WASM signature
+               adds an implicit __env first arg and the call site here
+               only passes nargs values, so the indirect dispatch path
+               below has to do the work. Same story for capture lookups. */
             int fidx = funcs_find(ctx->funcs, name);
-            if (fidx >= 0) {
-                for (int i = 0; i < nargs; i++)
-                    compile_expr(node->call.args.items[i], code, locals, ctx);
-                /* Pad missing args with null */
-                /* (We do not know arity at this point, caller is responsible) */
-                emit_call(code, USER_FUNC_BASE + fidx);
-                break;
+            if (fidx >= 0 && !is_capture_call) {
+                int callee_has_captures = 0;
+                if (ctx->fn_infos) {
+                    FuncInfo *cfi = &((FuncInfo*)ctx->fn_infos)[fidx];
+                    if (cfi->n_captures > 0) callee_has_captures = 1;
+                }
+                if (!callee_has_captures) {
+                    for (int i = 0; i < nargs; i++)
+                        compile_expr(node->call.args.items[i], code, locals, ctx);
+                    /* Pad missing args with null */
+                    /* (We do not know arity at this point, caller is responsible) */
+                    emit_call(code, USER_FUNC_BASE + fidx);
+                    break;
+                }
+                /* Falls through to local-lookup branch below; the
+                   closure value should already be bound to a local
+                   by NODE_FN_DECL stmt-time emit. */
+            }
+
+            /* Captured by current closure -> load via env, indirect call. */
+            if (is_capture_call) {
+                int env_idx = locals_find(locals, "__env");
+                if (env_idx >= 0) {
+                    int cv_local = locals_add(locals, "__capcv");
+                    emit_local_get(code, env_idx);
+                    int kl = 0;
+                    int koff = strtab_add_with_len(ctx->strtab, name, &kl);
+                    emit_str_val(code, koff, kl);
+                    emit_call(code, RT_MAP_GET);
+                    emit_local_set(code, cv_local);
+
+                    int env_local = locals_add(locals, "__capenv");
+                    emit_local_get(code, cv_local);
+                    emit_i32(code, 8);
+                    buf_byte(code, OP_I32_ADD);
+                    buf_byte(code, OP_I32_LOAD);
+                    buf_leb128_u(code, 2);
+                    buf_leb128_u(code, 0);
+                    emit_local_set(code, env_local);
+
+                    emit_local_get(code, env_local);
+                    buf_byte(code, OP_IF);
+                    buf_byte(code, WASM_TYPE_I32);
+                    emit_local_get(code, env_local);
+                    for (int i = 0; i < nargs; i++)
+                        compile_expr(node->call.args.items[i], code, locals, ctx);
+                    emit_local_get(code, cv_local);
+                    emit_call(code, RT_VAL_I32);
+                    buf_byte(code, OP_CALL_INDIRECT);
+                    buf_leb128_u(code, (uint32_t)arity_to_type(nargs + 1));
+                    buf_leb128_u(code, 0);
+                    buf_byte(code, OP_ELSE);
+                    for (int i = 0; i < nargs; i++)
+                        compile_expr(node->call.args.items[i], code, locals, ctx);
+                    emit_local_get(code, cv_local);
+                    emit_call(code, RT_VAL_I32);
+                    buf_byte(code, OP_CALL_INDIRECT);
+                    buf_leb128_u(code, (uint32_t)arity_to_type(nargs));
+                    buf_leb128_u(code, 0);
+                    buf_byte(code, OP_END);
+                    break;
+                }
             }
 
             /* Check if it is a struct constructor (capitalized name) */
@@ -1356,6 +1571,47 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 for (int i = 0; i < nargs; i++)
                     compile_expr(node->call.args.items[i], code, locals, ctx);
                 emit_local_get(code, local_idx);
+                emit_call(code, RT_VAL_I32);
+                buf_byte(code, OP_CALL_INDIRECT);
+                buf_leb128_u(code, (uint32_t)arity_to_type(nargs));
+                buf_leb128_u(code, 0);
+                buf_byte(code, OP_END);
+                break;
+            }
+
+            /* Top-level binding (let/var/const) holding a func value:
+               same closure-or-bare dispatch as the local path, just
+               sourced from the WASM global instead of a local slot. */
+            int gidx = ctx->top_bindings ?
+                top_bindings_find(ctx->top_bindings, name) : -1;
+            if (gidx >= 0) {
+                int cv_local = locals_add(locals, "__gcv");
+                emit_global_get(code, gidx);
+                emit_local_set(code, cv_local);
+                int env_local = locals_add(locals, "__gcenv");
+                emit_local_get(code, cv_local);
+                emit_i32(code, 8);
+                buf_byte(code, OP_I32_ADD);
+                buf_byte(code, OP_I32_LOAD);
+                buf_leb128_u(code, 2);
+                buf_leb128_u(code, 0);
+                emit_local_set(code, env_local);
+
+                emit_local_get(code, env_local);
+                buf_byte(code, OP_IF);
+                buf_byte(code, WASM_TYPE_I32);
+                emit_local_get(code, env_local);
+                for (int i = 0; i < nargs; i++)
+                    compile_expr(node->call.args.items[i], code, locals, ctx);
+                emit_local_get(code, cv_local);
+                emit_call(code, RT_VAL_I32);
+                buf_byte(code, OP_CALL_INDIRECT);
+                buf_leb128_u(code, (uint32_t)arity_to_type(nargs + 1));
+                buf_leb128_u(code, 0);
+                buf_byte(code, OP_ELSE);
+                for (int i = 0; i < nargs; i++)
+                    compile_expr(node->call.args.items[i], code, locals, ctx);
+                emit_local_get(code, cv_local);
                 emit_call(code, RT_VAL_I32);
                 buf_byte(code, OP_CALL_INDIRECT);
                 buf_leb128_u(code, (uint32_t)arity_to_type(nargs));
@@ -2818,6 +3074,14 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     case NODE_LET:
     case NODE_VAR: {
         if (node->let.name) {
+            int gidx = (ctx->cur_fn_idx == -1 && ctx->top_bindings) ?
+                top_bindings_find(ctx->top_bindings, node->let.name) : -1;
+            if (gidx >= 0) {
+                if (node->let.value) compile_expr(node->let.value, code, locals, ctx);
+                else                 emit_null(code);
+                emit_global_set(code, gidx);
+                break;
+            }
             int idx = locals_ensure(locals, node->let.name);
             if (node->let.value) {
                 compile_expr(node->let.value, code, locals, ctx);
@@ -2840,6 +3104,14 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     case NODE_CONST: {
         if (node->const_.name) {
+            int gidx = (ctx->cur_fn_idx == -1 && ctx->top_bindings) ?
+                top_bindings_find(ctx->top_bindings, node->const_.name) : -1;
+            if (gidx >= 0) {
+                if (node->const_.value) compile_expr(node->const_.value, code, locals, ctx);
+                else                    emit_null(code);
+                emit_global_set(code, gidx);
+                break;
+            }
             int idx = locals_ensure(locals, node->const_.name);
             if (node->const_.value) {
                 compile_expr(node->const_.value, code, locals, ctx);
@@ -3209,9 +3481,58 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     /* ---- Function declaration ---- */
 
-    case NODE_FN_DECL:
-        /* Functions are compiled at the top level, skip in statement context */
+    case NODE_FN_DECL: {
+        /* Top-level fn-decls compile as separate WASM functions; nothing
+           to emit in statement context. For named nested fn-decls
+           collect_nested already reserved a function slot and stashed
+           the index in is_generator; if the function captures any free
+           variables we need to materialise the closure here and bind it
+           to a local so the local-lookup path picks it up. Even if the
+           nested fn has no captures we still bind a bare TAG_FUNC value
+           to a local so sibling closures can pick it up via the mutual-
+           reference patch in compile_block. */
+        if (!node->fn_decl.name || !node->fn_decl.name[0]) break;
+        int fn_idx = (node->fn_decl.is_generator >> 16) & 0xFFFF;
+        if (fn_idx <= 0) break;  /* top-level (idx 0 reserved for that) or untracked */
+        FuncInfo *_fis = (FuncInfo*)ctx->fn_infos;
+        if (!_fis) break;
+        FuncInfo *fi = &_fis[fn_idx];
+        if (fi->n_captures == 0) {
+            /* Bind a bare function value to a local so siblings find it. */
+            emit_val_new(code, TAG_FUNC, NUM_RT_FUNCS + fn_idx);
+            int local_idx = locals_ensure(locals, node->fn_decl.name);
+            emit_local_set(code, local_idx);
+            break;
+        }
+        /* Build env map and tagged function value, then bind to a local
+           with the fn's name. Mirrors the NODE_LAMBDA expr emit. */
+        emit_call(code, RT_MAP_NEW);
+        int env_tmp = locals_add(locals, "__cenv");
+        emit_local_set(code, env_tmp);
+        for (int ci = 0; ci < fi->n_captures; ci++) {
+            emit_local_get(code, env_tmp);
+            int kl = 0;
+            int koff = strtab_add_with_len(ctx->strtab, fi->captures[ci], &kl);
+            emit_str_val(code, koff, kl);
+            int var_idx = locals_find(locals, fi->captures[ci]);
+            if (var_idx >= 0) emit_local_get(code, var_idx);
+            else              emit_null(code);
+            emit_call(code, RT_MAP_SET);
+        }
+        emit_val_new(code, TAG_FUNC, NUM_RT_FUNCS + fn_idx);
+        int cv = locals_add(locals, "__nfdv");
+        emit_local_tee(code, cv);
+        emit_i32(code, 8);
+        buf_byte(code, OP_I32_ADD);
+        emit_local_get(code, env_tmp);
+        buf_byte(code, OP_I32_STORE);
+        buf_leb128_u(code, 2);
+        buf_leb128_u(code, 0);
+        emit_local_get(code, cv);
+        int local_idx = locals_ensure(locals, node->fn_decl.name);
+        emit_local_set(code, local_idx);
         break;
+    }
 
     /* ---- Struct declaration ---- */
 
@@ -6055,6 +6376,16 @@ static int collect_nested_list(NodeList *list, FuncInfo *out, int max, FuncMap *
 }
 
 /* Collect free variables in a lambda body (identifiers not in params or globals) */
+/* Module-local: count of top-level functions registered before
+   collect_nested runs. Nested fn names appear AFTER this index in the
+   funcs map; we still want to capture them as free variables. */
+static int g_n_top_level_funcs = 0;
+
+static int is_top_level_fn(FuncMap *funcs, const char *name) {
+    int idx = funcs_find(funcs, name);
+    return (idx >= 0 && idx < g_n_top_level_funcs);
+}
+
 static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
                               char **out, int *n, int max) {
     if (!node || *n >= max) return;
@@ -6064,8 +6395,10 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
         /* Skip if it's a parameter */
         for (int i = 0; i < params->len; i++)
             if (params->items[i].name && strcmp(params->items[i].name, name) == 0) return;
-        /* Skip if it's a known function */
-        if (funcs_find(funcs, name) >= 0) return;
+        /* Skip if it's a top-level function (those are global, no capture
+           needed). Nested fn names ARE captured so mutual recursion works
+           regardless of declaration order. */
+        if (is_top_level_fn(funcs, name)) return;
         /* Skip builtins */
         if (strcmp(name, "println") == 0 || strcmp(name, "print") == 0 ||
             strcmp(name, "str") == 0 || strcmp(name, "len") == 0 ||
@@ -6091,6 +6424,11 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
         for (int i = 0; i < node->call.args.len; i++)
             collect_free_vars(node->call.args.items[i], params, funcs, out, n, max);
         break;
+    case NODE_METHOD_CALL:
+        collect_free_vars(node->method_call.obj, params, funcs, out, n, max);
+        for (int i = 0; i < node->method_call.args.len; i++)
+            collect_free_vars(node->method_call.args.items[i], params, funcs, out, n, max);
+        break;
     case NODE_RETURN:
         if (node->ret.value) collect_free_vars(node->ret.value, params, funcs, out, n, max);
         break;
@@ -6105,15 +6443,129 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
     case NODE_LET: case NODE_VAR:
         if (node->let.value) collect_free_vars(node->let.value, params, funcs, out, n, max);
         break;
+    case NODE_CONST:
+        if (node->const_.value) collect_free_vars(node->const_.value, params, funcs, out, n, max);
+        break;
     case NODE_IF:
         collect_free_vars(node->if_expr.cond, params, funcs, out, n, max);
         collect_free_vars(node->if_expr.then, params, funcs, out, n, max);
+        for (int i = 0; i < node->if_expr.elif_conds.len; i++) {
+            collect_free_vars(node->if_expr.elif_conds.items[i], params, funcs, out, n, max);
+        }
+        for (int i = 0; i < node->if_expr.elif_thens.len; i++) {
+            collect_free_vars(node->if_expr.elif_thens.items[i], params, funcs, out, n, max);
+        }
         if (node->if_expr.else_branch) collect_free_vars(node->if_expr.else_branch, params, funcs, out, n, max);
         break;
     case NODE_ASSIGN:
         collect_free_vars(node->assign.target, params, funcs, out, n, max);
         collect_free_vars(node->assign.value, params, funcs, out, n, max);
         break;
+    case NODE_FOR:
+        collect_free_vars(node->for_loop.iter, params, funcs, out, n, max);
+        collect_free_vars(node->for_loop.body, params, funcs, out, n, max);
+        break;
+    case NODE_WHILE:
+        collect_free_vars(node->while_loop.cond, params, funcs, out, n, max);
+        collect_free_vars(node->while_loop.body, params, funcs, out, n, max);
+        break;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < node->lit_array.elems.len; i++)
+            collect_free_vars(node->lit_array.elems.items[i], params, funcs, out, n, max);
+        break;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < node->lit_map.keys.len; i++) {
+            collect_free_vars(node->lit_map.keys.items[i], params, funcs, out, n, max);
+            collect_free_vars(node->lit_map.vals.items[i], params, funcs, out, n, max);
+        }
+        break;
+    case NODE_INDEX:
+        collect_free_vars(node->index.obj, params, funcs, out, n, max);
+        collect_free_vars(node->index.index, params, funcs, out, n, max);
+        break;
+    case NODE_FIELD:
+        collect_free_vars(node->field.obj, params, funcs, out, n, max);
+        break;
+    case NODE_MATCH:
+        collect_free_vars(node->match.subject, params, funcs, out, n, max);
+        for (int i = 0; i < node->match.arms.len; i++) {
+            if (node->match.arms.items[i].guard)
+                collect_free_vars(node->match.arms.items[i].guard, params, funcs, out, n, max);
+            collect_free_vars(node->match.arms.items[i].body, params, funcs, out, n, max);
+        }
+        break;
+    case NODE_RANGE:
+        collect_free_vars(node->range.start, params, funcs, out, n, max);
+        collect_free_vars(node->range.end, params, funcs, out, n, max);
+        break;
+    case NODE_TRY:
+        collect_free_vars(node->try_.body, params, funcs, out, n, max);
+        for (int i = 0; i < node->try_.catch_arms.len; i++)
+            collect_free_vars(node->try_.catch_arms.items[i].body, params, funcs, out, n, max);
+        if (node->try_.finally_block)
+            collect_free_vars(node->try_.finally_block, params, funcs, out, n, max);
+        break;
+    case NODE_THROW:
+        if (node->throw_.value) collect_free_vars(node->throw_.value, params, funcs, out, n, max);
+        break;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < node->lit_string.parts.len; i++)
+            collect_free_vars(node->lit_string.parts.items[i], params, funcs, out, n, max);
+        break;
+    case NODE_AWAIT:
+        if (node->await_.expr) collect_free_vars(node->await_.expr, params, funcs, out, n, max);
+        break;
+    case NODE_YIELD:
+        if (node->yield_.value) collect_free_vars(node->yield_.value, params, funcs, out, n, max);
+        break;
+    case NODE_DEFER:
+        if (node->defer_.body) collect_free_vars(node->defer_.body, params, funcs, out, n, max);
+        break;
+    case NODE_PERFORM: {
+        for (int i = 0; i < node->perform.args.len; i++)
+            collect_free_vars(node->perform.args.items[i], params, funcs, out, n, max);
+        break;
+    }
+    case NODE_HANDLE:
+        if (node->handle.expr) collect_free_vars(node->handle.expr, params, funcs, out, n, max);
+        for (int i = 0; i < node->handle.arms.len; i++)
+            collect_free_vars(node->handle.arms.items[i].body, params, funcs, out, n, max);
+        break;
+    case NODE_RESUME:
+        if (node->resume_.value) collect_free_vars(node->resume_.value, params, funcs, out, n, max);
+        break;
+    case NODE_NURSERY:
+        collect_free_vars(node->nursery_.body, params, funcs, out, n, max);
+        break;
+    case NODE_SPAWN:
+        collect_free_vars(node->spawn_.expr, params, funcs, out, n, max);
+        break;
+    case NODE_LIST_COMP:
+        collect_free_vars(node->list_comp.element, params, funcs, out, n, max);
+        for (int i = 0; i < node->list_comp.clause_iters.len; i++)
+            collect_free_vars(node->list_comp.clause_iters.items[i], params, funcs, out, n, max);
+        break;
+    case NODE_CAST:
+        collect_free_vars(node->cast.expr, params, funcs, out, n, max);
+        break;
+    case NODE_SPREAD:
+        collect_free_vars(node->spread.expr, params, funcs, out, n, max);
+        break;
+    case NODE_LOOP:
+        collect_free_vars(node->loop.body, params, funcs, out, n, max);
+        break;
+    case NODE_DO_EXPR:
+        collect_free_vars(node->do_expr.body, params, funcs, out, n, max);
+        break;
+    case NODE_WITH:
+        collect_free_vars(node->with_.expr, params, funcs, out, n, max);
+        collect_free_vars(node->with_.body, params, funcs, out, n, max);
+        break;
+    case NODE_STRUCT_INIT: {
+        for (int i = 0; i < node->struct_init.fields.len; i++)
+            collect_free_vars(node->struct_init.fields.items[i].val, params, funcs, out, n, max);
+        break;
+    }
     default: break;
     }
 }
@@ -6141,6 +6593,36 @@ static int collect_nested(Node *node, FuncInfo *out, int max, FuncMap *funcs, in
         count++;
         /* Also scan lambda body for nested lambdas */
         count = collect_nested(node->lambda.body, out, max, funcs, count);
+        return count;
+    }
+
+    /* Named nested fn-decl: treat just like a NODE_LAMBDA so it lands
+       in the function table and can be referenced as either a value
+       (when there are captures, via local closure) or a bare function
+       name (no captures). Without this, `fn inc() {...}` inside another
+       function gets dropped on the floor. */
+    if (VAL_TAG(node) == NODE_FN_DECL && node->fn_decl.name &&
+        node->fn_decl.name[0] && !node->fn_decl.is_generator &&
+        !node->fn_decl.is_async) {
+        const char *fname = node->fn_decl.name;
+        /* Skip the top-level fn-decls -- collect_functions already
+           registered those and we'd double-count. We can detect that
+           cheaply: if the name is already in the funcs map we already
+           have a FuncInfo for it. */
+        if (funcs_find(funcs, fname) < 0) {
+            funcs_add(funcs, fname);
+            out[count].node = node;
+            out[count].n_captures = 0;
+            collect_free_vars(node->fn_decl.body, &node->fn_decl.params, funcs,
+                              out[count].captures, &out[count].n_captures, MAX_CAPTURES);
+            if (out[count].n_captures > 0)
+                out[count].n_params = node->fn_decl.params.len + 1;
+            else
+                out[count].n_params = node->fn_decl.params.len;
+            node->fn_decl.is_generator = (node->fn_decl.is_generator & 1) | ((count) << 16);
+            count++;
+        }
+        count = collect_nested(node->fn_decl.body, out, max, funcs, count);
         return count;
     }
 
@@ -6267,6 +6749,10 @@ static int collect_functions(Node *program, FuncInfo *out, int max, FuncMap *fun
             }
         }
     }
+    /* Snapshot how many top-level fns we registered so collect_free_vars
+       can distinguish "global, no capture needed" from "nested, must
+       capture" without depending on declaration order. */
+    g_n_top_level_funcs = funcs->n_funcs;
     /* Recursively scan for lambdas and nested fn decls */
     count = collect_nested_list(stmts, out, max, funcs, count);
     return count;
@@ -6402,17 +6888,7 @@ static const char *find_unsupported_for_wasm(Node *n) {
     case NODE_FN_DECL:
         if (n->fn_decl.is_generator) return "generator functions (fn*)";
         if (n->fn_decl.is_async)     return "async functions";
-        /* Named nested fn-decls (`fn inc() {...}` inside another fn) are
-           dropped on the floor by the AOT path; only top-level fn-decls
-           and anonymous `fn() {...}` lambdas survive collection. Refuse
-           rather than silently lose the binding. */
-        if (n->fn_decl.body) {
-            const char *r = find_unsupported_for_wasm(n->fn_decl.body);
-            if (r) return r;
-            if (find_nested_named_fn_decl(n->fn_decl.body))
-                return "named nested fn declarations (use `let f = fn() {...}`)";
-        }
-        return NULL;
+        return find_unsupported_for_wasm(n->fn_decl.body);
     case NODE_LAMBDA:
         if (n->lambda.is_generator & 1) return "generator lambdas (fn*)";
         return find_unsupported_for_wasm(n->lambda.body);
@@ -6428,7 +6904,7 @@ static const char *find_unsupported_for_wasm(Node *n) {
             if (r) return r;
         }
         return find_unsupported_for_wasm(n->block.expr);
-    case NODE_DEFER:        return "defer statements";
+    case NODE_DEFER:        return NULL;
     case NODE_PAT_MAP:      return "map patterns (`#{\"k\": k}`)";
     case NODE_LIT_BIGINT:   return "bigint literals (overflow into arbitrary-precision int)";
     case NODE_LIT_INT:
@@ -6580,7 +7056,13 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     EnumLayoutMap enum_layouts;
     enum_layouts_init(&enum_layouts);
 
-    /* Pre-scan: collect struct and enum layouts */
+    TopBindings top_bindings;
+    top_bindings_init(&top_bindings);
+
+    /* Pre-scan: collect struct and enum layouts. Also assign a global
+       slot to every top-level var/let/const so that nested or top-level
+       fns can read or write it through global.get / global.set rather
+       than depending on access to main()'s locals (impossible in WASM). */
     if (VAL_TAG(program) == NODE_PROGRAM) {
         NodeList *stmts = &program->program.stmts;
         for (int i = 0; i < stmts->len; i++) {
@@ -6592,6 +7074,16 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
             if (s && VAL_TAG(s) == NODE_ENUM_DECL && s->enum_decl.name) {
                 enum_layouts_add(&enum_layouts, s->enum_decl.name,
                                  &s->enum_decl.variants);
+            }
+            if (s && (VAL_TAG(s) == NODE_LET || VAL_TAG(s) == NODE_VAR) &&
+                s->let.name && s->let.name[0]) {
+                top_bindings_add(&top_bindings, s->let.name,
+                                 NUM_GLOBALS + top_bindings.count);
+            }
+            if (s && VAL_TAG(s) == NODE_CONST && s->const_.name &&
+                s->const_.name[0]) {
+                top_bindings_add(&top_bindings, s->const_.name,
+                                 NUM_GLOBALS + top_bindings.count);
             }
         }
     }
@@ -6636,9 +7128,10 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         ctx.continue_depth = 0;
         ctx.fn_infos = fn_infos;
         ctx.cur_fn_idx = i;
+        ctx.top_bindings = &top_bindings;
 
         /* Add parameters - for closures, add __env as first param */
-        if (VAL_TAG(fn) == NODE_LAMBDA && fn_infos[i].n_captures > 0) {
+        if (fn_infos[i].n_captures > 0) {
             locals_add(&locals, "__env");
         }
 
@@ -6664,6 +7157,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
                 NodeList *stmts = &fn_body->block.stmts;
                 for (int si = 0; si < stmts->len; si++)
                     compile_stmt(stmts->items[si], &body, &locals, &ctx);
+                patch_block_mutual_refs(fn_body, &locals, &ctx, &body);
                 if (fn_body->block.expr)
                     compile_expr(fn_body->block.expr, &body, &locals, &ctx);
                 else
@@ -6707,6 +7201,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         ctx.continue_depth = 0;
         ctx.fn_infos = fn_infos;
         ctx.cur_fn_idx = -1;
+        ctx.top_bindings = &top_bindings;
 
         if (VAL_TAG(program) == NODE_PROGRAM) {
             NodeList *stmts = &program->program.stmts;
@@ -7034,7 +7529,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     {
         WasmBuf sec;
         buf_init(&sec);
-        buf_leb128_u(&sec, NUM_GLOBALS);
+        buf_leb128_u(&sec, (uint32_t)(NUM_GLOBALS + top_bindings.count));
 
         /* GLOBAL_HEAP_PTR: mutable i32 */
         buf_byte(&sec, WASM_TYPE_I32);
@@ -7056,6 +7551,17 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         buf_byte(&sec, OP_I32_CONST);
         buf_leb128_s(&sec, 0);
         buf_byte(&sec, OP_END);
+
+        /* Top-level bindings: each gets a mutable i32 (value pointer),
+           initialized to 0 (= null). The main function fills them in
+           when the top-level let/var/const stmt runs. */
+        for (int i = 0; i < top_bindings.count; i++) {
+            buf_byte(&sec, WASM_TYPE_I32);
+            buf_byte(&sec, 0x01);
+            buf_byte(&sec, OP_I32_CONST);
+            buf_leb128_s(&sec, 0);
+            buf_byte(&sec, OP_END);
+        }
 
         buf_section(&output, 6, &sec);
         buf_free(&sec);
@@ -7345,5 +7851,6 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     funcs_free(&funcs);
     struct_layouts_free(&struct_layouts);
     enum_layouts_free(&enum_layouts);
+    top_bindings_free(&top_bindings);
     return 0;
 }
