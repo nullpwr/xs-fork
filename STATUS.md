@@ -208,13 +208,36 @@ with a virtual filesystem, captured stdout/stderr, and a `loadXS()` /
 `xs.run()` / `xs.exec()` API. Releases publish both artefacts, and the
 static repo's daily sync workflow picks up the browser build.
 
-`xs --emit wasm` covers arithmetic, match (with guards), try/catch,
-struct field access, format methods, divide-by-zero, tuple swap, and
-direct calls. `perform` traps with `wasm 'unreachable'` (effect support
-needs WASM exception-handling or a CPS rewrite); `spawn` / channels /
-nurseries lower to single-thread sequencing because WASI doesn't grant
-real threads to a freestanding module. The runtime build covers the
-browser case; `--emit c` covers AOT.
+`xs --emit wasm` is a small AOT path for leaf programs: arithmetic,
+control flow, lambdas, closure capture (with mutation), tuple / slice /
+literal / OR patterns, try/catch, struct field access, divide-by-zero,
+and direct calls. Anything beyond that is refused upfront with a clear
+diagnostic that points at the runtime build (`make wasm`) or the
+`--vm` / `--emit c` / `--emit js` paths, instead of silently producing
+wrong output.
+
+The pre-check refuses, with a one-line message:
+
+- generators (`fn*`), `yield`, async functions, `await`
+- `spawn` / `nursery` / channel sends
+- algebraic effects (`perform` / `handle` / `effect` / `resume`)
+- reactive `bind`
+- cross-file `use "..."`
+- stdlib `import` (math / json / fs / ...)
+- traits with default-method bodies
+- map patterns (`#{ "k": k }`)
+- `defer`
+- higher-order array methods (`.map` / `.filter` / `.reduce` /
+  `.fold` / `.each` / `.some` / `.every` / `.find` / `.sort_with` /
+  `.flat_map` / `.group_by` / `.partition` / `.sum` / `.product` /
+  `.min_by` / `.max_by` / `.count`)
+
+A handful of subtler gaps still trap with `wasm 'unreachable'` rather
+than refuse upfront: equality on heap-allocated strings (compares the
+data pointer, not the bytes), `String.len` returning UTF-8 byte count
+instead of codepoint count, struct match by type name (`Point { x, y }`
+needs the runtime to tag instances), and bigint promotion. The
+`make wasm` runtime build covers all of these; this AOT path does not.
 
 ## Tooling
 

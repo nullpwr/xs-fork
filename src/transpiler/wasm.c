@@ -1009,7 +1009,56 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     case NODE_ASSIGN: {
         if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT) {
-            int idx = locals_ensure(locals, node->assign.target->ident.name);
+            const char *target = node->assign.target->ident.name;
+            /* Captured variable: route the write through the env map so
+               the next call to the same closure sees the update. Without
+               this, `n = n + 1` inside `fn() { ... }` writes to a fresh
+               local and the captured `n` stays at its initial value. */
+            int is_capture = 0;
+            if (ctx->fn_infos && ctx->cur_fn_idx >= 0) {
+                FuncInfo *fi = &((FuncInfo*)ctx->fn_infos)[ctx->cur_fn_idx];
+                for (int ci = 0; ci < fi->n_captures; ci++) {
+                    if (fi->captures[ci] && strcmp(fi->captures[ci], target) == 0) {
+                        is_capture = 1; break;
+                    }
+                }
+            }
+            if (is_capture) {
+                int env_idx = locals_find(locals, "__env");
+                if (env_idx >= 0) {
+                    /* compute new value first (compound ops fold the old
+                       value in) and stash it; then write env[name] = v */
+                    int val_tmp = locals_add(locals, "__capw");
+                    const char *op = node->assign.op;
+                    if (strcmp(op, "=") == 0) {
+                        compile_expr(node->assign.value, code, locals, ctx);
+                    } else {
+                        /* read current via the env */
+                        emit_local_get(code, env_idx);
+                        int kl0 = 0;
+                        int koff0 = strtab_add_with_len(ctx->strtab, target, &kl0);
+                        emit_str_val(code, koff0, kl0);
+                        emit_call(code, RT_MAP_GET);
+                        compile_expr(node->assign.value, code, locals, ctx);
+                        if      (strcmp(op, "+=")  == 0) emit_call(code, RT_VAL_ADD);
+                        else if (strcmp(op, "-=")  == 0) emit_call(code, RT_VAL_SUB);
+                        else if (strcmp(op, "*=")  == 0) emit_call(code, RT_VAL_MUL);
+                        else if (strcmp(op, "/=")  == 0) emit_call(code, RT_VAL_DIV);
+                        else if (strcmp(op, "%=")  == 0) emit_call(code, RT_VAL_MOD);
+                        else if (strcmp(op, "++=") == 0) emit_call(code, RT_STR_CAT);
+                    }
+                    emit_local_set(code, val_tmp);
+                    emit_local_get(code, env_idx);
+                    int kl = 0;
+                    int koff = strtab_add_with_len(ctx->strtab, target, &kl);
+                    emit_str_val(code, koff, kl);
+                    emit_local_get(code, val_tmp);
+                    emit_call(code, RT_MAP_SET);
+                    emit_local_get(code, val_tmp);  /* assignment expr value */
+                    break;
+                }
+            }
+            int idx = locals_ensure(locals, target);
             const char *op = node->assign.op;
             if (strcmp(op, "=") == 0) {
                 compile_expr(node->assign.value, code, locals, ctx);
@@ -4499,20 +4548,76 @@ static void emit_rt_map_new(WasmBuf *body) {
 
 /* $map_set(map_val, key_val, val_val) -> void */
 static void emit_rt_map_set(WasmBuf *body) {
-    /* local 0=map, 1=key, 2=val */
+    /* local 0=map, 1=key, 2=val
+       Update in place if the key already exists, else append. Without
+       the in-place update, closure mutations lost duplicate-key entries
+       and the next read would return the original (first) value. */
+    int dp = 3, len = 4, i = 5, kptr = 6;
+    /* dp = payload addr */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
-    int dp = 3;
     emit_local_set(body, dp);
+    /* len = *(dp + 4) */
     emit_local_get(body, dp);
     emit_i32(body, 4);
     buf_byte(body, OP_I32_ADD);
     buf_byte(body, OP_I32_LOAD);
     buf_leb128_u(body, 2);
     buf_leb128_u(body, 0);
-    int len = 4;
     emit_local_set(body, len);
-    /* store key at dp + 8 + len * 8 */
+    /* Linear scan: if a slot's key payload equals our key's payload,
+       overwrite the value slot and return. */
+    emit_i32(body, 0);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);  /* outer */
+    buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+    /* if i >= len break to outer */
+    emit_local_get(body, i);
+    emit_local_get(body, len);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    /* k_ptr = *(dp + 8 + i*8) */
+    emit_local_get(body, dp);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD);
+    buf_leb128_u(body, 2);
+    buf_leb128_u(body, 0);
+    emit_local_set(body, kptr);
+    /* if k_ptr.payload == key.payload: overwrite val slot, return */
+    emit_local_get(body, kptr);
+    emit_call(body, RT_VAL_I32);
+    emit_local_get(body, 1);
+    emit_call(body, RT_VAL_I32);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* *(dp + 12 + i*8) = val */
+    emit_local_get(body, dp);
+    emit_i32(body, 12);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, i);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_MUL);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, 2);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2);
+    buf_leb128_u(body, 0);
+    buf_byte(body, OP_RETURN);
+    buf_byte(body, OP_END);
+    /* i++ */
+    emit_local_get(body, i);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, i);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);  /* continue loop */
+    buf_byte(body, OP_END); /* loop */
+    buf_byte(body, OP_END); /* outer block */
+    /* Append at end: store key at dp + 8 + len * 8 */
     emit_local_get(body, dp);
     emit_i32(body, 8);
     buf_byte(body, OP_I32_ADD);
@@ -6030,10 +6135,165 @@ static int arity_to_type(int arity) {
     }
 }
 
+/* Pre-check that bails out with a clear error for features the WASM
+   AOT transpiler doesn't actually run correctly. Without this, programs
+   silently produced wrong output -- generators returned null, `import
+   math` made every math.X call return null, effects lowered to either
+   `unreachable` or a no-op, and so on. The runtime build (`make wasm`
+   / xs.wasm in the playground) covers everything; this AOT path is for
+   small leaf programs only. */
+static const char *find_unsupported_for_wasm(Node *n) {
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_FN_DECL:
+        if (n->fn_decl.is_generator) return "generator functions (fn*)";
+        if (n->fn_decl.is_async)     return "async functions";
+        return find_unsupported_for_wasm(n->fn_decl.body);
+    case NODE_LAMBDA:
+        if (n->lambda.is_generator & 1) return "generator lambdas (fn*)";
+        return find_unsupported_for_wasm(n->lambda.body);
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++) {
+            const char *r = find_unsupported_for_wasm(n->program.stmts.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++) {
+            const char *r = find_unsupported_for_wasm(n->block.stmts.items[i]);
+            if (r) return r;
+        }
+        return find_unsupported_for_wasm(n->block.expr);
+    case NODE_DEFER:        return "defer statements";
+    case NODE_PAT_MAP:      return "map patterns (`#{\"k\": k}`)";
+    case NODE_AWAIT:        return "async/await";
+    case NODE_SPAWN:        return "spawn / structured concurrency";
+    case NODE_NURSERY:      return "nursery blocks";
+    case NODE_SEND_EXPR:    return "channel sends";
+    case NODE_PERFORM:      return "algebraic effects (perform/handle)";
+    case NODE_HANDLE:       return "algebraic effects (perform/handle)";
+    case NODE_EFFECT_DECL:  return "algebraic effects (perform/handle)";
+    case NODE_RESUME:       return "algebraic effects (perform/handle)";
+    case NODE_BIND:         return "reactive `bind` declarations";
+    case NODE_YIELD:        return "yield (generators)";
+    case NODE_USE:
+        if (!n->use_.is_plugin && n->use_.path) return "cross-file `use \"...\"`";
+        return NULL;
+    case NODE_IMPORT:       return "stdlib imports (math/json/fs/...)";
+    case NODE_TRAIT_DECL: {
+        for (int i = 0; i < n->trait_decl.methods.len; i++) {
+            Node *m = n->trait_decl.methods.items[i];
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body)
+                return "traits with default-method bodies";
+        }
+        return NULL;
+    }
+    case NODE_IF: {
+        const char *r;
+        if ((r = find_unsupported_for_wasm(n->if_expr.cond))) return r;
+        if ((r = find_unsupported_for_wasm(n->if_expr.then))) return r;
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            if ((r = find_unsupported_for_wasm(n->if_expr.elif_conds.items[i]))) return r;
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            if ((r = find_unsupported_for_wasm(n->if_expr.elif_thens.items[i]))) return r;
+        return find_unsupported_for_wasm(n->if_expr.else_branch);
+    }
+    case NODE_WHILE:    {
+        const char *r = find_unsupported_for_wasm(n->while_loop.cond);
+        return r ? r : find_unsupported_for_wasm(n->while_loop.body);
+    }
+    case NODE_FOR: {
+        const char *r = find_unsupported_for_wasm(n->for_loop.iter);
+        return r ? r : find_unsupported_for_wasm(n->for_loop.body);
+    }
+    case NODE_LET: case NODE_VAR:   return find_unsupported_for_wasm(n->let.value);
+    case NODE_CONST:                return find_unsupported_for_wasm(n->const_.value);
+    case NODE_EXPR_STMT:            return find_unsupported_for_wasm(n->expr_stmt.expr);
+    case NODE_RETURN:               return find_unsupported_for_wasm(n->ret.value);
+    case NODE_ASSIGN: {
+        const char *r = find_unsupported_for_wasm(n->assign.target);
+        return r ? r : find_unsupported_for_wasm(n->assign.value);
+    }
+    case NODE_BINOP: {
+        const char *r = find_unsupported_for_wasm(n->binop.left);
+        return r ? r : find_unsupported_for_wasm(n->binop.right);
+    }
+    case NODE_UNARY:        return find_unsupported_for_wasm(n->unary.expr);
+    case NODE_CALL: {
+        const char *r = find_unsupported_for_wasm(n->call.callee);
+        if (r) return r;
+        for (int i = 0; i < n->call.args.len; i++)
+            if ((r = find_unsupported_for_wasm(n->call.args.items[i]))) return r;
+        return NULL;
+    }
+    case NODE_METHOD_CALL: {
+        /* Higher-order array/map methods need closure dispatch through
+           the value, which the AOT path doesn't wire up; they currently
+           return [] / null. Refuse so the diagnostic is honest. */
+        static const char *unsup_methods[] = {
+            "map", "filter", "reduce", "fold", "each", "for_each",
+            "some", "every", "any", "all", "find", "find_index",
+            "index_of", "count", "sort_with", "flat_map", "group_by",
+            "partition", "min_by", "max_by", "sum", "product", NULL
+        };
+        const char *m = n->method_call.method;
+        if (m) {
+            for (int k = 0; unsup_methods[k]; k++)
+                if (strcmp(m, unsup_methods[k]) == 0)
+                    return "higher-order array/map methods (.map / .filter / .reduce / ...)";
+        }
+        const char *r = find_unsupported_for_wasm(n->method_call.obj);
+        if (r) return r;
+        for (int i = 0; i < n->method_call.args.len; i++)
+            if ((r = find_unsupported_for_wasm(n->method_call.args.items[i]))) return r;
+        return NULL;
+    }
+    case NODE_TRY:
+    {
+        const char *r = find_unsupported_for_wasm(n->try_.body);
+        return r ? r : find_unsupported_for_wasm(n->try_.finally_block);
+    }
+    case NODE_MATCH: {
+        const char *r = find_unsupported_for_wasm(n->match.subject);
+        if (r) return r;
+        for (int i = 0; i < n->match.arms.len; i++) {
+            MatchArm *a = &n->match.arms.items[i];
+            if (a->pattern && VAL_TAG(a->pattern) == NODE_PAT_MAP)
+                return "map patterns (`#{\"k\": k}`)";
+            if ((r = find_unsupported_for_wasm(a->body))) return r;
+            if (a->guard && (r = find_unsupported_for_wasm(a->guard))) return r;
+        }
+        return NULL;
+    }
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++) {
+            const char *r = find_unsupported_for_wasm(n->impl_decl.members.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    case NODE_CLASS_DECL:
+        for (int i = 0; i < n->class_decl.members.len; i++) {
+            const char *r = find_unsupported_for_wasm(n->class_decl.members.items[i]);
+            if (r) return r;
+        }
+        return NULL;
+    default:
+        return NULL;
+    }
+}
+
 int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     (void)filename;
 
     if (!program || !out_path) return 1;
+
+    const char *unsupported = find_unsupported_for_wasm(program);
+    if (unsupported) {
+        fprintf(stderr, "xs --emit wasm: %s not supported on this target. "
+                "Use --vm / --emit c / --emit js (or `make wasm` for the "
+                "full runtime build).\n", unsupported);
+        return 1;
+    }
 
     FuncMap funcs;
     funcs_init(&funcs);
@@ -6064,7 +6324,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     }
 
     /* Collect user function declarations */
-    FuncInfo fn_infos[MAX_FUNCS];
+    FuncInfo fn_infos[MAX_FUNCS] = {0};
     int n_funcs = collect_functions(program, fn_infos, MAX_FUNCS, &funcs);
 
     int has_main = (funcs_find(&funcs, "main") >= 0);
@@ -6630,7 +6890,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* 26: $map_new */
         build_rt_func(&sec, 0, 1, emit_rt_map_new);
         /* 27: $map_set (3 params, 2 extra) */
-        build_rt_func(&sec, 3, 2, emit_rt_map_set);
+        build_rt_func(&sec, 3, 4, emit_rt_map_set);
         /* 28: $map_get (2 params, 4 extra: dp, len, i, kptr) */
         build_rt_func(&sec, 2, 4, emit_rt_map_get);
         /* 29: $val_index */

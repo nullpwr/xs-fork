@@ -1897,7 +1897,13 @@ test_again: ;
             else if (strcmp(target_lang, "wasm32") == 0 ||
                      strcmp(target_lang, "wasi")   == 0) wasm_mode = 1;
             else { fprintf(stderr, "xs transpile: unknown target '%s'\n", target_lang); node_free(prog); return 1; }
-            if (wasm_mode) { transpile_wasm(prog, src_file, "out.wasm"); }
+            if (wasm_mode) {
+                if (transpile_wasm(prog, src_file, "out.wasm") != 0) {
+                    node_free(prog);
+                    cache_free(g_sema_cache);
+                    return 1;
+                }
+            }
             else if (out)  { printf("%s", out); free(out); }
             else if (!wasm_mode && (strcmp(target_lang, "js") == 0 || strcmp(target_lang, "c") == 0)) {
                 /* transpiler refused (unsupported feature on target) */
@@ -2534,7 +2540,8 @@ run_file:;
             if (out) { printf("%s", out); free(out); }
             else     { rc = 1; }
         } else if (emit_wasm) {
-            transpile_wasm(program, filename, "out.wasm");
+            int wrc = transpile_wasm(program, filename, "out.wasm");
+            if (wrc != 0) rc = 1;
         }
         node_free(program);
         free(src_for_cache);
