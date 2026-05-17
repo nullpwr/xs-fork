@@ -3150,10 +3150,22 @@ static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth) 
     }
     case NODE_PAT_STRUCT: {
         sb_printf(s, "(%s.tag != 4", subject); /* not null */
+        if (pat->pat_struct.path && pat->pat_struct.path[0]) {
+            /* tagged structs carry __type__ at init time; if the
+             * subject has it, narrow the match to that name. Tolerant
+             * if the tag is absent (untagged maps still match by
+             * structural fields). */
+            sb_printf(s,
+                " && ((xs_index(%s, XS_STR(\"__type__\")).tag != 2) || "
+                "xs_eq(xs_index(%s, XS_STR(\"__type__\")), XS_STR(\"%s\")))",
+                subject, subject, pat->pat_struct.path);
+        }
         for (int i = 0; i < pat->pat_struct.fields.len; i++) {
+            const char *key = pat->pat_struct.fields.items[i].key;
             if (pat->pat_struct.fields.items[i].val) {
                 char sub[256];
-                snprintf(sub, sizeof sub, "%s.%s", subject, pat->pat_struct.fields.items[i].key);
+                snprintf(sub, sizeof sub, "xs_index(%s, XS_STR(\"%s\"))",
+                         subject, key ? key : "");
                 sb_add(s, " && ");
                 emit_pattern_cond(s, pat->pat_struct.fields.items[i].val, sub, depth);
             }
@@ -3248,10 +3260,16 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
         break;
     case NODE_PAT_STRUCT:
         for (int i = 0; i < pat->pat_struct.fields.len; i++) {
+            const char *key = pat->pat_struct.fields.items[i].key;
+            char sub[256];
+            snprintf(sub, sizeof sub, "xs_index(%s, XS_STR(\"%s\"))",
+                     subject, key ? key : "");
             if (pat->pat_struct.fields.items[i].val) {
-                char sub[256];
-                snprintf(sub, sizeof sub, "%s.%s", subject, pat->pat_struct.fields.items[i].key);
                 emit_pattern_bindings(s, pat->pat_struct.fields.items[i].val, sub, depth);
+            } else if (key) {
+                /* shortcut `Point { x }` binds local x to field x */
+                sb_indent(s, depth);
+                sb_printf(s, "xs_val %s = %s;\n", key, sub);
             }
         }
         break;
@@ -3273,6 +3291,13 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
             char sub[256];
             snprintf(sub, sizeof sub, "xs_index(%s, XS_INT(%d))", subject, i);
             emit_pattern_bindings(s, pat->pat_slice.elems.items[i], sub, depth);
+        }
+        if (pat->pat_slice.rest) {
+            /* [a, b, ..rest] -> rest = subject[elems.len..] */
+            sb_indent(s, depth);
+            sb_printf(s,
+                "xs_val %s = xs_slice(%s, XS_INT(%d), XS_NULL, 0);\n",
+                pat->pat_slice.rest, subject, pat->pat_slice.elems.len);
         }
         break;
     case NODE_PAT_MAP:
