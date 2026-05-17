@@ -2251,16 +2251,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_indent(s, depth+1); sb_add(s, "}\n");
                 sb_indent(s, depth); sb_printf(s, "__am_%d; })", mid);
             } else if (strcmp(meth, "reduce") == 0 || strcmp(meth, "fold") == 0) {
-                /* reduce uses (fn, init); fold uses (init, fn). Pick
-                   the callable slot for fn and the other for init -- the
-                   VM/interp do the same dynamic dispatch, so the C
-                   shape stays consistent regardless of which name was
-                   used. With only one arg, that arg is the function. */
-                int is_fold = strcmp(meth, "fold") == 0;
-                int fn_arg  = is_fold ? 1 : 0;
-                int init_arg = is_fold ? 0 : 1;
+                /* Both reduce and fold take (init, fn) in xs. The VM /
+                 * interp accept either order via dynamic dispatch but
+                 * the canonical signature documented in stdlib is
+                 * `reduce(init, fn)`. With a single arg, treat that
+                 * arg as the function and start from XS_INT(0). */
+                int fn_arg  = 1;
+                int init_arg = 0;
+                if (n->method_call.args.len == 1) { fn_arg = 0; init_arg = -1; }
                 sb_printf(s, "({ xs_val __acc_%d = ", mid);
-                if (n->method_call.args.len > init_arg)
+                if (init_arg >= 0 && n->method_call.args.len > init_arg)
                     emit_expr(s, n->method_call.args.items[init_arg], depth);
                 else sb_add(s, "XS_INT(0)");
                 sb_add(s, ";\n");
