@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.2.14
+
+The C transpiler caught up with JS and WASM: every conformance test
+now compiles with gcc and matches interpreter output byte-for-byte.
+
+Generators (`fn*`, `yield`, `g.next()`) lower to an eager array fill,
+the same shape the WASM path uses, with a small `__gen_iter` /
+`__gen_next` runtime spliced into the program. `async fn` / `await`
+/ `spawn` / `nursery` strip to plain functions and direct calls so a
+single-threaded compiled program runs the same observable behaviour
+as the scheduler-backed runtime. Nested fn declarations get rewritten
+to `let f = fn() {...}` so closures over the enclosing locals work,
+including mutual recursion through trait-default machinery.
+
+`try` / `catch` lifts to an expression form so its arm value
+propagates the way it does under interp; `defer` runs on both throw
+and return, not just normal fall-through. Struct match patterns
+(`Point { x, y }`) recognise instances by name because the
+constructor tags `__type__`; trait default methods get copied onto
+every impl that doesn't override. Cross-file `use "./mod.xs"`
+inlines the imported file with renamed bindings and exposes the
+public surface as a namespace map; `arr.reduce(init, fn)` matches
+the interp signature; bigint promotion uses decimal-string add /
+mul / pow so `9223372036854775807 + 1` lands on
+`9223372036854775808` instead of wrapping. Tolerant `assert_eq`
+for chained float arithmetic, the same slack as the native runtime.
+
+Every backend (`--vm`, `--interp`, `--jit`, `--emit c`, `--emit js`,
+`--emit wasm`) is now at 17/17 conformance. First time they're all
+at parity.
+
 ## 1.2.13
 
 The WASM AOT path (`xs --emit wasm`) used to silently produce wrong

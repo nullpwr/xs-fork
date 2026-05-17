@@ -160,17 +160,23 @@ diffs the three outputs.
 | Variables, arithmetic, control flow | works |
 | Functions, default params, expression bodies | works |
 | Strings, interpolation, string methods | works |
-| Arrays, maps, array methods (map/filter/reduce) | works |
-| Structs with impl methods | works |
+| Arrays, maps, higher-order array methods | works |
+| Structs with impl methods, trait default methods | works |
 | Enums with constructors and matching | works |
-| Pattern matching with guards | works |
-| Channels, actors, spawn, nursery | works |
-| Async/await (sequential) | works |
-| Closures capturing mutable state | works |
-| Generators | not yet |
+| Pattern matching (struct shorthand, slice rest, guards) | works |
+| Match by struct type name (`Point { x, y }`) | works (instances tagged with `__type__`) |
+| Closures, nested fn decls, mutable capture | works |
+| Generators (`fn*`, `yield`, `g.next()`) | works (eager array fill) |
+| Async / await / spawn / nursery | works (sequential resolution) |
+| `try` / `catch` as expression, `defer` on throw + return | works |
+| Bigint with arbitrary precision | works (decimal-string add/mul, overflow promotion) |
+| Cross-file `use "./mod.xs"` (alias + selective destructure) | works |
+| Stdlib `import` (math/json/fs/time) | works |
 | Algebraic effects (single-shot) | works (setjmp/longjmp, nested-fn dispatcher) |
 | Algebraic effects (multi-shot resume) | not yet (needs delimited continuations) |
 | Plugins | not supported (requires runtime) |
+
+Conformance suite: **17 / 17 PASS** under `gcc -O2`, matching interp / VM / JIT byte-for-byte.
 
 ## JavaScript Transpiler
 
