@@ -918,9 +918,19 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_LIT_INT:
         sb_printf(s, "XS_INT(%" PRId64 ")", n->lit_int.ival);
         break;
-    case NODE_LIT_BIGINT:
-        sb_printf(s, "XS_INT(%s)", n->lit_bigint.bigint_str);
+    case NODE_LIT_BIGINT: {
+        /* Emit a string-payload bigint so values past i64 stay exact.
+           XS_INT(...) wraps any literal larger than INT64_MAX into the
+           low 64 bits, which silently corrupts the value. */
+        const char *bs = n->lit_bigint.bigint_str ? n->lit_bigint.bigint_str : "0";
+        sb_add(s, "XS_BIGINT(\"");
+        for (const char *p = bs; *p; p++) {
+            if (*p == '"' || *p == '\\') sb_addc(s, '\\');
+            sb_addc(s, *p);
+        }
+        sb_add(s, "\")");
         break;
+    }
     case NODE_LIT_FLOAT:
         /* %.17g preserves the exact double value; default %g uses 6 sig
          * figs, which truncates literals like 123456789.0. */
@@ -6330,15 +6340,32 @@ char *transpile_c(Node *program, const char *filename) {
         "    free(digits);\n"
         "    return out;\n"
         "}\n"
+        "/* These checks must remain valid under -O2. The earlier code\n"
+        "   relied on signed-overflow being defined; gcc/clang treat that\n"
+        "   as UB at -O2 and elide the check, so 10 ** 30 silently wraps\n"
+        "   instead of promoting to bigint. __builtin_*_overflow does the\n"
+        "   arithmetic in a defined way, which the optimiser respects. */\n"
         "static int xs_bi_overflow_add(int64_t a, int64_t b) {\n"
+        "#if defined(__GNUC__) || defined(__clang__)\n"
+        "    int64_t r;\n"
+        "    return __builtin_add_overflow(a, b, &r);\n"
+        "#else\n"
         "    if (b > 0 && a > INT64_MAX - b) return 1;\n"
         "    if (b < 0 && a < INT64_MIN - b) return 1;\n"
         "    return 0;\n"
+        "#endif\n"
         "}\n"
         "static int xs_bi_overflow_mul(int64_t a, int64_t b) {\n"
+        "#if defined(__GNUC__) || defined(__clang__)\n"
+        "    int64_t r;\n"
+        "    return __builtin_mul_overflow(a, b, &r);\n"
+        "#else\n"
         "    if (a == 0 || b == 0) return 0;\n"
-        "    int64_t r = a * b;\n"
-        "    return r / b != a;\n"
+        "    if (a == INT64_MIN || b == INT64_MIN) return 1;\n"
+        "    int64_t aa = a < 0 ? -a : a;\n"
+        "    int64_t bb = b < 0 ? -b : b;\n"
+        "    return aa > INT64_MAX / bb;\n"
+        "#endif\n"
         "}\n\n"
         "static xs_val xs_add(xs_val a, xs_val b) {\n"
         "    if (a.tag == 0 && b.tag == 0) {\n"
