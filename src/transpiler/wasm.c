@@ -10989,6 +10989,616 @@ static void wasm_rewrite_ns_method_calls(Node *n) {
     }
 }
 
+/* ---- Effect lowering -----------------------------------------------------
+
+   `effect Decl { fn op(...) }` is dropped: declarations are runtime
+   no-ops. `perform Eff.op(args)` becomes a call to a top-level mutable
+   global that holds the currently-installed handler fn pointer.
+   `handle X with Eff { fn op(s) { body } }` saves the previous handler,
+   installs the rewritten one, evaluates X under try/catch, and either
+   returns X's value (when every perform resumed) or the value the
+   handler short-circuited via throw. `resume(v)` inside a handler arm
+   rewrites to `__did_resume = true; __resume_val = v; v`. */
+
+#define MAX_EFF_ENTRIES 64
+typedef struct {
+    char *eff;     /* effect name */
+    char *op;      /* op name */
+    char *global_name; /* __h_<eff>_<op> top-level var */
+} EffOpEntry;
+static EffOpEntry g_eff_ops[MAX_EFF_ENTRIES];
+static int g_n_eff_ops = 0;
+static int g_eff_handler_seq = 0;
+
+static const char *wasm_eff_global_name(const char *eff, const char *op) {
+    for (int i = 0; i < g_n_eff_ops; i++) {
+        if (strcmp(g_eff_ops[i].eff, eff) == 0 &&
+            strcmp(g_eff_ops[i].op,  op)  == 0)
+            return g_eff_ops[i].global_name;
+    }
+    if (g_n_eff_ops >= MAX_EFF_ENTRIES) return NULL;
+    EffOpEntry *e = &g_eff_ops[g_n_eff_ops++];
+    e->eff = xs_strdup(eff);
+    e->op  = xs_strdup(op);
+    char buf[256];
+    snprintf(buf, sizeof(buf), "__h_%s_%s", eff, op);
+    e->global_name = xs_strdup(buf);
+    return e->global_name;
+}
+
+/* Walk subtree and rewrite every NODE_RESUME(v) into a block that sets
+   the resume markers and yields v as the expression value. */
+static void wasm_lower_resumes(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_RESUME: {
+        Node *val = n->resume_.value;
+        if (!val) val = mk_null_lit();
+        n->resume_.value = NULL;
+        /* Build a block:
+             __did_resume = true
+             __resume_val = val
+             val           (trailing expr; but we already used it. Re-evaluate.)
+           Easier: capture val in a local, set markers, return that local.
+           Even easier: assign markers and return null. The handler fn
+           ignores the returned value when __did_resume is true, so the
+           outer expression doesn't observe it. */
+        NodeList stmts = nodelist_new();
+        Node *a1 = node_new(NODE_ASSIGN, span_zero());
+        memcpy(a1->assign.op, "=", 2);
+        a1->assign.target = mk_ident("__did_resume");
+        Node *true_lit = node_new(NODE_LIT_BOOL, span_zero());
+        true_lit->lit_bool.bval = 1;
+        a1->assign.value = true_lit;
+        nodelist_push(&stmts, mk_expr_stmt(a1));
+
+        Node *a2 = node_new(NODE_ASSIGN, span_zero());
+        memcpy(a2->assign.op, "=", 2);
+        a2->assign.target = mk_ident("__resume_val");
+        a2->assign.value = val;
+        nodelist_push(&stmts, mk_expr_stmt(a2));
+
+        n->tag = NODE_BLOCK;
+        n->block.stmts = stmts;
+        n->block.expr = mk_null_lit();
+        n->block.has_decls = -1;
+        n->block.is_unsafe = 0;
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            wasm_lower_resumes(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_lower_resumes(n->block.stmts.items[i]);
+        wasm_lower_resumes(n->block.expr);
+        return;
+    case NODE_FN_DECL: wasm_lower_resumes(n->fn_decl.body); return;
+    case NODE_LAMBDA:  wasm_lower_resumes(n->lambda.body); return;
+    case NODE_IF:
+        wasm_lower_resumes(n->if_expr.cond);
+        wasm_lower_resumes(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            wasm_lower_resumes(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            wasm_lower_resumes(n->if_expr.elif_thens.items[i]);
+        wasm_lower_resumes(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE: wasm_lower_resumes(n->while_loop.cond); wasm_lower_resumes(n->while_loop.body); return;
+    case NODE_FOR:   wasm_lower_resumes(n->for_loop.iter); wasm_lower_resumes(n->for_loop.body); return;
+    case NODE_LOOP:  wasm_lower_resumes(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: wasm_lower_resumes(n->let.value); return;
+    case NODE_CONST: wasm_lower_resumes(n->const_.value); return;
+    case NODE_EXPR_STMT: wasm_lower_resumes(n->expr_stmt.expr); return;
+    case NODE_RETURN: wasm_lower_resumes(n->ret.value); return;
+    case NODE_ASSIGN: wasm_lower_resumes(n->assign.target); wasm_lower_resumes(n->assign.value); return;
+    case NODE_BINOP: wasm_lower_resumes(n->binop.left); wasm_lower_resumes(n->binop.right); return;
+    case NODE_UNARY: wasm_lower_resumes(n->unary.expr); return;
+    case NODE_CALL:
+        wasm_lower_resumes(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++) wasm_lower_resumes(n->call.args.items[i]);
+        return;
+    case NODE_METHOD_CALL:
+        wasm_lower_resumes(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            wasm_lower_resumes(n->method_call.args.items[i]);
+        return;
+    case NODE_INDEX: wasm_lower_resumes(n->index.obj); wasm_lower_resumes(n->index.index); return;
+    case NODE_FIELD: wasm_lower_resumes(n->field.obj); return;
+    case NODE_TRY:
+        wasm_lower_resumes(n->try_.body);
+        wasm_lower_resumes(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            wasm_lower_resumes(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_THROW: wasm_lower_resumes(n->throw_.value); return;
+    case NODE_MATCH:
+        wasm_lower_resumes(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            wasm_lower_resumes(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            wasm_lower_resumes(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            wasm_lower_resumes(n->lit_map.keys.items[i]);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            wasm_lower_resumes(n->lit_map.vals.items[i]);
+        return;
+    case NODE_RANGE:
+        wasm_lower_resumes(n->range.start); wasm_lower_resumes(n->range.end); return;
+    case NODE_DEFER: wasm_lower_resumes(n->defer_.body); return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            wasm_lower_resumes(n->lit_string.parts.items[i]);
+        return;
+    default: return;
+    }
+}
+
+/* Build the handler fn from a handler arm. The fn name is unique. The
+   body sets resume markers, runs the rewritten arm body, then either
+   returns the resumed value or throws an effect-abort marker map. */
+static Node *wasm_build_handler_fn(EffectArm *arm, const char *fn_name) {
+    /* Lower resumes inside the body first. */
+    if (arm->body) wasm_lower_resumes(arm->body);
+
+    /* Construct the fn body block:
+        __did_resume = false
+        __resume_val = null
+        let __body_val = ({ original body })
+        if __did_resume { return __resume_val }
+        throw #{"__eff_abort": true, "value": __body_val}
+    */
+    NodeList stmts = nodelist_new();
+
+    Node *a_set_dr = node_new(NODE_ASSIGN, span_zero());
+    memcpy(a_set_dr->assign.op, "=", 2);
+    a_set_dr->assign.target = mk_ident("__did_resume");
+    Node *false_lit = node_new(NODE_LIT_BOOL, span_zero());
+    false_lit->lit_bool.bval = 0;
+    a_set_dr->assign.value = false_lit;
+    nodelist_push(&stmts, mk_expr_stmt(a_set_dr));
+
+    Node *a_set_rv = node_new(NODE_ASSIGN, span_zero());
+    memcpy(a_set_rv->assign.op, "=", 2);
+    a_set_rv->assign.target = mk_ident("__resume_val");
+    a_set_rv->assign.value = mk_null_lit();
+    nodelist_push(&stmts, mk_expr_stmt(a_set_rv));
+
+    /* Wrap original body in a block expr so its trailing value is the
+       __body_val we capture. The arm->body is typically a NODE_BLOCK
+       already; wrap if not. */
+    Node *body_block = arm->body;
+    if (!body_block) body_block = mk_block(nodelist_new(), mk_null_lit());
+    if (VAL_TAG(body_block) != NODE_BLOCK) {
+        body_block = mk_block(nodelist_new(), body_block);
+    } else if (!body_block->block.expr && body_block->block.stmts.len > 0) {
+        /* Promote the last stmt's value if it's an expr_stmt. Otherwise
+           the block has type void and we'd discard the value. Simplest
+           approach: keep the block, set trailing expr to null. */
+        body_block->block.expr = mk_null_lit();
+    } else if (!body_block->block.expr) {
+        body_block->block.expr = mk_null_lit();
+    }
+
+    Node *let_body = mk_let("__body_val", body_block, 0);
+    nodelist_push(&stmts, let_body);
+
+    /* if __did_resume { return __resume_val } */
+    Node *if_node = node_new(NODE_IF, span_zero());
+    if_node->if_expr.cond = mk_ident("__did_resume");
+    Node *ret_node = node_new(NODE_RETURN, span_zero());
+    ret_node->ret.value = mk_ident("__resume_val");
+    NodeList then_stmts = nodelist_new();
+    nodelist_push(&then_stmts, mk_expr_stmt(ret_node));
+    if_node->if_expr.then = mk_block(then_stmts, NULL);
+    if_node->if_expr.elif_conds = nodelist_new();
+    if_node->if_expr.elif_thens = nodelist_new();
+    if_node->if_expr.else_branch = NULL;
+    nodelist_push(&stmts, mk_expr_stmt(if_node));
+
+    /* throw #{"__eff_abort": true, "value": __body_val} */
+    Node *throw_map = node_new(NODE_LIT_MAP, span_zero());
+    throw_map->lit_map.keys = nodelist_new();
+    throw_map->lit_map.vals = nodelist_new();
+    nodelist_push(&throw_map->lit_map.keys, mk_str_lit("__eff_abort"));
+    Node *true_lit2 = node_new(NODE_LIT_BOOL, span_zero());
+    true_lit2->lit_bool.bval = 1;
+    nodelist_push(&throw_map->lit_map.vals, true_lit2);
+    nodelist_push(&throw_map->lit_map.keys, mk_str_lit("value"));
+    nodelist_push(&throw_map->lit_map.vals, mk_ident("__body_val"));
+
+    Node *throw_node = node_new(NODE_THROW, span_zero());
+    throw_node->throw_.value = throw_map;
+    nodelist_push(&stmts, mk_expr_stmt(throw_node));
+
+    Node *fn_body = mk_block(stmts, mk_null_lit());
+
+    Node *fn = node_new(NODE_FN_DECL, span_zero());
+    fn->fn_decl.name = xs_strdup(fn_name);
+    fn->fn_decl.params = arm->params;
+    arm->params = paramlist_new(); /* steal */
+    fn->fn_decl.body = fn_body;
+    /* Clear out the stolen `body` so the eventual node_free of the
+       original handle doesn't double-free it. */
+    arm->body = NULL;
+    fn->fn_decl.is_pub = 0;
+    fn->fn_decl.is_async = 0;
+    fn->fn_decl.is_generator = 0;
+    fn->fn_decl.is_pure = 0;
+    fn->fn_decl.is_test = 0;
+    fn->fn_decl.is_static = 0;
+    fn->fn_decl.is_macro = 0;
+    fn->fn_decl.deprecated_msg = NULL;
+    fn->fn_decl.ret_type = NULL;
+    fn->fn_decl.type_params = NULL;
+    fn->fn_decl.type_bounds = NULL;
+    fn->fn_decl.type_param_variance = NULL;
+    fn->fn_decl.n_type_params = 0;
+    fn->fn_decl.decorators = NULL;
+    fn->fn_decl.n_decorators = 0;
+    return fn;
+}
+
+/* Build the rewritten `handle` expression from the original NODE_HANDLE.
+   Emits a trailing block whose value matches the handle semantics, plus
+   a list of new top-level fn-decls (the per-arm handler functions) which
+   the caller must splice into the program. Returns the rewritten
+   expression. */
+static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
+                                     Node ***out_extra_fns, int *out_n_extra) {
+    *out_extra_fns = NULL;
+    *out_n_extra = 0;
+
+    EffectArmList *arms = &handle->handle.arms;
+    int narms = arms->len;
+
+    /* For each arm: build a handler fn, register the global, and remember
+       its name so we can install it in the wrapper block. */
+    Node **extras = xs_malloc((size_t)narms * sizeof(Node *));
+    char **handler_names = xs_malloc((size_t)narms * sizeof(char *));
+    char **op_names      = xs_malloc((size_t)narms * sizeof(char *));
+    for (int i = 0; i < narms; i++) {
+        EffectArm *arm = &arms->items[i];
+        char fn_name[256];
+        snprintf(fn_name, sizeof(fn_name), "__h_%s_%s_%d",
+                 eff_name, arm->op_name ? arm->op_name : "op",
+                 g_eff_handler_seq++);
+        Node *fn = wasm_build_handler_fn(arm, fn_name);
+        extras[i] = fn;
+        handler_names[i] = xs_strdup(fn_name);
+        op_names[i] = xs_strdup(arm->op_name ? arm->op_name : "op");
+        /* Make sure the global var exists for this (eff, op). */
+        wasm_eff_global_name(eff_name, op_names[i]);
+    }
+    *out_extra_fns = extras;
+    *out_n_extra = narms;
+
+    /* Build the wrapper block:
+         {
+            let __h_<E>_<op>_prev_N = __h_<E>_<op>
+            ...
+            __h_<E>_<op> = <handler_fn_name>
+            ...
+            let __r_N = try { X } catch __e_N {
+                if type(__e_N) == "6" and __e_N["__eff_abort"] == true {
+                    __e_N["value"]
+                } else { throw __e_N }
+            }
+            __h_<E>_<op> = __h_<E>_<op>_prev_N
+            ...
+            __r_N
+         }
+    */
+    int seq = g_eff_handler_seq++;
+    NodeList stmts = nodelist_new();
+
+    /* Save previous handler ptrs. */
+    char prev_names[16][128];
+    for (int i = 0; i < narms && i < 16; i++) {
+        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        snprintf(prev_names[i], sizeof(prev_names[i]), "__h_prev_%d_%d", seq, i);
+        nodelist_push(&stmts, mk_let(prev_names[i], mk_ident(gname), 0));
+    }
+    /* Install the new handlers. */
+    for (int i = 0; i < narms && i < 16; i++) {
+        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        Node *a = node_new(NODE_ASSIGN, span_zero());
+        memcpy(a->assign.op, "=", 2);
+        a->assign.target = mk_ident(gname);
+        a->assign.value = mk_ident(handler_names[i]);
+        nodelist_push(&stmts, mk_expr_stmt(a));
+    }
+
+    /* Build try { X } catch __e_seq { if isabort(__e_seq) e["value"] else throw __e_seq } */
+    char e_var[64];  snprintf(e_var, sizeof(e_var), "__e_%d", seq);
+    char r_var[64];  snprintf(r_var, sizeof(r_var), "__r_%d", seq);
+
+    /* if-cond: type(__e_N) == "6" and __e_N["__eff_abort"] == true */
+    Node *type_call = node_new(NODE_CALL, span_zero());
+    type_call->call.callee = mk_ident("type");
+    type_call->call.args = nodelist_new();
+    type_call->call.kwargs = nodepairlist_new();
+    nodelist_push(&type_call->call.args, mk_ident(e_var));
+
+    Node *type_eq = node_new(NODE_BINOP, span_zero());
+    memcpy(type_eq->binop.op, "==", 3);
+    type_eq->binop.left = type_call;
+    type_eq->binop.right = mk_str_lit("6");
+
+    Node *idx = node_new(NODE_INDEX, span_zero());
+    idx->index.obj = mk_ident(e_var);
+    idx->index.index = mk_str_lit("__eff_abort");
+    Node *abort_eq = node_new(NODE_BINOP, span_zero());
+    memcpy(abort_eq->binop.op, "==", 3);
+    abort_eq->binop.left = idx;
+    Node *true_lit3 = node_new(NODE_LIT_BOOL, span_zero());
+    true_lit3->lit_bool.bval = 1;
+    abort_eq->binop.right = true_lit3;
+
+    Node *cond = node_new(NODE_BINOP, span_zero());
+    memcpy(cond->binop.op, "and", 4);
+    cond->binop.left = type_eq;
+    cond->binop.right = abort_eq;
+
+    /* then-branch: e["value"] */
+    Node *then_idx = node_new(NODE_INDEX, span_zero());
+    then_idx->index.obj = mk_ident(e_var);
+    then_idx->index.index = mk_str_lit("value");
+    Node *then_blk = mk_block(nodelist_new(), then_idx);
+
+    /* else-branch: throw __e_N */
+    Node *re_throw = node_new(NODE_THROW, span_zero());
+    re_throw->throw_.value = mk_ident(e_var);
+    NodeList else_stmts = nodelist_new();
+    nodelist_push(&else_stmts, mk_expr_stmt(re_throw));
+    Node *else_blk = mk_block(else_stmts, mk_null_lit());
+
+    Node *catch_if = node_new(NODE_IF, span_zero());
+    catch_if->if_expr.cond = cond;
+    catch_if->if_expr.then = then_blk;
+    catch_if->if_expr.elif_conds = nodelist_new();
+    catch_if->if_expr.elif_thens = nodelist_new();
+    catch_if->if_expr.else_branch = else_blk;
+
+    Node *catch_body = mk_block(nodelist_new(), catch_if);
+
+    /* Assemble try */
+    Node *try_node = node_new(NODE_TRY, span_zero());
+    /* Wrap X in a block if needed. */
+    Node *try_body = handle->handle.expr;
+    if (!try_body) try_body = mk_null_lit();
+    if (VAL_TAG(try_body) != NODE_BLOCK) {
+        try_body = mk_block(nodelist_new(), try_body);
+    }
+    try_node->try_.body = try_body;
+    /* steal */
+    handle->handle.expr = NULL;
+    try_node->try_.catch_arms = matcharmlist_new();
+    MatchArm ma = {0};
+    Node *pat = node_new(NODE_PAT_IDENT, span_zero());
+    pat->pat_ident.name = xs_strdup(e_var);
+    pat->pat_ident.mutable = 0;
+    ma.pattern = pat;
+    ma.guard = NULL;
+    ma.body = catch_body;
+    matcharmlist_push(&try_node->try_.catch_arms, ma);
+    try_node->try_.finally_block = NULL;
+
+    nodelist_push(&stmts, mk_let(r_var, try_node, 0));
+
+    /* Restore previous handlers. */
+    for (int i = 0; i < narms && i < 16; i++) {
+        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        Node *a = node_new(NODE_ASSIGN, span_zero());
+        memcpy(a->assign.op, "=", 2);
+        a->assign.target = mk_ident(gname);
+        a->assign.value = mk_ident(prev_names[i]);
+        nodelist_push(&stmts, mk_expr_stmt(a));
+    }
+
+    Node *result_expr = mk_ident(r_var);
+    Node *outer = mk_block(stmts, result_expr);
+    /* Cleanup. */
+    for (int i = 0; i < narms; i++) {
+        free(handler_names[i]);
+        free(op_names[i]);
+    }
+    free(handler_names); free(op_names);
+    return outer;
+}
+
+/* AST walker: replace every NODE_PERFORM in subtree with a CALL to the
+   global handler ptr. */
+static void wasm_lower_performs(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_PERFORM: {
+        const char *eff = n->perform.effect_name;
+        const char *op  = n->perform.op_name;
+        const char *gname = wasm_eff_global_name(eff ? eff : "?", op ? op : "?");
+        NodeList args = n->perform.args;
+        n->perform.args = nodelist_new();
+        n->tag = NODE_CALL;
+        n->call.callee = mk_ident(gname);
+        n->call.args = args;
+        n->call.kwargs = nodepairlist_new();
+        for (int i = 0; i < n->call.args.len; i++)
+            wasm_lower_performs(n->call.args.items[i]);
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            wasm_lower_performs(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_lower_performs(n->block.stmts.items[i]);
+        wasm_lower_performs(n->block.expr);
+        return;
+    case NODE_FN_DECL: wasm_lower_performs(n->fn_decl.body); return;
+    case NODE_LAMBDA:  wasm_lower_performs(n->lambda.body); return;
+    case NODE_IF:
+        wasm_lower_performs(n->if_expr.cond);
+        wasm_lower_performs(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            wasm_lower_performs(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            wasm_lower_performs(n->if_expr.elif_thens.items[i]);
+        wasm_lower_performs(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE: wasm_lower_performs(n->while_loop.cond); wasm_lower_performs(n->while_loop.body); return;
+    case NODE_FOR:   wasm_lower_performs(n->for_loop.iter); wasm_lower_performs(n->for_loop.body); return;
+    case NODE_LOOP:  wasm_lower_performs(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: wasm_lower_performs(n->let.value); return;
+    case NODE_CONST: wasm_lower_performs(n->const_.value); return;
+    case NODE_EXPR_STMT: wasm_lower_performs(n->expr_stmt.expr); return;
+    case NODE_RETURN: wasm_lower_performs(n->ret.value); return;
+    case NODE_ASSIGN: wasm_lower_performs(n->assign.target); wasm_lower_performs(n->assign.value); return;
+    case NODE_BINOP: wasm_lower_performs(n->binop.left); wasm_lower_performs(n->binop.right); return;
+    case NODE_UNARY: wasm_lower_performs(n->unary.expr); return;
+    case NODE_CALL:
+        wasm_lower_performs(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++) wasm_lower_performs(n->call.args.items[i]);
+        return;
+    case NODE_METHOD_CALL:
+        wasm_lower_performs(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            wasm_lower_performs(n->method_call.args.items[i]);
+        return;
+    case NODE_INDEX: wasm_lower_performs(n->index.obj); wasm_lower_performs(n->index.index); return;
+    case NODE_FIELD: wasm_lower_performs(n->field.obj); return;
+    case NODE_TRY:
+        wasm_lower_performs(n->try_.body);
+        wasm_lower_performs(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            wasm_lower_performs(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_THROW: wasm_lower_performs(n->throw_.value); return;
+    case NODE_MATCH:
+        wasm_lower_performs(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            wasm_lower_performs(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            wasm_lower_performs(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            wasm_lower_performs(n->lit_map.keys.items[i]);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            wasm_lower_performs(n->lit_map.vals.items[i]);
+        return;
+    case NODE_RANGE:
+        wasm_lower_performs(n->range.start); wasm_lower_performs(n->range.end); return;
+    case NODE_DEFER: wasm_lower_performs(n->defer_.body); return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            wasm_lower_performs(n->lit_string.parts.items[i]);
+        return;
+    default: return;
+    }
+}
+
+/* Walk the program top-down: when a NODE_HANDLE is encountered, build
+   the rewritten block and the per-arm handler fns. The fns are queued
+   to be appended at top level; the rewritten block replaces the
+   original NODE_HANDLE in place. */
+static void wasm_lower_handles_collect(Node *n, Node ***fns, int *n_fns, int *cap) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_HANDLE: {
+        Node **extra = NULL;
+        int n_extra = 0;
+        const char *eff = n->handle.arms.len > 0 && n->handle.arms.items[0].effect_name
+                            ? n->handle.arms.items[0].effect_name : "Eff";
+        Node *replacement = wasm_build_handle_block(n, eff, &extra, &n_extra);
+        /* Splice extras into queue. */
+        for (int i = 0; i < n_extra; i++) {
+            if (*n_fns >= *cap) {
+                *cap = (*cap) ? (*cap) * 2 : 8;
+                *fns = xs_realloc(*fns, (size_t)(*cap) * sizeof(Node *));
+            }
+            (*fns)[(*n_fns)++] = extra[i];
+        }
+        free(extra);
+        /* Replace n in place by copying replacement's contents. */
+        Node tmp = *replacement;
+        *replacement = *n;
+        *n = tmp;
+        node_free(replacement);
+        /* Recurse into the now-rewritten subtree (e.g. body of try). */
+        wasm_lower_handles_collect(n, fns, n_fns, cap);
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            wasm_lower_handles_collect(n->program.stmts.items[i], fns, n_fns, cap);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_lower_handles_collect(n->block.stmts.items[i], fns, n_fns, cap);
+        wasm_lower_handles_collect(n->block.expr, fns, n_fns, cap);
+        return;
+    case NODE_FN_DECL: wasm_lower_handles_collect(n->fn_decl.body, fns, n_fns, cap); return;
+    case NODE_LAMBDA:  wasm_lower_handles_collect(n->lambda.body, fns, n_fns, cap); return;
+    case NODE_IF:
+        wasm_lower_handles_collect(n->if_expr.cond, fns, n_fns, cap);
+        wasm_lower_handles_collect(n->if_expr.then, fns, n_fns, cap);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            wasm_lower_handles_collect(n->if_expr.elif_conds.items[i], fns, n_fns, cap);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            wasm_lower_handles_collect(n->if_expr.elif_thens.items[i], fns, n_fns, cap);
+        wasm_lower_handles_collect(n->if_expr.else_branch, fns, n_fns, cap);
+        return;
+    case NODE_WHILE:
+        wasm_lower_handles_collect(n->while_loop.cond, fns, n_fns, cap);
+        wasm_lower_handles_collect(n->while_loop.body, fns, n_fns, cap);
+        return;
+    case NODE_FOR:
+        wasm_lower_handles_collect(n->for_loop.iter, fns, n_fns, cap);
+        wasm_lower_handles_collect(n->for_loop.body, fns, n_fns, cap);
+        return;
+    case NODE_LOOP:  wasm_lower_handles_collect(n->loop.body, fns, n_fns, cap); return;
+    case NODE_LET: case NODE_VAR: wasm_lower_handles_collect(n->let.value, fns, n_fns, cap); return;
+    case NODE_CONST: wasm_lower_handles_collect(n->const_.value, fns, n_fns, cap); return;
+    case NODE_EXPR_STMT: wasm_lower_handles_collect(n->expr_stmt.expr, fns, n_fns, cap); return;
+    case NODE_RETURN: wasm_lower_handles_collect(n->ret.value, fns, n_fns, cap); return;
+    case NODE_ASSIGN: wasm_lower_handles_collect(n->assign.target, fns, n_fns, cap); wasm_lower_handles_collect(n->assign.value, fns, n_fns, cap); return;
+    case NODE_BINOP: wasm_lower_handles_collect(n->binop.left, fns, n_fns, cap); wasm_lower_handles_collect(n->binop.right, fns, n_fns, cap); return;
+    case NODE_UNARY: wasm_lower_handles_collect(n->unary.expr, fns, n_fns, cap); return;
+    case NODE_CALL:
+        wasm_lower_handles_collect(n->call.callee, fns, n_fns, cap);
+        for (int i = 0; i < n->call.args.len; i++) wasm_lower_handles_collect(n->call.args.items[i], fns, n_fns, cap);
+        return;
+    case NODE_METHOD_CALL:
+        wasm_lower_handles_collect(n->method_call.obj, fns, n_fns, cap);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            wasm_lower_handles_collect(n->method_call.args.items[i], fns, n_fns, cap);
+        return;
+    case NODE_INDEX: wasm_lower_handles_collect(n->index.obj, fns, n_fns, cap); wasm_lower_handles_collect(n->index.index, fns, n_fns, cap); return;
+    case NODE_FIELD: wasm_lower_handles_collect(n->field.obj, fns, n_fns, cap); return;
+    case NODE_TRY:
+        wasm_lower_handles_collect(n->try_.body, fns, n_fns, cap);
+        wasm_lower_handles_collect(n->try_.finally_block, fns, n_fns, cap);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            wasm_lower_handles_collect(n->try_.catch_arms.items[i].body, fns, n_fns, cap);
+        return;
+    case NODE_THROW: wasm_lower_handles_collect(n->throw_.value, fns, n_fns, cap); return;
+    case NODE_MATCH:
+        wasm_lower_handles_collect(n->match.subject, fns, n_fns, cap);
+        for (int i = 0; i < n->match.arms.len; i++)
+            wasm_lower_handles_collect(n->match.arms.items[i].body, fns, n_fns, cap);
+        return;
+    default: return;
+    }
+}
+
 /* ---- Generator lowering --------------------------------------------------
 
    `fn* foo(...) { body-with-yields }` is rewritten to a regular fn that
@@ -11465,6 +12075,13 @@ static void wasm_lower_program(Node *program, const char *src_filename) {
     g_wasm_json_helpers_added = 0;
     for (int i = 0; i < g_n_wasm_ns_names; i++) free(g_wasm_ns_names[i]);
     g_n_wasm_ns_names = 0;
+    for (int i = 0; i < g_n_eff_ops; i++) {
+        free(g_eff_ops[i].eff);
+        free(g_eff_ops[i].op);
+        free(g_eff_ops[i].global_name);
+    }
+    g_n_eff_ops = 0;
+    g_eff_handler_seq = 0;
 
     g_wasm_src_dir[0] = '\0';
     if (src_filename) {
@@ -11587,6 +12204,43 @@ static void wasm_lower_program(Node *program, const char *src_filename) {
        rewritten consistently. */
     if (g_n_wasm_ns_names > 0) wasm_rewrite_ns_method_calls(program);
 
+    /* Effect lowering: handle X with E { fn op(s) {...} } becomes a
+       try/catch around X with the per-arm handler installed in a global
+       slot. perform E.op(args) becomes a call to that global. resume(v)
+       inside an arm sets the resume markers; if the arm never resumes
+       it throws an effect-abort marker the wrapper catches. */
+    {
+        Node **eff_fns = NULL;
+        int n_eff_fns = 0, eff_cap = 0;
+        wasm_lower_handles_collect(program, &eff_fns, &n_eff_fns, &eff_cap);
+        wasm_lower_performs(program);
+        if (g_n_eff_ops > 0 || n_eff_fns > 0) {
+            /* Splice global var declarations + handler fns at the head
+               of the program. The vars live as top-level vars so they
+               get assigned global slots like any other top-level binding. */
+            NodeList combined = nodelist_new();
+            /* var __did_resume = false / __resume_val = null */
+            Node *false_lit = node_new(NODE_LIT_BOOL, span_zero());
+            false_lit->lit_bool.bval = 0;
+            nodelist_push(&combined, mk_let("__did_resume", false_lit, 1));
+            nodelist_push(&combined, mk_let("__resume_val", mk_null_lit(), 1));
+            /* var __h_<eff>_<op> = null per registered op */
+            for (int i = 0; i < g_n_eff_ops; i++) {
+                nodelist_push(&combined, mk_let(g_eff_ops[i].global_name,
+                                                mk_null_lit(), 1));
+            }
+            /* Then the handler fn-decls. */
+            for (int i = 0; i < n_eff_fns; i++)
+                nodelist_push(&combined, eff_fns[i]);
+            /* Then the original program statements. */
+            for (int i = 0; i < program->program.stmts.len; i++)
+                nodelist_push(&combined, program->program.stmts.items[i]);
+            free(program->program.stmts.items);
+            program->program.stmts = combined;
+        }
+        free(eff_fns);
+    }
+
     /* Generator lowering: convert every `fn*` into a regular fn that
        eagerly fills an items array and returns a generator value, inject
        the helpers, wrap every for-in iter in __gen_iter so we drive
@@ -11647,10 +12301,10 @@ static const char *find_unsupported_for_wasm(Node *n) {
     case NODE_SPAWN:        return NULL; /* lowered: spawn x -> x */
     case NODE_NURSERY:      return NULL; /* lowered: nursery {b} -> b */
     case NODE_SEND_EXPR:    return "channel sends";
-    case NODE_PERFORM:      return "algebraic effects (perform/handle)";
-    case NODE_HANDLE:       return "algebraic effects (perform/handle)";
-    case NODE_EFFECT_DECL:  return "algebraic effects (perform/handle)";
-    case NODE_RESUME:       return "algebraic effects (perform/handle)";
+    case NODE_PERFORM:      return NULL; /* lowered to handler call */
+    case NODE_HANDLE:       return NULL; /* lowered in place */
+    case NODE_EFFECT_DECL:  return NULL; /* dropped */
+    case NODE_RESUME:       return NULL; /* lowered to assignments */
     case NODE_BIND:         return "reactive `bind` declarations";
     case NODE_YIELD:        return NULL; /* lowered to __gen_buf.push */
     case NODE_USE:          return NULL; /* lowered before this check */
