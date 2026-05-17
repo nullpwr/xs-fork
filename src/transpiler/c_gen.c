@@ -3055,10 +3055,79 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "})");
         break;
     }
+    case NODE_TRY: {
+        /* expression-position try: yields the body's trailing value on
+         * normal completion, or the matching catch arm's value on
+         * throw. Built around setjmp so the runtime can longjmp out of
+         * arbitrary depth. */
+        int tid = defer_label_counter++;
+        sb_printf(s, "({ jmp_buf __try_jmp_%d; xs_val __try_r_%d = XS_NULL; "
+                     "if (setjmp(__try_jmp_%d) == 0) { xs_push_handler(&__try_jmp_%d);\n",
+                  tid, tid, tid, tid);
+        if (n->try_.body && VAL_TAG(n->try_.body) == NODE_BLOCK) {
+            for (int i = 0; i < n->try_.body->block.stmts.len; i++)
+                emit_stmt(s, n->try_.body->block.stmts.items[i], depth + 1);
+            sb_indent(s, depth + 1);
+            sb_printf(s, "__try_r_%d = ", tid);
+            if (n->try_.body->block.expr)
+                emit_expr(s, n->try_.body->block.expr, depth + 1);
+            else
+                sb_add(s, "XS_NULL");
+            sb_add(s, ";\n");
+        } else if (n->try_.body) {
+            sb_indent(s, depth + 1);
+            sb_printf(s, "__try_r_%d = ", tid);
+            emit_expr(s, n->try_.body, depth + 1);
+            sb_add(s, ";\n");
+        }
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_pop_handler();\n");
+        sb_indent(s, depth);
+        sb_add(s, "} else {\n");
+        sb_indent(s, depth + 1);
+        sb_printf(s, "xs_val __try_exc_%d = xs_get_exception();\n", tid);
+        for (int i = 0; i < n->try_.catch_arms.len; i++) {
+            MatchArm *arm = &n->try_.catch_arms.items[i];
+            char ebuf[64];
+            snprintf(ebuf, sizeof ebuf, "__try_exc_%d", tid);
+            if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_IDENT) {
+                /* simple binder, always matches */
+                sb_indent(s, depth + 1);
+                sb_printf(s, "xs_val %s = %s;\n",
+                          arm->pattern->pat_ident.name, ebuf);
+            } else if (arm->pattern && VAL_TAG(arm->pattern) == NODE_PAT_WILD) {
+                /* no binding */
+            } else {
+                emit_pattern_bindings(s, arm->pattern, ebuf, depth + 1);
+            }
+            sb_indent(s, depth + 1);
+            sb_printf(s, "__try_r_%d = ", tid);
+            if (arm->body && VAL_TAG(arm->body) == NODE_BLOCK) {
+                /* statement-expression for block bodies */
+                sb_add(s, "({ ");
+                for (int j = 0; j < arm->body->block.stmts.len; j++)
+                    emit_stmt(s, arm->body->block.stmts.items[j], depth + 2);
+                if (arm->body->block.expr) {
+                    emit_expr(s, arm->body->block.expr, depth + 2);
+                    sb_add(s, "; })");
+                } else {
+                    sb_add(s, "XS_NULL; })");
+                }
+            } else if (arm->body) {
+                emit_expr(s, arm->body, depth + 1);
+            } else {
+                sb_add(s, "XS_NULL");
+            }
+            sb_add(s, ";\n");
+            break; /* only first matching arm; richer match TBD */
+        }
+        sb_indent(s, depth);
+        sb_printf(s, "} __try_r_%d; })", tid);
+        break;
+    }
     case NODE_WHILE:
     case NODE_FOR:
     case NODE_LOOP:
-    case NODE_TRY:
     case NODE_NURSERY:
     case NODE_DEFER:
     case NODE_BREAK:
@@ -3598,31 +3667,33 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
                 int has_defer = block_has_defers(n->fn_decl.body);
                 if (has_defer) {
-                    sb_indent(s, depth + 1);
-                    sb_add(s, "xs_val __retval = XS_NULL;\n");
-                    /* emit non-defer statements */
+                    /* Emit statements in source order so each `defer ...`
+                     * registers its cleanup at the right point in time.
+                     * If we hoist defers to a __cleanup: label they
+                     * never run on throw -- xs_throw walks the defer
+                     * stack and finds nothing registered. */
                     for (int i = 0; i < n->fn_decl.body->block.stmts.len; i++) {
-                        Node *st = n->fn_decl.body->block.stmts.items[i];
-                        if (st && VAL_TAG(st) != NODE_DEFER)
-                            emit_stmt(s, st, depth + 1);
+                        emit_stmt(s, n->fn_decl.body->block.stmts.items[i], depth + 1);
                     }
                     if (n->fn_decl.body->block.expr) {
                         sb_indent(s, depth + 1);
-                        sb_add(s, "__retval = ");
+                        sb_add(s, "xs_val __retval = ");
                         emit_expr(s, n->fn_decl.body->block.expr, depth + 1);
                         sb_add(s, ";\n");
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "xs_run_defers(__saved_defer_top);\n");
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "xs_pop_frame();\n");
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "return __retval;\n");
+                    } else {
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "xs_run_defers(__saved_defer_top);\n");
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "xs_pop_frame();\n");
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "return XS_NULL;\n");
                     }
-                    sb_indent(s, depth + 1);
-                    sb_add(s, "goto __cleanup;\n");
-                    sb_indent(s, depth);
-                    sb_add(s, "__cleanup:\n");
-                    emit_deferred_cleanup(s, n->fn_decl.body, depth + 1);
-                    sb_indent(s, depth + 1);
-                    sb_add(s, "xs_run_defers(__saved_defer_top);\n");
-                    sb_indent(s, depth + 1);
-                    sb_add(s, "xs_pop_frame();\n");
-                    sb_indent(s, depth + 1);
-                    sb_add(s, "return __retval;\n");
                 } else {
                     /* emit stmts */
                     for (int bi = 0; bi < n->fn_decl.body->block.stmts.len; bi++)
@@ -3719,15 +3790,25 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         n_deleted_vars = __saved_n_deleted; /* unwind del scope on fn exit */
         break;
     }
-    case NODE_RETURN:
+    case NODE_RETURN: {
+        /* Capture the return expression first, then unwind defers and
+         * pop the call frame. The captured xs_val is on the C stack
+         * and survives the unwind. */
         sb_indent(s, depth);
-        sb_add(s, "return ");
-        if (n->ret.value)
-            emit_expr(s, n->ret.value, depth);
-        else
-            sb_add(s, "XS_NULL");
+        sb_add(s, "{ xs_val __ret_v = ");
+        if (n->ret.value) emit_expr(s, n->ret.value, depth);
+        else              sb_add(s, "XS_NULL");
         sb_add(s, ";\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_run_defers(__saved_defer_top);\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_pop_frame();\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "return __ret_v;\n");
+        sb_indent(s, depth);
+        sb_add(s, "}\n");
         break;
+    }
     case NODE_BREAK:
         sb_indent(s, depth);
         sb_add(s, "break;\n");
@@ -7676,24 +7757,38 @@ char *transpile_c(Node *program, const char *filename) {
             sb_printf(&s, "    xs_val %s = __argc > %d ? __args[%d] : (xs_val){.tag=4};\n",
                       pname ? pname : "_", p, p);
         }
+        /* save defer top so any inner `return` (which now unwinds
+         * defers + pops a frame) finds the symbols it needs. */
+        sb_printf(&s, "    int __saved_defer_top = __xs_defer_top;\n");
+        sb_printf(&s, "    xs_push_frame(\"<lambda>\");\n");
         /* set current_lambda so NODE_IDENT emits capture access */
         current_lambda = &lambdas[li];
         if (ln->lambda.body && VAL_TAG(ln->lambda.body) == NODE_BLOCK) {
             for (int si = 0; si < ln->lambda.body->block.stmts.len; si++)
                 emit_stmt(&s, ln->lambda.body->block.stmts.items[si], 1);
             if (ln->lambda.body->block.expr) {
-                sb_add(&s, "    return ");
+                sb_add(&s, "    { xs_val __ret_v = ");
                 emit_expr(&s, ln->lambda.body->block.expr, 1);
-                sb_add(&s, ";\n");
+                sb_add(&s, ";\n"
+                           "      xs_run_defers(__saved_defer_top);\n"
+                           "      xs_pop_frame();\n"
+                           "      return __ret_v; }\n");
             } else {
-                sb_add(&s, "    return (xs_val){.tag=4};\n");
+                sb_add(&s, "    xs_run_defers(__saved_defer_top);\n"
+                           "    xs_pop_frame();\n"
+                           "    return (xs_val){.tag=4};\n");
             }
         } else if (ln->lambda.body) {
-            sb_add(&s, "    return ");
+            sb_add(&s, "    { xs_val __ret_v = ");
             emit_expr(&s, ln->lambda.body, 1);
-            sb_add(&s, ";\n");
+            sb_add(&s, ";\n"
+                       "      xs_run_defers(__saved_defer_top);\n"
+                       "      xs_pop_frame();\n"
+                       "      return __ret_v; }\n");
         } else {
-            sb_add(&s, "    return (xs_val){.tag=4};\n");
+            sb_add(&s, "    xs_run_defers(__saved_defer_top);\n"
+                       "    xs_pop_frame();\n"
+                       "    return (xs_val){.tag=4};\n");
         }
         current_lambda = NULL;
         sb_add(&s, "}\n\n");
