@@ -381,8 +381,47 @@ static int class_has_init(const char *name) {
 
 /* struct impl tracking (like actor tracking) */
 #define MAX_IMPL_TYPES 32
-static struct { const char *type_name; } impl_types[MAX_IMPL_TYPES];
+#define MAX_IMPL_METHODS 32
+static struct {
+    const char *type_name;
+    const char *methods[MAX_IMPL_METHODS];
+    int n_methods;
+} impl_types[MAX_IMPL_TYPES];
 static int n_impl_types = 0;
+
+static void impl_record_method(const char *type_name, const char *method) {
+    if (!type_name || !method) return;
+    for (int i = 0; i < n_impl_types; i++) {
+        if (strcmp(impl_types[i].type_name, type_name) == 0) {
+            for (int j = 0; j < impl_types[i].n_methods; j++)
+                if (impl_types[i].methods[j] &&
+                    strcmp(impl_types[i].methods[j], method) == 0) return;
+            if (impl_types[i].n_methods < MAX_IMPL_METHODS)
+                impl_types[i].methods[impl_types[i].n_methods++] = method;
+            return;
+        }
+    }
+}
+static int impl_type_has_method(const char *type_name, const char *method) {
+    if (!type_name || !method) return 0;
+    for (int i = 0; i < n_impl_types; i++) {
+        if (strcmp(impl_types[i].type_name, type_name) == 0) {
+            for (int j = 0; j < impl_types[i].n_methods; j++)
+                if (impl_types[i].methods[j] &&
+                    strcmp(impl_types[i].methods[j], method) == 0) return 1;
+            return 0;
+        }
+    }
+    return 0;
+}
+static int impl_method_in_any_impl(const char *method) {
+    if (!method) return 0;
+    for (int i = 0; i < n_impl_types; i++)
+        for (int j = 0; j < impl_types[i].n_methods; j++)
+            if (impl_types[i].methods[j] &&
+                strcmp(impl_types[i].methods[j], method) == 0) return 1;
+    return 0;
+}
 #define MAX_STRUCT_VARS 64
 static struct { const char *var_name; const char *type_name; } struct_vars[MAX_STRUCT_VARS];
 static int n_struct_vars = 0;
@@ -798,8 +837,14 @@ static void prescan_stmts(Node *program) {
             }
         }
         /* register impl declarations */
-        if (VAL_TAG(st) == NODE_IMPL_DECL && st->impl_decl.type_name)
+        if (VAL_TAG(st) == NODE_IMPL_DECL && st->impl_decl.type_name) {
             register_impl_type(st->impl_decl.type_name);
+            for (int j = 0; j < st->impl_decl.members.len; j++) {
+                Node *m = st->impl_decl.members.items[j];
+                if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.name)
+                    impl_record_method(st->impl_decl.type_name, m->fn_decl.name);
+            }
+        }
         /* register class declarations */
         if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name) {
             int has_init = 0;
@@ -2276,6 +2321,42 @@ static void emit_expr(SB *s, Node *n, int depth) {
                     emit_expr(s, n->method_call.args.items[i], depth);
                 }
                 sb_addc(s, ')');
+            } else if (n_impl_types > 1 && impl_method_in_any_impl(meth)) {
+                /* heterogeneous receiver: route through runtime dispatch
+                 * that reads the __type__ tag set at struct init. */
+                int mid = defer_label_counter++;
+                sb_printf(s, "({ xs_val __mr_obj_%d = ", mid);
+                emit_expr(s, n->method_call.obj, depth);
+                sb_printf(s, "; xs_val __mr_arg_%d[%d];\n", mid,
+                          n->method_call.args.len > 0 ? n->method_call.args.len : 1);
+                for (int i = 0; i < n->method_call.args.len; i++) {
+                    sb_indent(s, depth+1);
+                    sb_printf(s, "__mr_arg_%d[%d] = ", mid, i);
+                    emit_expr(s, n->method_call.args.items[i], depth);
+                    sb_add(s, ";\n");
+                }
+                sb_indent(s, depth+1);
+                sb_printf(s, "xs_val __mr_t_%d = (__mr_obj_%d.tag == 6) ? xs_index(__mr_obj_%d, XS_STR(\"__type__\")) : XS_NULL;\n",
+                          mid, mid, mid);
+                sb_indent(s, depth+1);
+                sb_printf(s, "xs_val __mr_r_%d = XS_NULL;\n", mid);
+                int first_branch = 1;
+                for (int t = 0; t < n_impl_types; t++) {
+                    if (!impl_type_has_method(impl_types[t].type_name, meth)) continue;
+                    sb_indent(s, depth+1);
+                    sb_printf(s, "%sif (__mr_t_%d.tag == 2 && __mr_t_%d.s && strcmp(__mr_t_%d.s, \"%s\") == 0) {\n",
+                              first_branch ? "" : "else ", mid, mid, mid, impl_types[t].type_name);
+                    sb_indent(s, depth+2);
+                    sb_printf(s, "__mr_r_%d = %s_%s(__mr_obj_%d", mid, impl_types[t].type_name, meth, mid);
+                    for (int i = 0; i < n->method_call.args.len; i++)
+                        sb_printf(s, ", __mr_arg_%d[%d]", mid, i);
+                    sb_add(s, ");\n");
+                    sb_indent(s, depth+1);
+                    sb_add(s, "}\n");
+                    first_branch = 0;
+                }
+                sb_indent(s, depth);
+                sb_printf(s, "__mr_r_%d; })", mid);
             } else {
                 /* generic: function-style call */
                 sb_add(s, meth);
@@ -2488,8 +2569,14 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_indent(s, depth);
             sb_printf(s, "__sr_%d; })", sid);
         } else {
-            /* emit struct init as map */
-            sb_printf(s, "xs_map(%d", n->struct_init.fields.len);
+            /* emit struct init as map; tag with __type__ so heterogeneous
+             * method dispatch (`s.area()` over a [Circle, Square]) can
+             * route to the right `Type_method` at runtime. */
+            const char *tname = n->struct_init.path ? n->struct_init.path : "";
+            int extra = (tname && tname[0]) ? 1 : 0;
+            sb_printf(s, "xs_map(%d", n->struct_init.fields.len + extra);
+            if (extra)
+                sb_printf(s, ", XS_STR(\"__type__\"), XS_STR(\"%s\")", tname);
             for (int i = 0; i < n->struct_init.fields.len; i++) {
                 sb_printf(s, ", XS_STR(\"%s\"), ", n->struct_init.fields.items[i].key);
                 emit_expr(s, n->struct_init.fields.items[i].val, depth);
@@ -4634,6 +4721,285 @@ static Node *c_lower_node(Node *n) {
     }
 }
 
+/* ---- Trait default-method copy ---------------------------------------- */
+
+/* Walk the program once to inherit trait default-method bodies. For
+ * every `impl Trait for Type { ... }` that's missing one of the
+ * trait's methods that has a body, splice a deep-copied version of the
+ * default into the impl's members. The codegen then treats it like any
+ * other impl method (`Type_method`). */
+
+/* Shallow alias copy via the parser. We re-emit the body to source and
+ * re-parse it -- robust against AST shape variations and ownership
+ * concerns. The trait body is small so the cost is negligible. */
+static Node *c_clone_node(Node *src);
+
+static NodeList c_clone_nodelist(NodeList src) {
+    NodeList r = nodelist_new();
+    if (!src.items) return r;
+    for (int i = 0; i < src.len; i++)
+        nodelist_push(&r, c_clone_node(src.items[i]));
+    return r;
+}
+static NodePairList c_clone_nodepairlist(NodePairList src) {
+    NodePairList r = nodepairlist_new();
+    for (int i = 0; i < src.len; i++)
+        nodepairlist_push(&r, src.items[i].key, c_clone_node(src.items[i].val));
+    return r;
+}
+static ParamList c_clone_paramlist(ParamList src) {
+    ParamList r = paramlist_new();
+    for (int i = 0; i < src.len; i++) {
+        Param p = src.items[i];
+        Param np = (Param){0};
+        np.name = p.name ? xs_strdup(p.name) : NULL;
+        np.pattern = c_clone_node(p.pattern);
+        np.default_val = c_clone_node(p.default_val);
+        np.variadic = p.variadic;
+        np.keyword_only = p.keyword_only;
+        np.type_ann = NULL;     /* type info is for sema, not codegen */
+        np.contract = NULL;
+        np.span = p.span;
+        paramlist_push(&r, np);
+    }
+    return r;
+}
+
+static Node *c_clone_node(Node *src) {
+    if (!src) return NULL;
+    Node *n = node_new(VAL_TAG(src), src->span);
+    switch (VAL_TAG(src)) {
+    case NODE_IDENT:
+        n->ident.name = src->ident.name ? xs_strdup(src->ident.name) : NULL;
+        break;
+    case NODE_LIT_INT:    n->lit_int.ival = src->lit_int.ival; break;
+    case NODE_LIT_FLOAT:  n->lit_float.fval = src->lit_float.fval; break;
+    case NODE_LIT_BOOL:   n->lit_bool.bval = src->lit_bool.bval; break;
+    case NODE_LIT_NULL:   break;
+    case NODE_LIT_STRING:
+        n->lit_string.sval = src->lit_string.sval ? xs_strdup(src->lit_string.sval) : NULL;
+        n->lit_string.parts = c_clone_nodelist(src->lit_string.parts);
+        n->lit_string.interpolated = src->lit_string.interpolated;
+        break;
+    case NODE_INTERP_STRING:
+        n->lit_string.sval = src->lit_string.sval ? xs_strdup(src->lit_string.sval) : NULL;
+        n->lit_string.parts = c_clone_nodelist(src->lit_string.parts);
+        n->lit_string.interpolated = 1;
+        break;
+    case NODE_BINOP:
+        memcpy(n->binop.op, src->binop.op, sizeof n->binop.op);
+        n->binop.left = c_clone_node(src->binop.left);
+        n->binop.right = c_clone_node(src->binop.right);
+        break;
+    case NODE_UNARY:
+        memcpy(n->unary.op, src->unary.op, sizeof n->unary.op);
+        n->unary.expr = c_clone_node(src->unary.expr);
+        n->unary.prefix = src->unary.prefix;
+        break;
+    case NODE_CALL:
+        n->call.callee = c_clone_node(src->call.callee);
+        n->call.args = c_clone_nodelist(src->call.args);
+        n->call.kwargs = c_clone_nodepairlist(src->call.kwargs);
+        break;
+    case NODE_METHOD_CALL:
+        n->method_call.obj = c_clone_node(src->method_call.obj);
+        n->method_call.method = src->method_call.method ? xs_strdup(src->method_call.method) : NULL;
+        n->method_call.args = c_clone_nodelist(src->method_call.args);
+        n->method_call.kwargs = c_clone_nodepairlist(src->method_call.kwargs);
+        n->method_call.optional = src->method_call.optional;
+        break;
+    case NODE_INDEX:
+        n->index.obj = c_clone_node(src->index.obj);
+        n->index.index = c_clone_node(src->index.index);
+        break;
+    case NODE_FIELD:
+        n->field.obj = c_clone_node(src->field.obj);
+        n->field.name = src->field.name ? xs_strdup(src->field.name) : NULL;
+        n->field.optional = src->field.optional;
+        break;
+    case NODE_ASSIGN:
+        memcpy(n->assign.op, src->assign.op, sizeof n->assign.op);
+        n->assign.target = c_clone_node(src->assign.target);
+        n->assign.value = c_clone_node(src->assign.value);
+        break;
+    case NODE_IF:
+        n->if_expr.cond = c_clone_node(src->if_expr.cond);
+        n->if_expr.then = c_clone_node(src->if_expr.then);
+        n->if_expr.elif_conds = c_clone_nodelist(src->if_expr.elif_conds);
+        n->if_expr.elif_thens = c_clone_nodelist(src->if_expr.elif_thens);
+        n->if_expr.else_branch = c_clone_node(src->if_expr.else_branch);
+        break;
+    case NODE_WHILE:
+        n->while_loop.cond = c_clone_node(src->while_loop.cond);
+        n->while_loop.body = c_clone_node(src->while_loop.body);
+        break;
+    case NODE_FOR:
+        n->for_loop.pattern = c_clone_node(src->for_loop.pattern);
+        n->for_loop.iter = c_clone_node(src->for_loop.iter);
+        n->for_loop.body = c_clone_node(src->for_loop.body);
+        n->for_loop.label = src->for_loop.label ? xs_strdup(src->for_loop.label) : NULL;
+        break;
+    case NODE_LOOP:
+        n->loop.body = c_clone_node(src->loop.body);
+        n->loop.label = src->loop.label ? xs_strdup(src->loop.label) : NULL;
+        break;
+    case NODE_RETURN:
+        n->ret.value = c_clone_node(src->ret.value);
+        break;
+    case NODE_BREAK: case NODE_CONTINUE: break;
+    case NODE_LET: case NODE_VAR:
+        n->let.name = src->let.name ? xs_strdup(src->let.name) : NULL;
+        n->let.pattern = c_clone_node(src->let.pattern);
+        n->let.value = c_clone_node(src->let.value);
+        n->let.mutable = src->let.mutable;
+        n->let.is_scoped = src->let.is_scoped;
+        n->let.is_pub = src->let.is_pub;
+        n->let.type_ann = NULL;
+        n->let.contract = NULL;
+        break;
+    case NODE_CONST:
+        n->const_.name = src->const_.name ? xs_strdup(src->const_.name) : NULL;
+        n->const_.value = c_clone_node(src->const_.value);
+        n->const_.type_ann = NULL;
+        n->const_.contract = NULL;
+        n->const_.is_pub = src->const_.is_pub;
+        break;
+    case NODE_EXPR_STMT:
+        n->expr_stmt.expr = c_clone_node(src->expr_stmt.expr);
+        n->expr_stmt.has_semicolon = src->expr_stmt.has_semicolon;
+        break;
+    case NODE_BLOCK:
+        n->block.stmts = c_clone_nodelist(src->block.stmts);
+        n->block.expr = c_clone_node(src->block.expr);
+        n->block.has_decls = -1;
+        n->block.is_unsafe = src->block.is_unsafe;
+        break;
+    case NODE_THROW:
+        n->throw_.value = c_clone_node(src->throw_.value);
+        break;
+    case NODE_TRY:
+        n->try_.body = c_clone_node(src->try_.body);
+        n->try_.finally_block = c_clone_node(src->try_.finally_block);
+        n->try_.catch_arms = (MatchArmList){0};
+        for (int i = 0; i < src->try_.catch_arms.len; i++) {
+            MatchArm a = (MatchArm){0};
+            a.pattern = c_clone_node(src->try_.catch_arms.items[i].pattern);
+            a.guard = c_clone_node(src->try_.catch_arms.items[i].guard);
+            a.body = c_clone_node(src->try_.catch_arms.items[i].body);
+            if (n->try_.catch_arms.len >= n->try_.catch_arms.cap) {
+                n->try_.catch_arms.cap = n->try_.catch_arms.cap ? n->try_.catch_arms.cap * 2 : 4;
+                n->try_.catch_arms.items = (MatchArm*)realloc(
+                    n->try_.catch_arms.items,
+                    n->try_.catch_arms.cap * sizeof(MatchArm));
+            }
+            n->try_.catch_arms.items[n->try_.catch_arms.len++] = a;
+        }
+        break;
+    case NODE_RANGE:
+        n->range.start = c_clone_node(src->range.start);
+        n->range.end = c_clone_node(src->range.end);
+        n->range.inclusive = src->range.inclusive;
+        break;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        n->lit_array.elems = c_clone_nodelist(src->lit_array.elems);
+        n->lit_array.repeat_val = c_clone_node(src->lit_array.repeat_val);
+        n->lit_array.repeat_cnt = src->lit_array.repeat_cnt;
+        break;
+    case NODE_LIT_MAP:
+        n->lit_map.keys = c_clone_nodelist(src->lit_map.keys);
+        n->lit_map.vals = c_clone_nodelist(src->lit_map.vals);
+        break;
+    case NODE_LAMBDA:
+        n->lambda.params = c_clone_paramlist(src->lambda.params);
+        n->lambda.body = c_clone_node(src->lambda.body);
+        n->lambda.is_generator = src->lambda.is_generator;
+        break;
+    case NODE_FN_DECL:
+        n->fn_decl.name = src->fn_decl.name ? xs_strdup(src->fn_decl.name) : NULL;
+        n->fn_decl.params = c_clone_paramlist(src->fn_decl.params);
+        n->fn_decl.body = c_clone_node(src->fn_decl.body);
+        n->fn_decl.is_async = src->fn_decl.is_async;
+        n->fn_decl.is_pub = src->fn_decl.is_pub;
+        n->fn_decl.is_generator = src->fn_decl.is_generator;
+        n->fn_decl.is_pure = src->fn_decl.is_pure;
+        n->fn_decl.is_test = src->fn_decl.is_test;
+        n->fn_decl.is_static = src->fn_decl.is_static;
+        n->fn_decl.is_macro = src->fn_decl.is_macro;
+        n->fn_decl.deprecated_msg = NULL;
+        n->fn_decl.ret_type = NULL;
+        n->fn_decl.type_params = NULL;
+        n->fn_decl.type_bounds = NULL;
+        n->fn_decl.type_param_variance = NULL;
+        n->fn_decl.n_type_params = 0;
+        n->fn_decl.decorators = NULL;
+        n->fn_decl.n_decorators = 0;
+        break;
+    case NODE_DEFER:
+        n->defer_.body = c_clone_node(src->defer_.body);
+        break;
+    case NODE_YIELD:
+        n->yield_.value = c_clone_node(src->yield_.value);
+        break;
+    case NODE_AWAIT:
+        n->await_.expr = c_clone_node(src->await_.expr);
+        break;
+    case NODE_SPAWN:
+        n->spawn_.expr = c_clone_node(src->spawn_.expr);
+        break;
+    default:
+        /* Unknown node tag in a trait default-method body; degrade to a
+         * null literal rather than risk a shallow memcpy that would
+         * leave dangling pointers. Trait default methods are typically
+         * single expressions (string lit, arithmetic, method call), so
+         * hitting this case is rare in practice. */
+        node_free(n);
+        return mkc_null_lit();
+    }
+    return n;
+}
+
+static void c_inherit_trait_defaults(Node *program) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    /* Build a quick name->trait-node lookup. */
+    Node *traits[64];
+    int n_traits = 0;
+    for (int i = 0; i < program->program.stmts.len && n_traits < 64; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (st && VAL_TAG(st) == NODE_TRAIT_DECL && st->trait_decl.name)
+            traits[n_traits++] = st;
+    }
+    if (n_traits == 0) return;
+
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st || VAL_TAG(st) != NODE_IMPL_DECL) continue;
+        if (!st->impl_decl.trait_name) continue;
+        Node *trait = NULL;
+        for (int t = 0; t < n_traits; t++)
+            if (traits[t]->trait_decl.name &&
+                strcmp(traits[t]->trait_decl.name, st->impl_decl.trait_name) == 0) {
+                trait = traits[t]; break;
+            }
+        if (!trait) continue;
+        for (int ti = 0; ti < trait->trait_decl.methods.len; ti++) {
+            Node *defm = trait->trait_decl.methods.items[ti];
+            if (!defm || VAL_TAG(defm) != NODE_FN_DECL) continue;
+            if (!defm->fn_decl.body) continue; /* required, no default */
+            if (!defm->fn_decl.name) continue;
+            int overridden = 0;
+            for (int j = 0; j < st->impl_decl.members.len; j++) {
+                Node *im = st->impl_decl.members.items[j];
+                if (im && VAL_TAG(im) == NODE_FN_DECL && im->fn_decl.name &&
+                    strcmp(im->fn_decl.name, defm->fn_decl.name) == 0) {
+                    overridden = 1; break;
+                }
+            }
+            if (overridden) continue;
+            nodelist_push(&st->impl_decl.members, c_clone_node(defm));
+        }
+    }
+}
+
 /* ---- Nested-fn-to-lambda lowering ------------------------------------- */
 
 /* Convert a NODE_FN_DECL into a NODE_LAMBDA node. The caller is
@@ -5611,6 +5977,10 @@ static void c_lower_program(Node *program, const char *src_filename) {
         free(new_stmts.items);
     }
 
+    /* Phase 3a: copy trait default-method bodies into impls that
+     * don't override them so call sites see a real `Type_method`. */
+    c_inherit_trait_defaults(program);
+
     /* Phase 3: lower nested fn decls to lambda lets so the closure
      * machinery handles captures. Top-level fns stay as C functions. */
     c_lower_nested_fns_walk(program);
@@ -6419,9 +6789,22 @@ char *transpile_c(Node *program, const char *filename) {
         "    /* bounded channel: cap was set to max_cap */\n"
         "    return XS_BOOL(a->len >= a->cap);\n"
         "}\n\n"
-        "/* assert runtime */\n"
+        "/* assert runtime. Float comparisons get a 1e-9 relative tolerance\n"
+        " * so chained float arithmetic that drifts in the last bit (eg.\n"
+        " * 21.560000000000002 vs 21.56) doesn't spuriously fail. The interp\n"
+        " * does the same. */\n"
         "static void xs_assert_eq(xs_val a, xs_val b) {\n"
-        "    if (!xs_eq(a, b)) {\n"
+        "    int eq = xs_eq(a, b);\n"
+        "    if (!eq && (a.tag == 1 || b.tag == 1) &&\n"
+        "        (a.tag == 0 || a.tag == 1) && (b.tag == 0 || b.tag == 1)) {\n"
+        "        double af = (a.tag == 1) ? a.f : (double)a.i;\n"
+        "        double bf = (b.tag == 1) ? b.f : (double)b.i;\n"
+        "        double diff = af > bf ? af - bf : bf - af;\n"
+        "        double mag  = af > bf ? af : bf;\n"
+        "        if (mag < 0) mag = -mag;\n"
+        "        if (diff <= 1e-9 || diff <= mag * 1e-9) eq = 1;\n"
+        "    }\n"
+        "    if (!eq) {\n"
         "        fprintf(stderr, \"assert_eq failed: %s != %s\\n\", xs_to_str(a), xs_to_str(b));\n"
         "        exit(1);\n"
         "    }\n"
