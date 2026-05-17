@@ -1398,6 +1398,12 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 /* e.g. counter["inc"](): indexing into map, likely returns closure */
                 might_be_closure = 1;
             }
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_FIELD) {
+                /* e.g. util.shout(...): the namespace rewrite produced
+                 * a FIELD callee. Routing through xs_call lets the
+                 * runtime invoke a stored fn value. */
+                might_be_closure = 1;
+            }
             /* variable calls might be closures if the var was assigned from a function
                that returns closures */
             if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
@@ -6001,7 +6007,27 @@ static void c_lower_use_stmt(Node *u, NodeList *out_stmts) {
         map->lit_map.vals = nodelist_new();
         for (int i = 0; i < n_exports; i++) {
             nodelist_push(&map->lit_map.keys, mkc_str_lit(aliases[i]));
-            nodelist_push(&map->lit_map.vals, mkc_ident(locals[i]));
+            /* Type names (struct/enum/class) don't have a runtime
+             * value -- they're typedefs. Substitute a non-null
+             * sentinel so `let P = util.Point` binds something the
+             * `P { ... }` site can ignore (the struct path comes
+             * from the syntactic name, not the value). */
+            int is_type_name = 0;
+            for (int j = 0; j < modprog->program.stmts.len; j++) {
+                Node *st = modprog->program.stmts.items[j];
+                if (!st || !locals[i]) continue;
+                if (VAL_TAG(st) == NODE_STRUCT_DECL && st->struct_decl.name &&
+                    strcmp(st->struct_decl.name, locals[i]) == 0) { is_type_name = 1; break; }
+                if (VAL_TAG(st) == NODE_ENUM_DECL && st->enum_decl.name &&
+                    strcmp(st->enum_decl.name, locals[i]) == 0) { is_type_name = 1; break; }
+                if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name &&
+                    strcmp(st->class_decl.name, locals[i]) == 0) { is_type_name = 1; break; }
+            }
+            if (is_type_name) {
+                nodelist_push(&map->lit_map.vals, mkc_str_lit(locals[i]));
+            } else {
+                nodelist_push(&map->lit_map.vals, mkc_ident(locals[i]));
+            }
         }
         nodelist_push(out_stmts, mkc_let(alias, map, 0));
         c_ns_add(alias);
