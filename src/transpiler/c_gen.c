@@ -4634,6 +4634,161 @@ static Node *c_lower_node(Node *n) {
     }
 }
 
+/* ---- Nested-fn-to-lambda lowering ------------------------------------- */
+
+/* Convert a NODE_FN_DECL into a NODE_LAMBDA node. The caller is
+ * responsible for splicing the resulting binding into a block. The
+ * source fn node is reused (its tag gets flipped) so its params/body
+ * keep their existing ownership chain. */
+static Node *c_fn_to_lambda(Node *fn) {
+    if (!fn || VAL_TAG(fn) != NODE_FN_DECL) return fn;
+    Node *lam = node_new(NODE_LAMBDA, span_zero());
+    lam->lambda.params = fn->fn_decl.params;
+    lam->lambda.body = fn->fn_decl.body;
+    lam->lambda.is_generator = fn->fn_decl.is_generator;
+    /* Detach so node_free on fn doesn't double-free. */
+    fn->fn_decl.params.items = NULL;
+    fn->fn_decl.params.len = 0;
+    fn->fn_decl.params.cap = 0;
+    fn->fn_decl.body = NULL;
+    return lam;
+}
+
+/* Walk a block's statement list and rewrite any NODE_FN_DECL stmt in
+ * the body of a function/lambda to a `var name; name = |...| body`
+ * sequence. The two-step pattern lets mutually-recursive sibling fns
+ * see each other's bindings. Top-level (program-level) fn decls are
+ * left alone -- they're already file-scope C functions. */
+static void c_lower_nested_fns_in_block(Node *block);
+
+static void c_lower_nested_fns_walk(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++) {
+            Node *st = n->program.stmts.items[i];
+            if (!st) continue;
+            if (VAL_TAG(st) == NODE_FN_DECL) {
+                /* Top-level fn: keep as a C function, but recurse into
+                 * its body so nested fns inside it get rewritten. */
+                if (st->fn_decl.body && VAL_TAG(st->fn_decl.body) == NODE_BLOCK)
+                    c_lower_nested_fns_in_block(st->fn_decl.body);
+            } else {
+                c_lower_nested_fns_walk(st);
+            }
+        }
+        return;
+    case NODE_BLOCK:
+        c_lower_nested_fns_in_block(n);
+        return;
+    case NODE_FN_DECL:
+        if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK)
+            c_lower_nested_fns_in_block(n->fn_decl.body);
+        return;
+    case NODE_LAMBDA:
+        if (n->lambda.body && VAL_TAG(n->lambda.body) == NODE_BLOCK)
+            c_lower_nested_fns_in_block(n->lambda.body);
+        return;
+    case NODE_IF:
+        c_lower_nested_fns_walk(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_lower_nested_fns_walk(n->if_expr.elif_thens.items[i]);
+        c_lower_nested_fns_walk(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:    c_lower_nested_fns_walk(n->while_loop.body); return;
+    case NODE_FOR:      c_lower_nested_fns_walk(n->for_loop.body); return;
+    case NODE_LOOP:     c_lower_nested_fns_walk(n->loop.body); return;
+    case NODE_TRY:
+        c_lower_nested_fns_walk(n->try_.body);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_lower_nested_fns_walk(n->try_.catch_arms.items[i].body);
+        c_lower_nested_fns_walk(n->try_.finally_block);
+        return;
+    case NODE_MATCH:
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_lower_nested_fns_walk(n->match.arms.items[i].body);
+        return;
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++) {
+            Node *m = n->impl_decl.members.items[i];
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_fns_in_block(m->fn_decl.body);
+        }
+        return;
+    case NODE_CLASS_DECL:
+        for (int i = 0; i < n->class_decl.members.len; i++) {
+            Node *m = n->class_decl.members.items[i];
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_fns_in_block(m->fn_decl.body);
+        }
+        return;
+    case NODE_LET: case NODE_VAR: c_lower_nested_fns_walk(n->let.value); return;
+    case NODE_CONST:    c_lower_nested_fns_walk(n->const_.value); return;
+    case NODE_EXPR_STMT: c_lower_nested_fns_walk(n->expr_stmt.expr); return;
+    case NODE_RETURN:   c_lower_nested_fns_walk(n->ret.value); return;
+    default: return;
+    }
+}
+
+static void c_lower_nested_fns_in_block(Node *block) {
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return;
+    NodeList *stmts = &block->block.stmts;
+
+    /* Pass 1: collect nested fn names. */
+    const char *names[64];
+    int n_names = 0;
+    for (int i = 0; i < stmts->len && n_names < 64; i++) {
+        Node *st = stmts->items[i];
+        if (st && VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.name)
+            names[n_names++] = st->fn_decl.name;
+    }
+    if (n_names == 0) {
+        /* still walk children for deeper nesting */
+        for (int i = 0; i < stmts->len; i++)
+            c_lower_nested_fns_walk(stmts->items[i]);
+        c_lower_nested_fns_walk(block->block.expr);
+        return;
+    }
+
+    /* Pass 2: rewrite. Build a fresh stmts list with predeclared vars
+     * up-front (so siblings see each other), then assignments, then
+     * any original non-fn statements interleaved in order. */
+    NodeList rebuilt = nodelist_new();
+    /* predeclare each nested fn name as `var <name> = null` */
+    for (int i = 0; i < n_names; i++) {
+        nodelist_push(&rebuilt, mkc_let(names[i], mkc_null_lit(), 1));
+    }
+    for (int i = 0; i < stmts->len; i++) {
+        Node *st = stmts->items[i];
+        if (!st) continue;
+        if (VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.name) {
+            const char *fname = st->fn_decl.name;
+            /* recurse first: nested fns inside the body */
+            if (st->fn_decl.body && VAL_TAG(st->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_fns_in_block(st->fn_decl.body);
+            Node *lam = c_fn_to_lambda(st);
+            /* Build assign: name = lam */
+            Node *target = mkc_ident(fname);
+            Node *as = node_new(NODE_ASSIGN, span_zero());
+            as->assign.target = target;
+            as->assign.value = lam;
+            as->assign.op[0] = '=';
+            as->assign.op[1] = '\0';
+            nodelist_push(&rebuilt, mkc_expr_stmt(as));
+            /* free the now-stripped fn_decl shell */
+            node_free(st);
+        } else {
+            c_lower_nested_fns_walk(st);
+            nodelist_push(&rebuilt, st);
+        }
+    }
+    free(stmts->items);
+    block->block.stmts = rebuilt;
+    c_lower_nested_fns_walk(block->block.expr);
+}
+
 /* ---- Generator lowering for the C target ------------------------------ */
 
 /* Replace every NODE_YIELD inside subtree with `__gen_buf.push(value)`. */
@@ -5456,10 +5611,14 @@ static void c_lower_program(Node *program, const char *src_filename) {
         free(new_stmts.items);
     }
 
-    /* Phase 3: lower await/spawn/nursery + clear async markers. */
+    /* Phase 3: lower nested fn decls to lambda lets so the closure
+     * machinery handles captures. Top-level fns stay as C functions. */
+    c_lower_nested_fns_walk(program);
+
+    /* Phase 4: lower await/spawn/nursery + clear async markers. */
     c_lower_node(program);
 
-    /* Phase 4: lower fn* generators to eager-array fill. Inject the
+    /* Phase 5: lower fn* generators to eager-array fill. Inject the
      * runtime helpers and wrap for-in iters once. */
     c_lower_all_generators(program);
     if (g_c_has_generator) {
