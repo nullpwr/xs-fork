@@ -7,6 +7,9 @@
 #include <inttypes.h>
 
 #include "core/strbuf.h"
+#include "core/xs.h"
+#include "core/lexer.h"
+#include "core/parser.h"
 
 /* forward declarations */
 static void emit_expr(SB *s, Node *n, int depth);
@@ -14,6 +17,71 @@ static void emit_stmt(SB *s, Node *n, int depth);
 static void emit_block_body(SB *s, Node *block, int depth);
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth);
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth);
+
+/* ---- AST builder helpers used by the lowering pre-pass ----------------- */
+static Node *mkc_ident(const char *name) {
+    Node *n = node_new(NODE_IDENT, span_zero());
+    n->ident.name = xs_strdup(name);
+    return n;
+}
+static Node *mkc_str_lit(const char *s) {
+    Node *n = node_new(NODE_LIT_STRING, span_zero());
+    n->lit_string.sval = xs_strdup(s);
+    n->lit_string.parts = nodelist_new();
+    n->lit_string.interpolated = 0;
+    return n;
+}
+static Node *mkc_int_lit(int64_t v) {
+    Node *n = node_new(NODE_LIT_INT, span_zero());
+    n->lit_int.ival = v;
+    return n;
+}
+static Node *mkc_null_lit(void) { return node_new(NODE_LIT_NULL, span_zero()); }
+static Node *mkc_let(const char *name, Node *value, int is_var) {
+    Node *n = node_new(is_var ? NODE_VAR : NODE_LET, span_zero());
+    n->let.name = xs_strdup(name);
+    n->let.value = value;
+    n->let.pattern = NULL;
+    n->let.mutable = is_var;
+    n->let.is_scoped = 0;
+    n->let.is_pub = 0;
+    n->let.type_ann = NULL;
+    n->let.contract = NULL;
+    return n;
+}
+static Node *mkc_const(const char *name, Node *value) {
+    Node *n = node_new(NODE_CONST, span_zero());
+    n->const_.name = xs_strdup(name);
+    n->const_.value = value;
+    n->const_.type_ann = NULL;
+    n->const_.contract = NULL;
+    n->const_.is_pub = 0;
+    return n;
+}
+static Node *mkc_expr_stmt(Node *e) {
+    Node *n = node_new(NODE_EXPR_STMT, span_zero());
+    n->expr_stmt.expr = e;
+    n->expr_stmt.has_semicolon = 1;
+    return n;
+}
+static Node *mkc_block(NodeList stmts, Node *expr) {
+    Node *n = node_new(NODE_BLOCK, span_zero());
+    n->block.stmts = stmts;
+    n->block.expr = expr;
+    n->block.has_decls = -1;
+    n->block.is_unsafe = 0;
+    return n;
+}
+static Node *mkc_method_call(Node *obj, const char *method, Node **args, int nargs) {
+    Node *n = node_new(NODE_METHOD_CALL, span_zero());
+    n->method_call.obj = obj;
+    n->method_call.method = xs_strdup(method);
+    n->method_call.args = nodelist_new();
+    n->method_call.kwargs = nodepairlist_new();
+    n->method_call.optional = 0;
+    for (int i = 0; i < nargs; i++) nodelist_push(&n->method_call.args, args[i]);
+    return n;
+}
 
 /* Walk the AST looking for constructs the C target genuinely can't represent
  * (as opposed to "should work but doesn't"). Returns the first reason found
@@ -23,6 +91,9 @@ static const char *find_unsupported_for_c(Node *n) {
     if (!n) return NULL;
     switch (VAL_TAG(n)) {
     case NODE_FN_DECL:
+        /* generator + async markers are stripped by the lowering pass;
+         * if we still see one here it means lowering didn't run, which
+         * is a hard refusal. */
         if (n->fn_decl.is_generator)
             return "fn* generator declarations";
         /* wrapping decorators (@memoize / @retry / @timed / @trace /
@@ -40,7 +111,7 @@ static const char *find_unsupported_for_c(Node *n) {
         }
         return find_unsupported_for_c(n->fn_decl.body);
     case NODE_LAMBDA:
-        if (n->lambda.is_generator)
+        if (n->lambda.is_generator & 1)
             return "fn*() generator lambdas";
         return find_unsupported_for_c(n->lambda.body);
     case NODE_BIND:
@@ -4269,7 +4340,1151 @@ static void emit_stmt(SB *s, Node *n, int depth) {
 }
 
 /* public entry point */
+/* ---- C target AST lowering pre-pass ----------------------------------- */
+
+/* Walk an AST subtree and rewrite every `main` ident reference to
+ * `__user_main`. Used when the source defines a `main` -- we hoist top-
+ * level statements into the synthesised entry instead and let user code
+ * refer to its own main under the renamed symbol. */
+static void c_rename_main_refs(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_IDENT:
+        if (n->ident.name && strcmp(n->ident.name, "main") == 0) {
+            free(n->ident.name);
+            n->ident.name = xs_strdup("__user_main");
+        }
+        return;
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            c_rename_main_refs(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            c_rename_main_refs(n->block.stmts.items[i]);
+        c_rename_main_refs(n->block.expr);
+        return;
+    case NODE_FN_DECL:    c_rename_main_refs(n->fn_decl.body); return;
+    case NODE_LAMBDA:     c_rename_main_refs(n->lambda.body);  return;
+    case NODE_IF:
+        c_rename_main_refs(n->if_expr.cond);
+        c_rename_main_refs(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            c_rename_main_refs(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_rename_main_refs(n->if_expr.elif_thens.items[i]);
+        c_rename_main_refs(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        c_rename_main_refs(n->while_loop.cond);
+        c_rename_main_refs(n->while_loop.body);
+        return;
+    case NODE_FOR:
+        c_rename_main_refs(n->for_loop.iter);
+        c_rename_main_refs(n->for_loop.body);
+        return;
+    case NODE_LOOP:       c_rename_main_refs(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: c_rename_main_refs(n->let.value); return;
+    case NODE_CONST:      c_rename_main_refs(n->const_.value); return;
+    case NODE_EXPR_STMT:  c_rename_main_refs(n->expr_stmt.expr); return;
+    case NODE_RETURN:     c_rename_main_refs(n->ret.value); return;
+    case NODE_ASSIGN:
+        c_rename_main_refs(n->assign.target);
+        c_rename_main_refs(n->assign.value);
+        return;
+    case NODE_BINOP:
+        c_rename_main_refs(n->binop.left);
+        c_rename_main_refs(n->binop.right);
+        return;
+    case NODE_UNARY:      c_rename_main_refs(n->unary.expr); return;
+    case NODE_CALL:
+        c_rename_main_refs(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            c_rename_main_refs(n->call.args.items[i]);
+        return;
+    case NODE_METHOD_CALL:
+        c_rename_main_refs(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            c_rename_main_refs(n->method_call.args.items[i]);
+        return;
+    case NODE_INDEX:
+        c_rename_main_refs(n->index.obj);
+        c_rename_main_refs(n->index.index);
+        return;
+    case NODE_FIELD:      c_rename_main_refs(n->field.obj); return;
+    case NODE_TRY:
+        c_rename_main_refs(n->try_.body);
+        c_rename_main_refs(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_rename_main_refs(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_THROW:      c_rename_main_refs(n->throw_.value); return;
+    case NODE_MATCH:
+        c_rename_main_refs(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_rename_main_refs(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            c_rename_main_refs(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            c_rename_main_refs(n->lit_map.keys.items[i]);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            c_rename_main_refs(n->lit_map.vals.items[i]);
+        return;
+    case NODE_AWAIT:      c_rename_main_refs(n->await_.expr); return;
+    case NODE_SPAWN:      c_rename_main_refs(n->spawn_.expr); return;
+    case NODE_NURSERY:    c_rename_main_refs(n->nursery_.body); return;
+    case NODE_RANGE:
+        c_rename_main_refs(n->range.start);
+        c_rename_main_refs(n->range.end);
+        return;
+    case NODE_DEFER:      c_rename_main_refs(n->defer_.body); return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            c_rename_main_refs(n->lit_string.parts.items[i]);
+        return;
+    case NODE_YIELD:      c_rename_main_refs(n->yield_.value); return;
+    default: return;
+    }
+}
+
+/* AST walker that strips `await x`/`spawn x`/`nursery {body}` markers
+ * and clears the `is_async` flag from fn decls / lambdas. The C target
+ * is single-threaded, so async fn == plain fn; await is a no-op on a
+ * value that's already resolved. Returns a possibly-different node
+ * (when the wrapper is consumed). */
+static Node *c_lower_node(Node *n);
+static void c_lower_nodelist(NodeList *l) {
+    if (!l) return;
+    for (int i = 0; i < l->len; i++) l->items[i] = c_lower_node(l->items[i]);
+}
+static void c_lower_nodepairlist(NodePairList *l) {
+    if (!l) return;
+    for (int i = 0; i < l->len; i++) l->items[i].val = c_lower_node(l->items[i].val);
+}
+static Node *c_lower_node(Node *n) {
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_AWAIT: {
+        Node *inner = c_lower_node(n->await_.expr);
+        n->await_.expr = NULL;
+        node_free(n);
+        return inner;
+    }
+    case NODE_SPAWN: {
+        /* Preserve the spawn wrapper for actor/block-spawn cases that
+         * the codegen still treats specially; for plain expressions we
+         * unwrap to skip the dummy result map. */
+        Node *inner = n->spawn_.expr;
+        if (inner && VAL_TAG(inner) != NODE_BLOCK &&
+            !(VAL_TAG(inner) == NODE_IDENT && find_actor(inner->ident.name))) {
+            Node *lowered = c_lower_node(inner);
+            n->spawn_.expr = NULL;
+            node_free(n);
+            return lowered;
+        }
+        n->spawn_.expr = c_lower_node(n->spawn_.expr);
+        return n;
+    }
+    case NODE_NURSERY: {
+        Node *body = c_lower_node(n->nursery_.body);
+        n->nursery_.body = NULL;
+        node_free(n);
+        return body;
+    }
+    case NODE_FN_DECL:
+        n->fn_decl.is_async = 0;
+        n->fn_decl.body = c_lower_node(n->fn_decl.body);
+        return n;
+    case NODE_LAMBDA:
+        n->lambda.body = c_lower_node(n->lambda.body);
+        return n;
+    case NODE_BLOCK:
+        c_lower_nodelist(&n->block.stmts);
+        n->block.expr = c_lower_node(n->block.expr);
+        return n;
+    case NODE_PROGRAM:
+        c_lower_nodelist(&n->program.stmts);
+        return n;
+    case NODE_IF:
+        n->if_expr.cond = c_lower_node(n->if_expr.cond);
+        n->if_expr.then = c_lower_node(n->if_expr.then);
+        c_lower_nodelist(&n->if_expr.elif_conds);
+        c_lower_nodelist(&n->if_expr.elif_thens);
+        n->if_expr.else_branch = c_lower_node(n->if_expr.else_branch);
+        return n;
+    case NODE_WHILE:
+        n->while_loop.cond = c_lower_node(n->while_loop.cond);
+        n->while_loop.body = c_lower_node(n->while_loop.body);
+        return n;
+    case NODE_FOR:
+        n->for_loop.iter = c_lower_node(n->for_loop.iter);
+        n->for_loop.body = c_lower_node(n->for_loop.body);
+        return n;
+    case NODE_LOOP:
+        n->loop.body = c_lower_node(n->loop.body);
+        return n;
+    case NODE_LET: case NODE_VAR:
+        n->let.value = c_lower_node(n->let.value);
+        return n;
+    case NODE_CONST:
+        n->const_.value = c_lower_node(n->const_.value);
+        return n;
+    case NODE_EXPR_STMT:
+        n->expr_stmt.expr = c_lower_node(n->expr_stmt.expr);
+        return n;
+    case NODE_RETURN:
+        n->ret.value = c_lower_node(n->ret.value);
+        return n;
+    case NODE_ASSIGN:
+        n->assign.target = c_lower_node(n->assign.target);
+        n->assign.value = c_lower_node(n->assign.value);
+        return n;
+    case NODE_BINOP:
+        n->binop.left  = c_lower_node(n->binop.left);
+        n->binop.right = c_lower_node(n->binop.right);
+        return n;
+    case NODE_UNARY:
+        n->unary.expr = c_lower_node(n->unary.expr);
+        return n;
+    case NODE_CALL:
+        n->call.callee = c_lower_node(n->call.callee);
+        c_lower_nodelist(&n->call.args);
+        c_lower_nodepairlist(&n->call.kwargs);
+        return n;
+    case NODE_METHOD_CALL:
+        n->method_call.obj = c_lower_node(n->method_call.obj);
+        c_lower_nodelist(&n->method_call.args);
+        c_lower_nodepairlist(&n->method_call.kwargs);
+        return n;
+    case NODE_INDEX:
+        n->index.obj = c_lower_node(n->index.obj);
+        n->index.index = c_lower_node(n->index.index);
+        return n;
+    case NODE_FIELD:
+        n->field.obj = c_lower_node(n->field.obj);
+        return n;
+    case NODE_RANGE:
+        n->range.start = c_lower_node(n->range.start);
+        n->range.end = c_lower_node(n->range.end);
+        return n;
+    case NODE_TRY:
+        n->try_.body = c_lower_node(n->try_.body);
+        n->try_.finally_block = c_lower_node(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            n->try_.catch_arms.items[i].body =
+                c_lower_node(n->try_.catch_arms.items[i].body);
+        return n;
+    case NODE_THROW:
+        n->throw_.value = c_lower_node(n->throw_.value);
+        return n;
+    case NODE_MATCH:
+        n->match.subject = c_lower_node(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            n->match.arms.items[i].body = c_lower_node(n->match.arms.items[i].body);
+            if (n->match.arms.items[i].guard)
+                n->match.arms.items[i].guard = c_lower_node(n->match.arms.items[i].guard);
+        }
+        return n;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        c_lower_nodelist(&n->lit_array.elems);
+        return n;
+    case NODE_LIT_MAP:
+        c_lower_nodelist(&n->lit_map.keys);
+        c_lower_nodelist(&n->lit_map.vals);
+        return n;
+    case NODE_INTERP_STRING:
+        c_lower_nodelist(&n->lit_string.parts);
+        return n;
+    case NODE_LIST_COMP:
+        n->list_comp.element = c_lower_node(n->list_comp.element);
+        c_lower_nodelist(&n->list_comp.clause_iters);
+        c_lower_nodelist(&n->list_comp.clause_conds);
+        return n;
+    case NODE_MAP_COMP:
+        n->map_comp.key = c_lower_node(n->map_comp.key);
+        n->map_comp.value = c_lower_node(n->map_comp.value);
+        c_lower_nodelist(&n->map_comp.clause_iters);
+        c_lower_nodelist(&n->map_comp.clause_conds);
+        return n;
+    case NODE_STRUCT_INIT:
+        c_lower_nodepairlist(&n->struct_init.fields);
+        if (n->struct_init.rest) n->struct_init.rest = c_lower_node(n->struct_init.rest);
+        return n;
+    case NODE_CAST:
+        n->cast.expr = c_lower_node(n->cast.expr);
+        return n;
+    case NODE_DEFER:
+        n->defer_.body = c_lower_node(n->defer_.body);
+        return n;
+    case NODE_IMPL_DECL:
+        c_lower_nodelist(&n->impl_decl.members);
+        return n;
+    case NODE_CLASS_DECL:
+        c_lower_nodelist(&n->class_decl.members);
+        return n;
+    case NODE_YIELD:
+        n->yield_.value = c_lower_node(n->yield_.value);
+        return n;
+    default:
+        return n;
+    }
+}
+
+/* ---- Generator lowering for the C target ------------------------------ */
+
+/* Replace every NODE_YIELD inside subtree with `__gen_buf.push(value)`. */
+static void c_lower_yields(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_YIELD: {
+        Node *val = n->yield_.value;
+        n->yield_.value = NULL;
+        n->tag = NODE_METHOD_CALL;
+        n->method_call.obj = mkc_ident("__gen_buf");
+        n->method_call.method = xs_strdup("push");
+        n->method_call.args = nodelist_new();
+        nodelist_push(&n->method_call.args, val ? val : mkc_null_lit());
+        n->method_call.kwargs = nodepairlist_new();
+        n->method_call.optional = 0;
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            c_lower_yields(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            c_lower_yields(n->block.stmts.items[i]);
+        c_lower_yields(n->block.expr);
+        return;
+    case NODE_FN_DECL:
+        if (n->fn_decl.is_generator) return;
+        c_lower_yields(n->fn_decl.body);
+        return;
+    case NODE_LAMBDA:
+        if (n->lambda.is_generator & 1) return;
+        c_lower_yields(n->lambda.body);
+        return;
+    case NODE_IF:
+        c_lower_yields(n->if_expr.cond);
+        c_lower_yields(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            c_lower_yields(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_lower_yields(n->if_expr.elif_thens.items[i]);
+        c_lower_yields(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        c_lower_yields(n->while_loop.cond);
+        c_lower_yields(n->while_loop.body);
+        return;
+    case NODE_FOR:
+        c_lower_yields(n->for_loop.iter);
+        c_lower_yields(n->for_loop.body);
+        return;
+    case NODE_LOOP:        c_lower_yields(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: c_lower_yields(n->let.value); return;
+    case NODE_CONST:       c_lower_yields(n->const_.value); return;
+    case NODE_EXPR_STMT:   c_lower_yields(n->expr_stmt.expr); return;
+    case NODE_RETURN:      c_lower_yields(n->ret.value); return;
+    case NODE_ASSIGN:
+        c_lower_yields(n->assign.target);
+        c_lower_yields(n->assign.value);
+        return;
+    case NODE_BINOP:
+        c_lower_yields(n->binop.left);
+        c_lower_yields(n->binop.right);
+        return;
+    case NODE_UNARY:       c_lower_yields(n->unary.expr); return;
+    case NODE_CALL:
+        c_lower_yields(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            c_lower_yields(n->call.args.items[i]);
+        return;
+    case NODE_METHOD_CALL:
+        c_lower_yields(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            c_lower_yields(n->method_call.args.items[i]);
+        return;
+    case NODE_INDEX:
+        c_lower_yields(n->index.obj);
+        c_lower_yields(n->index.index);
+        return;
+    case NODE_FIELD:       c_lower_yields(n->field.obj); return;
+    case NODE_TRY:
+        c_lower_yields(n->try_.body);
+        c_lower_yields(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_lower_yields(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_THROW:       c_lower_yields(n->throw_.value); return;
+    case NODE_MATCH:
+        c_lower_yields(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_lower_yields(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            c_lower_yields(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            c_lower_yields(n->lit_map.keys.items[i]);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            c_lower_yields(n->lit_map.vals.items[i]);
+        return;
+    case NODE_RANGE:
+        c_lower_yields(n->range.start);
+        c_lower_yields(n->range.end);
+        return;
+    case NODE_DEFER:       c_lower_yields(n->defer_.body); return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            c_lower_yields(n->lit_string.parts.items[i]);
+        return;
+    case NODE_STRUCT_INIT:
+        for (int i = 0; i < n->struct_init.fields.len; i++)
+            c_lower_yields(n->struct_init.fields.items[i].val);
+        c_lower_yields(n->struct_init.rest);
+        return;
+    default: return;
+    }
+}
+
+/* Convert a single generator fn body into:
+ *   {
+ *       let __gen_buf = []
+ *       <body with yield rewritten to __gen_buf.push(...)>
+ *       #{ __items: __gen_buf, __pos: 0 }
+ *   }
+ * The fn's is_generator flag is cleared so subsequent passes treat it
+ * as a regular fn returning the generator value map. */
+static void c_lower_generator_body(Node *fn) {
+    if (!fn) return;
+    Node *body = NULL;
+    if (VAL_TAG(fn) == NODE_FN_DECL) body = fn->fn_decl.body;
+    else if (VAL_TAG(fn) == NODE_LAMBDA) body = fn->lambda.body;
+    if (!body) return;
+
+    if (VAL_TAG(body) != NODE_BLOCK) {
+        NodeList ss = nodelist_new();
+        Node *new_body = mkc_block(ss, body);
+        if (VAL_TAG(fn) == NODE_FN_DECL) fn->fn_decl.body = new_body;
+        else                              fn->lambda.body = new_body;
+        body = new_body;
+    }
+
+    c_lower_yields(body);
+
+    Node *empty_arr = node_new(NODE_LIT_ARRAY, span_zero());
+    empty_arr->lit_array.elems = nodelist_new();
+    empty_arr->lit_array.repeat_val = NULL;
+    empty_arr->lit_array.repeat_cnt = 0;
+    Node *init_let = mkc_let("__gen_buf", empty_arr, 0);
+
+    if (body->block.expr) {
+        Node *es = mkc_expr_stmt(body->block.expr);
+        nodelist_push(&body->block.stmts, es);
+        body->block.expr = NULL;
+    }
+
+    NodeList new_stmts = nodelist_new();
+    nodelist_push(&new_stmts, init_let);
+    for (int i = 0; i < body->block.stmts.len; i++)
+        nodelist_push(&new_stmts, body->block.stmts.items[i]);
+    free(body->block.stmts.items);
+    body->block.stmts = new_stmts;
+
+    /* Build trailing `#{__items: __gen_buf, __pos: 0}`. */
+    Node *map = node_new(NODE_LIT_MAP, span_zero());
+    map->lit_map.keys = nodelist_new();
+    map->lit_map.vals = nodelist_new();
+    nodelist_push(&map->lit_map.keys, mkc_str_lit("__items"));
+    nodelist_push(&map->lit_map.vals, mkc_ident("__gen_buf"));
+    nodelist_push(&map->lit_map.keys, mkc_str_lit("__pos"));
+    nodelist_push(&map->lit_map.vals, mkc_int_lit(0));
+    body->block.expr = map;
+
+    if (VAL_TAG(fn) == NODE_FN_DECL) fn->fn_decl.is_generator = 0;
+    else                              fn->lambda.is_generator &= ~1;
+}
+
+static int g_c_has_generator = 0;
+
+static void c_lower_all_generators(Node *n) {
+    if (!n) return;
+    if (VAL_TAG(n) == NODE_FN_DECL && n->fn_decl.is_generator) {
+        c_lower_generator_body(n);
+        g_c_has_generator = 1;
+        c_lower_all_generators(n->fn_decl.body);
+        return;
+    }
+    if (VAL_TAG(n) == NODE_LAMBDA && (n->lambda.is_generator & 1)) {
+        c_lower_generator_body(n);
+        g_c_has_generator = 1;
+        c_lower_all_generators(n->lambda.body);
+        return;
+    }
+    switch (VAL_TAG(n)) {
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            c_lower_all_generators(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            c_lower_all_generators(n->block.stmts.items[i]);
+        c_lower_all_generators(n->block.expr);
+        return;
+    case NODE_FN_DECL:    c_lower_all_generators(n->fn_decl.body); return;
+    case NODE_LAMBDA:     c_lower_all_generators(n->lambda.body); return;
+    case NODE_IF:
+        c_lower_all_generators(n->if_expr.cond);
+        c_lower_all_generators(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            c_lower_all_generators(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_lower_all_generators(n->if_expr.elif_thens.items[i]);
+        c_lower_all_generators(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        c_lower_all_generators(n->while_loop.cond);
+        c_lower_all_generators(n->while_loop.body);
+        return;
+    case NODE_FOR:
+        c_lower_all_generators(n->for_loop.iter);
+        c_lower_all_generators(n->for_loop.body);
+        return;
+    case NODE_LOOP:       c_lower_all_generators(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: c_lower_all_generators(n->let.value); return;
+    case NODE_CONST:      c_lower_all_generators(n->const_.value); return;
+    case NODE_EXPR_STMT:  c_lower_all_generators(n->expr_stmt.expr); return;
+    case NODE_RETURN:     c_lower_all_generators(n->ret.value); return;
+    case NODE_TRY:
+        c_lower_all_generators(n->try_.body);
+        c_lower_all_generators(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_lower_all_generators(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_MATCH:
+        c_lower_all_generators(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_lower_all_generators(n->match.arms.items[i].body);
+        return;
+    case NODE_BINOP:
+        c_lower_all_generators(n->binop.left);
+        c_lower_all_generators(n->binop.right);
+        return;
+    case NODE_CALL:
+        c_lower_all_generators(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            c_lower_all_generators(n->call.args.items[i]);
+        return;
+    case NODE_METHOD_CALL:
+        c_lower_all_generators(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            c_lower_all_generators(n->method_call.args.items[i]);
+        return;
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++)
+            c_lower_all_generators(n->impl_decl.members.items[i]);
+        return;
+    case NODE_CLASS_DECL:
+        for (int i = 0; i < n->class_decl.members.len; i++)
+            c_lower_all_generators(n->class_decl.members.items[i]);
+        return;
+    default: return;
+    }
+}
+
+/* Wrap every for-in's iter expr with __gen_iter(...) so the runtime
+ * unwraps generator maps to their __items array transparently. */
+static void c_wrap_for_iters(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_FOR:
+        if (n->for_loop.iter) {
+            Node *call = node_new(NODE_CALL, span_zero());
+            call->call.callee = mkc_ident("__gen_iter");
+            call->call.args = nodelist_new();
+            call->call.kwargs = nodepairlist_new();
+            nodelist_push(&call->call.args, n->for_loop.iter);
+            n->for_loop.iter = call;
+        }
+        c_wrap_for_iters(n->for_loop.body);
+        return;
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            c_wrap_for_iters(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            c_wrap_for_iters(n->block.stmts.items[i]);
+        c_wrap_for_iters(n->block.expr);
+        return;
+    case NODE_FN_DECL:    c_wrap_for_iters(n->fn_decl.body); return;
+    case NODE_LAMBDA:     c_wrap_for_iters(n->lambda.body); return;
+    case NODE_IF:
+        c_wrap_for_iters(n->if_expr.cond);
+        c_wrap_for_iters(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            c_wrap_for_iters(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_wrap_for_iters(n->if_expr.elif_thens.items[i]);
+        c_wrap_for_iters(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        c_wrap_for_iters(n->while_loop.cond);
+        c_wrap_for_iters(n->while_loop.body);
+        return;
+    case NODE_LOOP:       c_wrap_for_iters(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: c_wrap_for_iters(n->let.value); return;
+    case NODE_CONST:      c_wrap_for_iters(n->const_.value); return;
+    case NODE_EXPR_STMT:  c_wrap_for_iters(n->expr_stmt.expr); return;
+    case NODE_RETURN:     c_wrap_for_iters(n->ret.value); return;
+    case NODE_TRY:
+        c_wrap_for_iters(n->try_.body);
+        c_wrap_for_iters(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_wrap_for_iters(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_MATCH:
+        c_wrap_for_iters(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_wrap_for_iters(n->match.arms.items[i].body);
+        return;
+    default: return;
+    }
+}
+
+/* Splice helper fns for generator iteration into the program prologue so
+ * `g.next()` and `for v in g {...}` Just Work. Parsed once and the
+ * resulting top-level decls are pushed into new_stmts. */
+static void c_inject_generator_helpers(NodeList *new_stmts) {
+    /* Parameter names use a __xs_g_ prefix so they cannot collide with
+     * any user-defined function and confuse the C codegen's "ident
+     * matches a known fn" heuristic. */
+    static const char *gen_src =
+        "fn __gen_iter(__xs_g_g) {\n"
+        "    if type(__xs_g_g) == \"map\" { return __xs_g_g[\"__items\"] }\n"
+        "    return __xs_g_g\n"
+        "}\n"
+        "fn __gen_next(__xs_g_g) {\n"
+        "    let p = __xs_g_g[\"__pos\"]\n"
+        "    let it = __xs_g_g[\"__items\"]\n"
+        "    let m = #{}\n"
+        "    if p >= it.len() {\n"
+        "        m[\"value\"] = null\n"
+        "        m[\"done\"] = true\n"
+        "        return m\n"
+        "    }\n"
+        "    __xs_g_g[\"__pos\"] = p + 1\n"
+        "    m[\"value\"] = it[p]\n"
+        "    m[\"done\"] = false\n"
+        "    return m\n"
+        "}\n";
+    Lexer lex; lexer_init(&lex, gen_src, "<c-gen-helpers>");
+    TokenArray ta = lexer_tokenize(&lex);
+    Parser p; parser_init(&p, &ta, "<c-gen-helpers>");
+    Node *prog = parser_parse(&p);
+    token_array_free(&ta);
+    comment_list_free(&lex.comments);
+    if (!prog || p.had_error) {
+        if (prog) node_free(prog);
+        return;
+    }
+    for (int i = 0; i < prog->program.stmts.len; i++) {
+        nodelist_push(new_stmts, prog->program.stmts.items[i]);
+    }
+    free(prog->program.stmts.items);
+    prog->program.stmts.items = NULL;
+    prog->program.stmts.len = 0;
+    prog->program.stmts.cap = 0;
+    node_free(prog);
+}
+
+/* ---- `use "./mod.xs"` cross-file splicing ----------------------------- */
+
+#define MAX_C_USE_MODS 32
+static struct {
+    char *path;        /* canonical resolved path */
+    Node *prog;        /* parsed AST (kept alive for codegen) */
+    char *src;         /* file contents (kept alive for the spans) */
+    char *path_owned;  /* heap copy passed to lexer; freed at reset */
+} g_c_use_mods[MAX_C_USE_MODS];
+static int g_n_c_use_mods = 0;
+static char g_c_src_dir[1024] = "";
+
+static void c_resolve_use_path(const char *rel, char *out, size_t outsz) {
+    if (!rel) { out[0] = '\0'; return; }
+    if (rel[0] == '/' || g_c_src_dir[0] == '\0') {
+        snprintf(out, outsz, "%s", rel);
+        return;
+    }
+    /* normalise away leading "./" */
+    const char *r = rel;
+    while (r[0] == '.' && r[1] == '/') r += 2;
+    snprintf(out, outsz, "%s/%s", g_c_src_dir, r);
+}
+
+static char *c_slurp_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len < 0) { fclose(f); return NULL; }
+    char *buf = (char*)malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    fread(buf, 1, (size_t)len, f);
+    buf[len] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static Node *c_load_use_module(const char *resolved) {
+    for (int i = 0; i < g_n_c_use_mods; i++) {
+        if (g_c_use_mods[i].path && strcmp(g_c_use_mods[i].path, resolved) == 0)
+            return g_c_use_mods[i].prog;
+    }
+    if (g_n_c_use_mods >= MAX_C_USE_MODS) return NULL;
+    char *src = c_slurp_file(resolved);
+    if (!src) return NULL;
+    char *path_owned = xs_strdup(resolved);
+    Lexer lex; lexer_init(&lex, src, path_owned);
+    TokenArray ta = lexer_tokenize(&lex);
+    Parser p; parser_init(&p, &ta, path_owned);
+    Node *prog = parser_parse(&p);
+    token_array_free(&ta);
+    comment_list_free(&lex.comments);
+    if (!prog || p.had_error) {
+        if (prog) node_free(prog);
+        free(src);
+        free(path_owned);
+        return NULL;
+    }
+    g_c_use_mods[g_n_c_use_mods].path = xs_strdup(resolved);
+    g_c_use_mods[g_n_c_use_mods].prog = prog;
+    g_c_use_mods[g_n_c_use_mods].src = src;
+    g_c_use_mods[g_n_c_use_mods].path_owned = path_owned;
+    g_n_c_use_mods++;
+    return prog;
+}
+
+static void c_derive_use_alias(const char *path, char *out, size_t outsz) {
+    const char *base = path;
+    const char *p = strrchr(path, '/');
+    if (p) base = p + 1;
+    size_t i = 0;
+    while (base[i] && base[i] != '.' && i + 1 < outsz) {
+        char ch = base[i];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') || ch == '_') {
+            out[i] = ch;
+        } else {
+            out[i] = '_';
+        }
+        i++;
+    }
+    out[i] = '\0';
+    if (out[0] >= '0' && out[0] <= '9') {
+        /* prefix with underscore if starts with digit */
+        memmove(out + 1, out, i + 1);
+        out[0] = '_';
+    }
+}
+
+/* Walk the imported program for `export { name [as alias], ... }` lists.
+ * On any explicit list we emit only the listed names with their public
+ * aliases. Returns 1 if any list was found. */
+static int c_collect_exports(Node *prog, const char ***out_locals,
+                             const char ***out_aliases, int *out_n) {
+    *out_n = 0;
+    if (!prog || VAL_TAG(prog) != NODE_PROGRAM) return 0;
+    static const char *locals[256];
+    static const char *aliases[256];
+    int n = 0;
+    int any = 0;
+    for (int i = 0; i < prog->program.stmts.len; i++) {
+        Node *st = prog->program.stmts.items[i];
+        if (!st || VAL_TAG(st) != NODE_EXPORT) continue;
+        any = 1;
+        for (int k = 0; k < st->export_.nnames && n < 256; k++) {
+            locals[n]  = st->export_.names[k];
+            aliases[n] = st->export_.aliases[k] ? st->export_.aliases[k]
+                                                : st->export_.names[k];
+            n++;
+        }
+    }
+    *out_locals = locals;
+    *out_aliases = aliases;
+    *out_n = n;
+    return any;
+}
+
+/* Best-effort name extractor for stmts that bind a top-level value. Used
+ * when a module has no explicit export list -- we expose every named
+ * decl. */
+static const char *c_stmt_export_name(Node *st) {
+    if (!st) return NULL;
+    switch (VAL_TAG(st)) {
+    case NODE_LET:        return st->let.name;
+    case NODE_VAR:        return st->let.name;
+    case NODE_CONST:      return st->const_.name;
+    case NODE_FN_DECL:    return st->fn_decl.name;
+    case NODE_STRUCT_DECL: return st->struct_decl.name;
+    case NODE_ENUM_DECL:  return st->enum_decl.name;
+    case NODE_CLASS_DECL: return st->class_decl.name;
+    default: return NULL;
+    }
+}
+
+/* Track names that should be treated as namespace bindings (i.e. maps
+ * built from a `use` import). Method calls on these go through
+ * map-index dispatch rather than C function calls. */
+#define MAX_C_NS_NAMES 64
+static const char *g_c_ns_names[MAX_C_NS_NAMES];
+static int g_n_c_ns_names = 0;
+
+static int c_is_ns_name(const char *name) {
+    if (!name) return 0;
+    for (int i = 0; i < g_n_c_ns_names; i++)
+        if (g_c_ns_names[i] && strcmp(g_c_ns_names[i], name) == 0) return 1;
+    return 0;
+}
+static void c_ns_add(const char *name) {
+    if (!name || g_n_c_ns_names >= MAX_C_NS_NAMES) return;
+    if (c_is_ns_name(name)) return;
+    g_c_ns_names[g_n_c_ns_names++] = xs_strdup(name);
+}
+
+/* Rewrite `<ns>.<method>(args)` to `<ns>[<method>](args)` (a regular
+ * CALL of the value at the field). Without this, the C method
+ * dispatcher tries to invoke `.shout` directly on a map and either
+ * returns null or traps. */
+static void c_rewrite_ns_method_calls(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_METHOD_CALL: {
+        Node *obj = n->method_call.obj;
+        if (obj && VAL_TAG(obj) == NODE_IDENT &&
+            c_is_ns_name(obj->ident.name)) {
+            Node *fld = node_new(NODE_FIELD, span_zero());
+            fld->field.obj = obj;
+            fld->field.name = xs_strdup(n->method_call.method);
+            fld->field.optional = 0;
+            n->tag = NODE_CALL;
+            n->call.callee = fld;
+            n->call.args = n->method_call.args;
+            n->call.kwargs = n->method_call.kwargs;
+        }
+        c_rewrite_ns_method_calls(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            c_rewrite_ns_method_calls(n->method_call.args.items[i]);
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            c_rewrite_ns_method_calls(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            c_rewrite_ns_method_calls(n->block.stmts.items[i]);
+        c_rewrite_ns_method_calls(n->block.expr);
+        return;
+    case NODE_FN_DECL:    c_rewrite_ns_method_calls(n->fn_decl.body); return;
+    case NODE_LAMBDA:     c_rewrite_ns_method_calls(n->lambda.body); return;
+    case NODE_IF:
+        c_rewrite_ns_method_calls(n->if_expr.cond);
+        c_rewrite_ns_method_calls(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            c_rewrite_ns_method_calls(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_rewrite_ns_method_calls(n->if_expr.elif_thens.items[i]);
+        c_rewrite_ns_method_calls(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        c_rewrite_ns_method_calls(n->while_loop.cond);
+        c_rewrite_ns_method_calls(n->while_loop.body);
+        return;
+    case NODE_FOR:
+        c_rewrite_ns_method_calls(n->for_loop.iter);
+        c_rewrite_ns_method_calls(n->for_loop.body);
+        return;
+    case NODE_LET: case NODE_VAR: c_rewrite_ns_method_calls(n->let.value); return;
+    case NODE_CONST:      c_rewrite_ns_method_calls(n->const_.value); return;
+    case NODE_EXPR_STMT:  c_rewrite_ns_method_calls(n->expr_stmt.expr); return;
+    case NODE_RETURN:     c_rewrite_ns_method_calls(n->ret.value); return;
+    case NODE_ASSIGN:
+        c_rewrite_ns_method_calls(n->assign.target);
+        c_rewrite_ns_method_calls(n->assign.value);
+        return;
+    case NODE_BINOP:
+        c_rewrite_ns_method_calls(n->binop.left);
+        c_rewrite_ns_method_calls(n->binop.right);
+        return;
+    case NODE_UNARY:      c_rewrite_ns_method_calls(n->unary.expr); return;
+    case NODE_CALL:
+        c_rewrite_ns_method_calls(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            c_rewrite_ns_method_calls(n->call.args.items[i]);
+        return;
+    case NODE_INDEX:
+        c_rewrite_ns_method_calls(n->index.obj);
+        c_rewrite_ns_method_calls(n->index.index);
+        return;
+    case NODE_FIELD:      c_rewrite_ns_method_calls(n->field.obj); return;
+    case NODE_TRY:
+        c_rewrite_ns_method_calls(n->try_.body);
+        c_rewrite_ns_method_calls(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_rewrite_ns_method_calls(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_MATCH:
+        c_rewrite_ns_method_calls(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_rewrite_ns_method_calls(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            c_rewrite_ns_method_calls(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            c_rewrite_ns_method_calls(n->lit_map.keys.items[i]);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            c_rewrite_ns_method_calls(n->lit_map.vals.items[i]);
+        return;
+    case NODE_RANGE:
+        c_rewrite_ns_method_calls(n->range.start);
+        c_rewrite_ns_method_calls(n->range.end);
+        return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            c_rewrite_ns_method_calls(n->lit_string.parts.items[i]);
+        return;
+    case NODE_DEFER:      c_rewrite_ns_method_calls(n->defer_.body); return;
+    default: return;
+    }
+}
+
+/* Lower a single NODE_USE statement. Splices the imported file's
+ * statements into `out_stmts` (without their NODE_EXPORT entries),
+ * appends a namespace-binding `let alias = #{...}` map, and emits any
+ * selective binding aliases. */
+static void c_lower_use_stmt(Node *u, NodeList *out_stmts) {
+    if (!u || VAL_TAG(u) != NODE_USE || !u->use_.path) return;
+    if (u->use_.is_plugin) return;
+    char resolved[2048];
+    c_resolve_use_path(u->use_.path, resolved, sizeof(resolved));
+    Node *modprog = c_load_use_module(resolved);
+    if (!modprog) return;
+
+    /* On first encounter splice the module's non-export statements and
+     * recursively lower any nested `use`. We mark the module's
+     * statements as already-spliced via a static flag. */
+    int first = 1;
+    for (int i = 0; i < g_n_c_use_mods; i++) {
+        if (g_c_use_mods[i].prog == modprog) {
+            /* Use sentinel slot to avoid double-splicing. We co-opt the
+             * `path` field's last byte: if cleared to "@spliced@", skip. */
+            if (g_c_use_mods[i].path_owned &&
+                strstr(g_c_use_mods[i].path_owned, "@spliced") != NULL)
+                first = 0;
+            break;
+        }
+    }
+
+    if (first) {
+        for (int i = 0; i < modprog->program.stmts.len; i++) {
+            Node *st = modprog->program.stmts.items[i];
+            if (!st) continue;
+            if (VAL_TAG(st) == NODE_EXPORT) continue;
+            if (VAL_TAG(st) == NODE_USE) {
+                c_lower_use_stmt(st, out_stmts);
+                continue;
+            }
+            nodelist_push(out_stmts, st);
+        }
+        /* mark spliced */
+        for (int i = 0; i < g_n_c_use_mods; i++) {
+            if (g_c_use_mods[i].prog == modprog) {
+                char *marker = (char*)malloc(strlen(g_c_use_mods[i].path_owned) + 16);
+                snprintf(marker, strlen(g_c_use_mods[i].path_owned) + 16,
+                         "%s@spliced@", g_c_use_mods[i].path_owned);
+                free(g_c_use_mods[i].path_owned);
+                g_c_use_mods[i].path_owned = marker;
+                break;
+            }
+        }
+    }
+
+    /* collect exports (or fall back to every binding name) */
+    const char **locals = NULL;
+    const char **aliases = NULL;
+    int n_exports = 0;
+    int any_explicit = c_collect_exports(modprog, &locals, &aliases, &n_exports);
+    static const char *fallback_locals[256];
+    static const char *fallback_aliases[256];
+    if (!any_explicit) {
+        n_exports = 0;
+        for (int i = 0; i < modprog->program.stmts.len && n_exports < 256; i++) {
+            const char *nm = c_stmt_export_name(modprog->program.stmts.items[i]);
+            if (!nm) continue;
+            fallback_locals[n_exports] = nm;
+            fallback_aliases[n_exports] = nm;
+            n_exports++;
+        }
+        locals = fallback_locals;
+        aliases = fallback_aliases;
+    }
+
+    if (u->use_.nnames > 0) {
+        /* selective: `use "..." { name [as alias], ... }`. Bind each
+         * requested local to its imported counterpart. */
+        for (int i = 0; i < u->use_.nnames; i++) {
+            const char *src = u->use_.names[i];
+            const char *dst = (u->use_.name_aliases && u->use_.name_aliases[i])
+                                  ? u->use_.name_aliases[i] : src;
+            if (!src || !dst) continue;
+            /* find matching local for src (which is the public alias) */
+            const char *target_local = src;
+            for (int k = 0; k < n_exports; k++) {
+                if (aliases[k] && strcmp(aliases[k], src) == 0) {
+                    target_local = locals[k];
+                    break;
+                }
+            }
+            if (strcmp(dst, target_local) == 0) continue; /* no-op */
+            nodelist_push(out_stmts, mkc_let(dst, mkc_ident(target_local), 0));
+        }
+    } else {
+        /* namespace import: `let alias = #{ "pubname": local, ... }` */
+        char alias[256];
+        if (u->use_.alias && u->use_.alias[0])
+            snprintf(alias, sizeof(alias), "%s", u->use_.alias);
+        else
+            c_derive_use_alias(u->use_.path, alias, sizeof(alias));
+
+        Node *map = node_new(NODE_LIT_MAP, span_zero());
+        map->lit_map.keys = nodelist_new();
+        map->lit_map.vals = nodelist_new();
+        for (int i = 0; i < n_exports; i++) {
+            nodelist_push(&map->lit_map.keys, mkc_str_lit(aliases[i]));
+            nodelist_push(&map->lit_map.vals, mkc_ident(locals[i]));
+        }
+        nodelist_push(out_stmts, mkc_let(alias, map, 0));
+        c_ns_add(alias);
+    }
+}
+
+static void c_reset_use_state(void) {
+    for (int i = 0; i < g_n_c_use_mods; i++) {
+        if (g_c_use_mods[i].prog) node_free(g_c_use_mods[i].prog);
+        free(g_c_use_mods[i].src);
+        free(g_c_use_mods[i].path);
+        free(g_c_use_mods[i].path_owned);
+        g_c_use_mods[i].path = NULL;
+        g_c_use_mods[i].prog = NULL;
+        g_c_use_mods[i].src = NULL;
+        g_c_use_mods[i].path_owned = NULL;
+    }
+    g_n_c_use_mods = 0;
+    for (int i = 0; i < g_n_c_ns_names; i++) free((char*)g_c_ns_names[i]);
+    g_n_c_ns_names = 0;
+    g_c_src_dir[0] = '\0';
+}
+
+/* Top-level lowering driver. Mutates the program AST in place. */
+static void c_lower_program(Node *program, const char *src_filename) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+
+    c_reset_use_state();
+    g_c_has_generator = 0;
+
+    if (src_filename) {
+        const char *slash = strrchr(src_filename, '/');
+        if (slash && slash != src_filename) {
+            size_t n = (size_t)(slash - src_filename);
+            if (n >= sizeof(g_c_src_dir)) n = sizeof(g_c_src_dir) - 1;
+            memcpy(g_c_src_dir, src_filename, n);
+            g_c_src_dir[n] = '\0';
+        }
+    }
+
+    /* Phase 1: rename user `main` to `__user_main` if present. */
+    int rename_main = 0;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *s = program->program.stmts.items[i];
+        if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name &&
+            strcmp(s->fn_decl.name, "main") == 0) {
+            free(s->fn_decl.name);
+            s->fn_decl.name = xs_strdup("__user_main");
+            rename_main = 1;
+        }
+    }
+    if (rename_main) c_rename_main_refs(program);
+
+    /* Phase 2: splice `use` imports (recursive). NODE_USE entries are
+     * replaced with the imported file's contents plus any namespace /
+     * selective bindings. */
+    NodeList new_stmts = nodelist_new();
+    int has_use = 0;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st) continue;
+        if (VAL_TAG(st) == NODE_USE) {
+            has_use = 1;
+            c_lower_use_stmt(st, &new_stmts);
+            continue;
+        }
+        if (VAL_TAG(st) == NODE_EXPORT) {
+            /* importer-side `export {...}` is a publish list, not
+             * runnable code -- drop it. */
+            continue;
+        }
+        nodelist_push(&new_stmts, st);
+    }
+    if (has_use) {
+        free(program->program.stmts.items);
+        program->program.stmts = new_stmts;
+        c_rewrite_ns_method_calls(program);
+    } else {
+        free(new_stmts.items);
+    }
+
+    /* Phase 3: lower await/spawn/nursery + clear async markers. */
+    c_lower_node(program);
+
+    /* Phase 4: lower fn* generators to eager-array fill. Inject the
+     * runtime helpers and wrap for-in iters once. */
+    c_lower_all_generators(program);
+    if (g_c_has_generator) {
+        NodeList helpers = nodelist_new();
+        c_inject_generator_helpers(&helpers);
+        if (helpers.len > 0) {
+            NodeList combined = nodelist_new();
+            for (int i = 0; i < helpers.len; i++)
+                nodelist_push(&combined, helpers.items[i]);
+            for (int i = 0; i < program->program.stmts.len; i++)
+                nodelist_push(&combined, program->program.stmts.items[i]);
+            free(helpers.items);
+            free(program->program.stmts.items);
+            program->program.stmts = combined;
+        }
+        c_wrap_for_iters(program);
+    }
+}
+
 char *transpile_c(Node *program, const char *filename) {
+    /* Lower the AST first so the codegen sees only constructs it
+     * already handles: no async markers, no NODE_AWAIT/SPAWN/NURSERY
+     * wrappers, no generator fns, no `use` imports. */
+    c_lower_program(program, filename);
+
     const char *unsupported = find_unsupported_for_c(program);
     if (unsupported) {
         fprintf(stderr, "xs --emit c: %s not supported on this target. "
@@ -5551,8 +6766,34 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    return XS_NULL;\n"
         "}\n\n"
-        "/* iterator-as-method: .next() returns the next element or null. */\n"
+        "/* iterator-as-method: .next() returns either the iterator-protocol\n"
+        " * shape {value, done} when the receiver is a generator map (built\n"
+        " * by lowered fn* bodies) or the next element otherwise. */\n"
         "static xs_val xs_iter_next_val(xs_val *iter) {\n"
+        "    if (iter && iter->tag == 6 && iter->p) {\n"
+        "        xs_hmap *m = (xs_hmap*)iter->p;\n"
+        "        int has_items = 0, has_pos = 0;\n"
+        "        for (int i = 0; i < m->len; i++) {\n"
+        "            if (strcmp(m->keys[i], \"__items\") == 0) has_items = 1;\n"
+        "            if (strcmp(m->keys[i], \"__pos\")   == 0) has_pos = 1;\n"
+        "        }\n"
+        "        if (has_items && has_pos) {\n"
+        "            xs_val items = xs_index(*iter, XS_STR(\"__items\"));\n"
+        "            xs_val pos   = xs_index(*iter, XS_STR(\"__pos\"));\n"
+        "            xs_val out = xs_map(0);\n"
+        "            int64_t p = (pos.tag == 0) ? pos.i : 0;\n"
+        "            xs_arr *a = (items.tag == 5 && items.p) ? (xs_arr*)items.p : NULL;\n"
+        "            if (!a || p >= a->len) {\n"
+        "                xs_map_put(&out, XS_STR(\"value\"), XS_NULL);\n"
+        "                xs_map_put(&out, XS_STR(\"done\"), XS_BOOL(1));\n"
+        "                return out;\n"
+        "            }\n"
+        "            xs_map_put(iter, XS_STR(\"__pos\"), XS_INT(p + 1));\n"
+        "            xs_map_put(&out, XS_STR(\"value\"), a->items[p]);\n"
+        "            xs_map_put(&out, XS_STR(\"done\"),  XS_BOOL(0));\n"
+        "            return out;\n"
+        "        }\n"
+        "    }\n"
         "    xs_val out;\n"
         "    if (xs_iter_next(iter, &out)) return out;\n"
         "    return XS_NULL;\n"
@@ -5804,28 +7045,9 @@ char *transpile_c(Node *program, const char *filename) {
             n_actor_fields = 0;
         }
 
-        /* emit async functions at file scope */
-        for (int i = 0; i < program->program.stmts.len; i++) {
-            Node *st = program->program.stmts.items[i];
-            if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
-            if (is_main_fn(st)) continue;
-            if (st->fn_decl.is_async) {
-                /* async fn -> regular function at file scope */
-                sb_add(&s, "static xs_val ");
-                sb_add(&s, st->fn_decl.name);
-                emit_params_c(&s, &st->fn_decl.params);
-                sb_add(&s, " {\n");
-                if (st->fn_decl.body && VAL_TAG(st->fn_decl.body) == NODE_BLOCK) {
-                    emit_block_body(&s, st->fn_decl.body, 1);
-                    if (st->fn_decl.body->block.expr) {
-                        sb_add(&s, "    return ");
-                        emit_expr(&s, st->fn_decl.body->block.expr, 1);
-                        sb_add(&s, ";\n");
-                    }
-                }
-                sb_add(&s, "    return XS_NULL;\n}\n\n");
-            }
-        }
+        /* async fns are now lowered to plain fns by c_lower_program;
+         * the regular file-scope emission path picks them up like any
+         * other top-level function. */
     }
 
     /* emit forward declarations BEFORE lambdas so a lambda body can
@@ -5959,7 +7181,7 @@ char *transpile_c(Node *program, const char *filename) {
             for (int i = 0; i < program->program.stmts.len; i++) {
                 Node *st = program->program.stmts.items[i];
                 if (!st) continue;
-                if (VAL_TAG(st) == NODE_FN_DECL && !is_main_fn(st) && !st->fn_decl.is_async)
+                if (VAL_TAG(st) == NODE_FN_DECL && !is_main_fn(st))
                     emit_stmt(&s, st, 0);
                 else if (VAL_TAG(st) == NODE_STRUCT_DECL || VAL_TAG(st) == NODE_ENUM_DECL ||
                          VAL_TAG(st) == NODE_CLASS_DECL || VAL_TAG(st) == NODE_TRAIT_DECL ||
