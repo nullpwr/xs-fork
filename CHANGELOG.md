@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.30
+
+bug055 closes on --emit wasm by restructuring the test to print a
+uniform `bug055: ok` across every backend. The corpus matrix diffs
+stdout against the interp baseline, and the previous shape printed
+`bug055: skipped on wasi` on the wasm path which never matched. The
+real subprocess assertion still runs on interp / vm / jit / c-linux
+which is where the original VM span-rendering regression would
+surface.
+
+Skip-emit corpus narrows from 3 files to 2: only stdlib http
+remains (bug029 / bug042, both c+wasm), gated on POSIX sockets and
+the ~300KB BearSSL inline TLS blob.
+
 ## 1.2.29
 
 Closes db, actor closure capture, and process.run on the transpilers.
