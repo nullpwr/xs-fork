@@ -1,4 +1,3 @@
--- skip-emit: c (TODO: c transpiler lacks int->bigint promotion on overflow (10 ** 20))
 -- bug038: more dispatch elimination on top of bug037.
 --
 -- 1. compile-time fold for binary `LIT op LIT` on int / float operands.

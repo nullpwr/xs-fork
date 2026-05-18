@@ -1632,7 +1632,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (strcmp(on, "math") == 0 || strcmp(on, "string") == 0 ||
                 strcmp(on, "json") == 0 || strcmp(on, "time") == 0 ||
                 strcmp(on, "random") == 0 || strcmp(on, "os") == 0 ||
-                strcmp(on, "fmt") == 0)
+                strcmp(on, "fmt") == 0 || strcmp(on, "fs") == 0)
                 mod_name = on;
         }
         /* check if receiver is a known struct/class instance whose impl
@@ -1697,8 +1697,59 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
                 else sb_add(s, "XS_FLOAT(0)");
                 sb_addc(s, ')');
+            } else if (strcmp(meth, "format") == 0) {
+                sb_add(s, "xs_time_format(");
+                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_INT(0)");
+                sb_add(s, ", ");
+                if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
+                else sb_add(s, "XS_STR(\"%Y-%m-%d %H:%M:%S\")");
+                sb_addc(s, ')');
             } else {
                 sb_printf(s, "XS_NULL /* time.%s */", meth);
+            }
+        } else if (mod_name && strcmp(mod_name, "fs") == 0) {
+            const char *fn = NULL;
+            if (strcmp(meth, "read") == 0)          fn = "xs_fs_read";
+            else if (strcmp(meth, "write") == 0)    fn = "xs_fs_write";
+            else if (strcmp(meth, "exists") == 0)   fn = "xs_fs_exists";
+            else if (strcmp(meth, "cwd") == 0)      fn = "xs_fs_cwd";
+            else if (strcmp(meth, "list_dir") == 0 ||
+                     strcmp(meth, "list") == 0 ||
+                     strcmp(meth, "ls") == 0)       fn = "xs_fs_list_dir";
+            else if (strcmp(meth, "remove") == 0)   fn = "xs_fs_remove";
+            else if (strcmp(meth, "mkdir") == 0)    fn = "xs_fs_mkdir";
+            if (fn) {
+                sb_printf(s, "%s(", fn);
+                for (int i = 0; i < n->method_call.args.len; i++) {
+                    if (i) sb_add(s, ", ");
+                    emit_expr(s, n->method_call.args.items[i], depth);
+                }
+                sb_addc(s, ')');
+            } else {
+                sb_printf(s, "XS_NULL /* fs.%s unsupported on --emit c */", meth);
+            }
+        } else if (mod_name && strcmp(mod_name, "os") == 0) {
+            if (strcmp(meth, "getenv") == 0 || strcmp(meth, "env") == 0) {
+                sb_add(s, "xs_os_getenv(");
+                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_STR(\"\")");
+                sb_addc(s, ')');
+            } else if (strcmp(meth, "args") == 0) {
+                sb_add(s, "xs_os_args()");
+            } else if (strcmp(meth, "exit") == 0) {
+                sb_add(s, "xs_os_exit(");
+                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_INT(0)");
+                sb_addc(s, ')');
+            } else if (strcmp(meth, "hostname") == 0) {
+                sb_add(s, "xs_os_hostname()");
+            } else if (strcmp(meth, "platform") == 0) {
+                sb_add(s, "xs_os_platform()");
+            } else if (strcmp(meth, "cwd") == 0) {
+                sb_add(s, "xs_fs_cwd()");
+            } else {
+                sb_printf(s, "XS_NULL /* os.%s unsupported on --emit c */", meth);
             }
         } else if (mod_name && strcmp(mod_name, "json") == 0) {
             const char *fn = NULL;
@@ -2557,6 +2608,13 @@ static void emit_expr(SB *s, Node *n, int depth) {
             else if (strcmp(fn, "inf") == 0)  sb_add(s, "XS_FLOAT(1.0/0.0)");
             else if (strcmp(fn, "nan") == 0)  sb_add(s, "XS_FLOAT(0.0/0.0)");
             else sb_printf(s, "XS_NULL /* math.%s */", fn);
+        } else if (n->field.obj && VAL_TAG(n->field.obj) == NODE_IDENT &&
+                   strcmp(n->field.obj->ident.name, "os") == 0) {
+            const char *fn = n->field.name;
+            if (strcmp(fn, "platform") == 0)    sb_add(s, "xs_os_platform()");
+            else if (strcmp(fn, "sep") == 0)    sb_add(s, "xs_os_sep()");
+            else if (strcmp(fn, "args") == 0)   sb_add(s, "xs_os_args()");
+            else sb_printf(s, "XS_NULL /* os.%s */", fn);
         } else {
             /* struct/map fields or tuple indices */
             sb_printf(s, "xs_index(");
@@ -3749,7 +3807,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_indent(s, depth);
             sb_add(s, "int main(int argc, char **argv) {\n");
             sb_indent(s, depth + 1);
-            sb_add(s, "(void)argc; (void)argv;\n");
+            sb_add(s, "xs_user_argc = argc; xs_user_argv = argv;\n");
             sb_indent(s, depth + 1);
             sb_add(s, "xs_push_frame(\"main\");\n");
             if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
@@ -6339,7 +6397,17 @@ char *transpile_c(Node *program, const char *filename) {
         "#include <stdarg.h>\n"
         "#include <math.h>\n"
         "#include <time.h>\n"
-        "#include <setjmp.h>\n\n"
+        "#include <setjmp.h>\n"
+        "#include <sys/stat.h>\n"
+        "#include <sys/types.h>\n"
+        "#if defined(_WIN32)\n"
+        "#  include <direct.h>\n"
+        "#  include <io.h>\n"
+        "#  include <windows.h>\n"
+        "#else\n"
+        "#  include <unistd.h>\n"
+        "#  include <dirent.h>\n"
+        "#endif\n\n"
         "/* XS runtime types */\n"
         "typedef struct xs_val {\n"
         "    int tag; /* 0=int, 1=float, 2=str, 3=bool, 4=null, 5=array, 6=map */\n"
@@ -6367,7 +6435,21 @@ char *transpile_c(Node *program, const char *filename) {
         "typedef struct { char **keys; xs_val *vals; int len; int cap; } xs_hmap;\n\n"
         "static const char *xs_to_str(xs_val v);\n"
         "static void xs_throw_arith(const char *kind, const char *msg);\n\n"
+        "static const char *xs_bi_str(xs_val v);\n"
         "static int xs_eq(xs_val a, xs_val b) {\n"
+        "    /* bigint <-> int / bigint <-> bigint comparisons compare the\n"
+        "       canonical decimal-magnitude string. Falls back to tag-equal\n"
+        "       for other mismatched pairs. */\n"
+        "    if (a.tag == 9 || b.tag == 9) {\n"
+        "        if ((a.tag == 9 || a.tag == 0) && (b.tag == 9 || b.tag == 0))\n"
+        "            return strcmp(xs_bi_str(a), xs_bi_str(b)) == 0;\n"
+        "        if (a.tag == 1 || b.tag == 1) {\n"
+        "            double af = a.tag == 1 ? a.f : strtod(xs_bi_str(a), NULL);\n"
+        "            double bf = b.tag == 1 ? b.f : strtod(xs_bi_str(b), NULL);\n"
+        "            return af == bf;\n"
+        "        }\n"
+        "        return 0;\n"
+        "    }\n"
         "    if (a.tag != b.tag) {\n"
         "        if ((a.tag == 0 && b.tag == 1) || (a.tag == 1 && b.tag == 0)) {\n"
         "            double af = a.tag == 1 ? a.f : (double)a.i;\n"
@@ -6407,7 +6489,28 @@ char *transpile_c(Node *program, const char *filename) {
         "        default: return 0;\n"
         "    }\n"
         "}\n\n"
+        "static int xs_bi_cmp_str(const char *a, const char *b) {\n"
+        "    /* Compare two non-negative decimal magnitudes. Strip leading\n"
+        "       zeros so \"010\" and \"10\" rank equal; then length wins,\n"
+        "       falling back to strcmp at equal length. */\n"
+        "    if (!a) a = \"0\"; if (!b) b = \"0\";\n"
+        "    while (*a == '0' && *(a+1)) a++;\n"
+        "    while (*b == '0' && *(b+1)) b++;\n"
+        "    size_t la = strlen(a), lb = strlen(b);\n"
+        "    if (la != lb) return la < lb ? -1 : 1;\n"
+        "    int c = strcmp(a, b);\n"
+        "    return (c > 0) - (c < 0);\n"
+        "}\n"
         "static int xs_cmp(xs_val a, xs_val b) {\n"
+        "    if (a.tag == 9 || b.tag == 9) {\n"
+        "        if ((a.tag == 9 || a.tag == 0) && (b.tag == 9 || b.tag == 0))\n"
+        "            return xs_bi_cmp_str(xs_bi_str(a), xs_bi_str(b));\n"
+        "        if (a.tag == 1 || b.tag == 1) {\n"
+        "            double af = a.tag == 1 ? a.f : strtod(xs_bi_str(a), NULL);\n"
+        "            double bf = b.tag == 1 ? b.f : strtod(xs_bi_str(b), NULL);\n"
+        "            return (af > bf) - (af < bf);\n"
+        "        }\n"
+        "    }\n"
         "    if (a.tag == 0 && b.tag == 0) return (a.i > b.i) - (a.i < b.i);\n"
         "    if (a.tag == 1 || b.tag == 1) {\n"
         "        double af = a.tag == 1 ? a.f : (double)a.i;\n"
@@ -7958,6 +8061,151 @@ char *transpile_c(Node *program, const char *filename) {
         "    const char *p = s.s;\n"
         "    return __xs_json_read(&p);\n"
         "}\n\n"
+        "/* ---- fs / os / time module helpers ----------------------------\n"
+        " * Mirrors the small surface area of the import-fs / import-os /\n"
+        " * import-time tests that the corpus exercises. Uses libc + POSIX\n"
+        " * directly; Windows falls back to the Win32 equivalents where the\n"
+        " * POSIX call doesn't exist. No external runtime deps. */\n"
+        "static xs_val xs_fs_read(xs_val path) {\n"
+        "    if (path.tag != 2 || !path.s) return XS_NULL;\n"
+        "    FILE *f = fopen(path.s, \"rb\");\n"
+        "    if (!f) return XS_NULL;\n"
+        "    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);\n"
+        "    if (n < 0) { fclose(f); return XS_NULL; }\n"
+        "    char *buf = (char*)malloc((size_t)n + 1);\n"
+        "    size_t r = fread(buf, 1, (size_t)n, f); fclose(f);\n"
+        "    buf[r] = 0; return XS_STR(buf);\n"
+        "}\n"
+        "static xs_val xs_fs_write(xs_val path, xs_val content) {\n"
+        "    if (path.tag != 2 || !path.s) return XS_BOOL(0);\n"
+        "    FILE *f = fopen(path.s, \"wb\");\n"
+        "    if (!f) return XS_BOOL(0);\n"
+        "    if (content.tag == 2 && content.s) fwrite(content.s, 1, strlen(content.s), f);\n"
+        "    else if (content.s) { const char *cs = xs_to_str(content); fwrite(cs, 1, strlen(cs), f); }\n"
+        "    fclose(f); return XS_BOOL(1);\n"
+        "}\n"
+        "static xs_val xs_fs_exists(xs_val path) {\n"
+        "    if (path.tag != 2 || !path.s) return XS_BOOL(0);\n"
+        "    struct stat st;\n"
+        "    return XS_BOOL(stat(path.s, &st) == 0);\n"
+        "}\n"
+        "static xs_val xs_fs_cwd(void) {\n"
+        "    char buf[4096];\n"
+        "#if defined(_WIN32)\n"
+        "    if (!_getcwd(buf, sizeof buf)) return XS_NULL;\n"
+        "#else\n"
+        "    if (!getcwd(buf, sizeof buf)) return XS_NULL;\n"
+        "#endif\n"
+        "    return XS_STR(strdup(buf));\n"
+        "}\n"
+        "static xs_val xs_fs_list_dir(xs_val path) {\n"
+        "    const char *p = (path.tag == 2 && path.s) ? path.s : \".\";\n"
+        "    xs_val out = xs_array(0);\n"
+        "#if defined(_WIN32)\n"
+        "    char pat[4096];\n"
+        "    snprintf(pat, sizeof pat, \"%s\\\\*\", p);\n"
+        "    WIN32_FIND_DATAA fd;\n"
+        "    HANDLE h = FindFirstFileA(pat, &fd);\n"
+        "    if (h == INVALID_HANDLE_VALUE) return out;\n"
+        "    do {\n"
+        "        const char *n = fd.cFileName;\n"
+        "        if (strcmp(n, \".\") == 0 || strcmp(n, \"..\") == 0) continue;\n"
+        "        xs_arr_push(out, XS_STR(strdup(n)));\n"
+        "    } while (FindNextFileA(h, &fd));\n"
+        "    FindClose(h);\n"
+        "#else\n"
+        "    DIR *d = opendir(p);\n"
+        "    if (!d) return out;\n"
+        "    struct dirent *e;\n"
+        "    while ((e = readdir(d)) != NULL) {\n"
+        "        const char *n = e->d_name;\n"
+        "        if (strcmp(n, \".\") == 0 || strcmp(n, \"..\") == 0) continue;\n"
+        "        xs_arr_push(out, XS_STR(strdup(n)));\n"
+        "    }\n"
+        "    closedir(d);\n"
+        "#endif\n"
+        "    return out;\n"
+        "}\n"
+        "static xs_val xs_fs_remove(xs_val path) {\n"
+        "    if (path.tag != 2 || !path.s) return XS_BOOL(0);\n"
+        "    return XS_BOOL(remove(path.s) == 0);\n"
+        "}\n"
+        "static xs_val xs_fs_mkdir(xs_val path) {\n"
+        "    if (path.tag != 2 || !path.s) return XS_BOOL(0);\n"
+        "#if defined(_WIN32)\n"
+        "    return XS_BOOL(_mkdir(path.s) == 0);\n"
+        "#else\n"
+        "    return XS_BOOL(mkdir(path.s, 0755) == 0);\n"
+        "#endif\n"
+        "}\n"
+        "/* main() stashes argc/argv into these for os.args() to consume. */\n"
+        "static int xs_user_argc = 0;\n"
+        "static char **xs_user_argv = NULL;\n"
+        "static xs_val xs_os_args(void) {\n"
+        "    xs_val out = xs_array(0);\n"
+        "    for (int i = 0; i < xs_user_argc; i++)\n"
+        "        xs_arr_push(out, XS_STR(xs_user_argv[i] ? xs_user_argv[i] : \"\"));\n"
+        "    return out;\n"
+        "}\n"
+        "static xs_val xs_os_getenv(xs_val name) {\n"
+        "    if (name.tag != 2 || !name.s) return XS_NULL;\n"
+        "    const char *v = getenv(name.s);\n"
+        "    return v ? XS_STR(strdup(v)) : XS_NULL;\n"
+        "}\n"
+        "static xs_val xs_os_exit(xs_val code) {\n"
+        "    int c = (code.tag == 0) ? (int)code.i : 0;\n"
+        "    exit(c);\n"
+        "    return XS_NULL;\n"
+        "}\n"
+        "static xs_val xs_os_hostname(void) {\n"
+        "    char buf[256];\n"
+        "#if defined(_WIN32)\n"
+        "    DWORD n = sizeof buf;\n"
+        "    if (!GetComputerNameA(buf, &n)) return XS_STR(strdup(\"\"));\n"
+        "    return XS_STR(strdup(buf));\n"
+        "#else\n"
+        "    if (gethostname(buf, sizeof buf) != 0) return XS_STR(strdup(\"\"));\n"
+        "    buf[sizeof buf - 1] = 0;\n"
+        "    return XS_STR(strdup(buf));\n"
+        "#endif\n"
+        "}\n"
+        "static xs_val xs_os_platform(void) {\n"
+        "#if defined(__APPLE__)\n"
+        "    return XS_STR(\"darwin\");\n"
+        "#elif defined(_WIN32)\n"
+        "    return XS_STR(\"windows\");\n"
+        "#elif defined(__wasi__) || defined(__EMSCRIPTEN__)\n"
+        "    return XS_STR(\"wasi\");\n"
+        "#else\n"
+        "    return XS_STR(\"linux\");\n"
+        "#endif\n"
+        "}\n"
+        "static xs_val xs_os_sep(void) {\n"
+        "#if defined(_WIN32)\n"
+        "    return XS_STR(\"\\\\\");\n"
+        "#else\n"
+        "    return XS_STR(\"/\");\n"
+        "#endif\n"
+        "}\n"
+        "static xs_val xs_time_format(xs_val epoch, xs_val fmt) {\n"
+        "    time_t t;\n"
+        "    if (epoch.tag == 0) t = (time_t)epoch.i;\n"
+        "    else if (epoch.tag == 1) t = (time_t)epoch.f;\n"
+        "    else return XS_NULL;\n"
+        "    const char *fs = (fmt.tag == 2 && fmt.s) ? fmt.s : \"%Y-%m-%d %H:%M:%S\";\n"
+        "    struct tm tmv;\n"
+        "#if defined(_WIN32)\n"
+        "    struct tm *tp = localtime(&t);\n"
+        "    if (!tp) return XS_NULL;\n"
+        "    tmv = *tp;\n"
+        "#else\n"
+        "    if (!localtime_r(&t, &tmv)) return XS_NULL;\n"
+        "#endif\n"
+        "    char buf[256];\n"
+        "    size_t n = strftime(buf, sizeof buf, fs, &tmv);\n"
+        "    if (n == 0) buf[0] = 0;\n"
+        "    return XS_STR(strdup(buf));\n"
+        "}\n\n"
     );
 
     if (!program) {
@@ -8224,7 +8472,7 @@ char *transpile_c(Node *program, const char *filename) {
         }
 
         sb_add(&s, "int main(int argc, char **argv) {\n");
-        sb_add(&s, "    (void)argc; (void)argv;\n");
+        sb_add(&s, "    xs_user_argc = argc; xs_user_argv = argv;\n");
 
         /* emit actor state initializations */
         for (int i = 0; i < n_actor_vars; i++) {
