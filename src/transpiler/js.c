@@ -3961,7 +3961,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            }\n");
     sb_add(&s, "            case 'scan': { const acc = [args[0]]; for (const x of o) acc.push(args[1](acc[acc.length-1], x)); return acc; }\n");
     sb_add(&s, "            case 'join': return o.join(String(args[0] ?? ''));\n");
-    sb_add(&s, "            case 'concat': case 'extend': return o.concat(args[0]);\n");
+    sb_add(&s, "            case 'concat': case 'extend': return o.concat(...args);\n");
     sb_add(&s, "            case 'push': { o.push(...args); return o; }\n");
     sb_add(&s, "            case 'pop': return o.pop();\n");
     sb_add(&s, "            case 'shift': return o.shift();\n");

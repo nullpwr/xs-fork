@@ -2461,15 +2461,46 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 sb_indent(s, depth);
                 sb_printf(s, "__mr_r_%d; })", mid);
             } else {
-                /* generic: function-style call */
-                sb_add(s, meth);
-                sb_addc(s, '(');
-                emit_expr(s, n->method_call.obj, depth);
-                for (int i = 0; i < n->method_call.args.len; i++) {
-                    sb_add(s, ", ");
-                    emit_expr(s, n->method_call.args.items[i], depth);
+                /* Generic fallback. If the method name happens to match
+                 * a top-level fn declaration (e.g. UFCS-style), emit
+                 * a direct C call: name(obj, args). Otherwise treat it
+                 * as a dynamic dispatch through the receiver: look the
+                 * method up as a field of the value and invoke it via
+                 * xs_call, mirroring how the interpreter resolves
+                 * `obj.meth(...)` on a map / struct that carries an
+                 * unbound callable field (bug041: `{ handle: fn(req) }`
+                 * with `obj.handle(req)` was generating `handle(obj, req)`
+                 * which collides with the unrelated `handle` keyword
+                 * machinery in C and never resolves the closure).
+                 */
+                if (meth && lookup_fn_param_count(meth) >= 0) {
+                    sb_add(s, meth);
+                    sb_addc(s, '(');
+                    emit_expr(s, n->method_call.obj, depth);
+                    for (int i = 0; i < n->method_call.args.len; i++) {
+                        sb_add(s, ", ");
+                        emit_expr(s, n->method_call.args.items[i], depth);
+                    }
+                    sb_addc(s, ')');
+                } else {
+                    int mc_id = defer_label_counter++;
+                    sb_printf(s, "({ xs_val __mc_obj_%d = ", mc_id);
+                    emit_expr(s, n->method_call.obj, depth);
+                    sb_printf(s, "; xs_val __mc_fn_%d = xs_index(__mc_obj_%d, XS_STR(\"%s\"));\n",
+                              mc_id, mc_id, meth);
+                    int an = n->method_call.args.len;
+                    sb_indent(s, depth+1);
+                    sb_printf(s, "xs_val __mc_args_%d[%d];\n", mc_id, an > 0 ? an : 1);
+                    for (int i = 0; i < an; i++) {
+                        sb_indent(s, depth+1);
+                        sb_printf(s, "__mc_args_%d[%d] = ", mc_id, i);
+                        emit_expr(s, n->method_call.args.items[i], depth);
+                        sb_add(s, ";\n");
+                    }
+                    sb_indent(s, depth+1);
+                    sb_printf(s, "xs_call(__mc_fn_%d, __mc_args_%d, %d); })",
+                              mc_id, mc_id, an);
                 }
-                sb_addc(s, ')');
             }
         }
         break;
@@ -3885,12 +3916,20 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_add(s, "}\n\n");
             /* emit a wrapper that adapts the typed C call signature to
              * xs_call's (env, args, argc) so the function can be passed
-             * around as an xs_val. */
+             * around as an xs_val. For overloaded names the wrapper
+             * has to disambiguate by arity too, otherwise the second
+             * `fn calc(x, y)` after `fn calc(x)` redefines the symbol
+             * and the C compiler chokes. */
             if (n->fn_decl.name && !is_main_fn(n)) {
                 int np = n->fn_decl.params.len;
                 sb_indent(s, depth);
-                sb_printf(s, "static xs_val __xs_wrap_%s(void *__env, xs_val *__args, int __argc) {\n",
-                          n->fn_decl.name);
+                if (count_fn_overloads(n->fn_decl.name) > 1) {
+                    sb_printf(s, "static xs_val __xs_wrap_%s_%d(void *__env, xs_val *__args, int __argc) {\n",
+                              n->fn_decl.name, np);
+                } else {
+                    sb_printf(s, "static xs_val __xs_wrap_%s(void *__env, xs_val *__args, int __argc) {\n",
+                              n->fn_decl.name);
+                }
                 sb_indent(s, depth + 1);
                 sb_add(s, "(void)__env; (void)__argc;\n");
                 sb_indent(s, depth + 1);
@@ -8012,8 +8051,13 @@ char *transpile_c(Node *program, const char *filename) {
                 emit_safe_name(&s, en);
                 emit_params_c(&s, &st->fn_decl.params);
                 sb_add(&s, ";\n");
-                sb_printf(&s, "static xs_val __xs_wrap_%s(void *, xs_val *, int);\n",
-                          st->fn_decl.name);
+                if (count_fn_overloads(st->fn_decl.name) > 1) {
+                    sb_printf(&s, "static xs_val __xs_wrap_%s_%d(void *, xs_val *, int);\n",
+                              st->fn_decl.name, st->fn_decl.params.len);
+                } else {
+                    sb_printf(&s, "static xs_val __xs_wrap_%s(void *, xs_val *, int);\n",
+                              st->fn_decl.name);
+                }
             } else if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name) {
                 for (int j = 0; j < st->class_decl.members.len; j++) {
                     Node *mm = st->class_decl.members.items[j];
