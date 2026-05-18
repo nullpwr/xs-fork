@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.22
+
+`--emit js` now lowers `import fs` and `import os` the same way
+the C transpiler does. fs maps to node:fs sync APIs wrapped in
+a lazy require, os maps to process.* + node:os. Surface area
+matches v1.2.21's C side: read / write / exists / cwd /
+list_dir / remove / mkdir for fs; getenv / args / exit /
+hostname / platform for os.
+
+Both polyfills are emitted only when the source actually contains
+`import fs` / `import os`, since the bare names collide with
+common user identifiers (bug015 uses `let fs = make_adders()`).
+Math / json / time / collections continue to ship unconditionally;
+those names are uncommon enough in user code to keep the existing
+shape.
+
 ## 1.2.21
 
 `--emit c` now lowers `import fs`, `import os`, `import time`
