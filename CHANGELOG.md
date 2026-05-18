@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.17
+
+`xs upgrade` now works on Windows. The previous build refused
+because Windows won't let a running .exe be overwritten in place;
+the new flow renames `xs.exe` to `xs.exe.old`, drops the new
+binary into the original path, and the next `xs` launch
+opportunistically deletes `.old`. `xs uninstall` uses the same
+trick with a reboot-time delete fallback for cases where another
+process (antivirus scanners, mostly) still holds a handle.
+
 ## 1.2.16
 
 Compile-time purity inference. Every fn / lambda gets a static
