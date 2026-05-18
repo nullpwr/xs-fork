@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.16
+
+Compile-time purity inference. Every fn / lambda gets a static
+purity verdict from a fixpoint pass that walks the program; the
+verdict is queryable at runtime via `__pure?(f)`. Wrapping
+decorators that depend on replaying or skipping the body
+(`@memoize`, `@retry`) now refuse to attach to an impure function
+and throw `PurityError` at decoration time. The bit travels through
+interp, vm, jit, `--emit c` (-O0 and -O2), and `--emit js`; on
+`--emit wasm` `__pure?` is a degenerate stub that always returns
+false (documented in STATUS).
+
+Dropped the `## Temporal Primitives` block from LANGUAGE that still
+taught the deprecated `every 1s {}` / `after 500ms {}` / `timeout
+{} else {}` / `debounce {}` statement forms. Those parsed out a
+while back; the only surviving form is the decorator (`@every`,
+`@delayed`, `@cron`, `@watch`), which the decorators section
+already covers.
+
 ## 1.2.15
 
 Four cross-backend divergences found by a strict probe matrix beyond
