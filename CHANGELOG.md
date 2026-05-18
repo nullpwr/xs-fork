@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.25
+
+C+JS emit grow a trigger registry: `__trigger_registry_size`,
+`__trigger_registry_name`, `__trigger_registry_fn` so the
+transpiled output exposes the same trigger-discovery surface
+that interp / vm / jit do. C side emits a static struct array
+of {name, fn} for every top-level trigger-decorated fn; main()
+seeds the three xs_val bindings as closures. JS side walks the
+program in the prelude and emits a plain array.
+
+JS emit gains multi-arity overload dispatch: `fn calc(x)` then
+`fn calc(x, y)` then `fn calc(x, y, z)` now route `calc(...)`
+through a small `args.length` switch instead of the second decl
+shadowing the first. mirrors the C-side mechanism from v1.2.18.
+
+bug046, bug050 narrow from c+js+wasm to wasm only.
+bug020 narrows from js+wasm to wasm only.
+
 ## 1.2.24
 
 `--emit js` lowers wrapping decorators: `@memoize`, `@retry(n)`,
