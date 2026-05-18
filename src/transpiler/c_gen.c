@@ -669,6 +669,67 @@ static void collect_idents(Node *n, const char **out, int *nout, int max) {
     }
     case NODE_EXPR_STMT: collect_idents(n->expr_stmt.expr, out, nout, max); break;
     case NODE_LET: case NODE_VAR: collect_idents(n->let.value, out, nout, max); break;
+    case NODE_LAMBDA: {
+        /* A nested lambda's free vars are also free vars of the outer,
+         * so the outer can box and forward them. Subtract the inner
+         * lambda's own params and local decls so its bindings don't leak
+         * out. Without this the outer's capture list misses anything
+         * referenced exclusively from a nested lambda body, and the
+         * generated C tries to forward an undeclared __box_x. */
+        const char *inner_idents[64];
+        int n_inner = 0;
+        collect_idents(n->lambda.body, inner_idents, &n_inner, 64);
+        const char *inner_locals[64];
+        int n_ilocals = 0;
+        collect_local_decls(n->lambda.body, inner_locals, &n_ilocals, 64);
+        for (int i = 0; i < n_inner; i++) {
+            const char *name = inner_idents[i];
+            int skip = 0;
+            for (int p = 0; p < n->lambda.params.len && !skip; p++)
+                if (n->lambda.params.items[p].name &&
+                    strcmp(n->lambda.params.items[p].name, name) == 0) skip = 1;
+            for (int d = 0; d < n_ilocals && !skip; d++)
+                if (strcmp(inner_locals[d], name) == 0) skip = 1;
+            if (!skip) {
+                if (*nout >= max) break;
+                int dup = 0;
+                for (int j = 0; j < *nout; j++)
+                    if (strcmp(out[j], name) == 0) { dup = 1; break; }
+                if (!dup) out[(*nout)++] = name;
+            }
+        }
+        break;
+    }
+    case NODE_FN_DECL: {
+        /* Same idea for nested fn-decls: their free vars must propagate
+         * to the enclosing scope's capture list. (Lowering normally
+         * rewrites these into lambdas before scan_lambdas runs, but
+         * be defensive in case the order changes.) */
+        if (!n->fn_decl.body) break;
+        const char *inner_idents[64];
+        int n_inner = 0;
+        collect_idents(n->fn_decl.body, inner_idents, &n_inner, 64);
+        const char *inner_locals[64];
+        int n_ilocals = 0;
+        collect_local_decls(n->fn_decl.body, inner_locals, &n_ilocals, 64);
+        for (int i = 0; i < n_inner; i++) {
+            const char *name = inner_idents[i];
+            int skip = 0;
+            for (int p = 0; p < n->fn_decl.params.len && !skip; p++)
+                if (n->fn_decl.params.items[p].name &&
+                    strcmp(n->fn_decl.params.items[p].name, name) == 0) skip = 1;
+            for (int d = 0; d < n_ilocals && !skip; d++)
+                if (strcmp(inner_locals[d], name) == 0) skip = 1;
+            if (!skip) {
+                if (*nout >= max) break;
+                int dup = 0;
+                for (int j = 0; j < *nout; j++)
+                    if (strcmp(out[j], name) == 0) { dup = 1; break; }
+                if (!dup) out[(*nout)++] = name;
+            }
+        }
+        break;
+    }
     default: break;
     }
 }
@@ -1412,6 +1473,17 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 /* e.g. util.shout(...): the namespace rewrite produced
                  * a FIELD callee. Routing through xs_call lets the
                  * runtime invoke a stored fn value. */
+                might_be_closure = 1;
+            }
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_CALL) {
+                /* `outer()()`: the inner call returns an xs_val that
+                 * holds the actual function. Apply via xs_call so the
+                 * closure dispatch happens at runtime instead of trying
+                 * to invoke an xs_val struct directly. */
+                might_be_closure = 1;
+            }
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_LAMBDA) {
+                /* (|x| x + 1)(7) and friends. */
                 might_be_closure = 1;
             }
             /* variable calls might be closures if the var was assigned from a function
@@ -2521,8 +2593,20 @@ static void emit_expr(SB *s, Node *n, int depth) {
                  * else needs boxing because the variable already outlives
                  * any lambda. local captures still go through __box_NAME. */
                 const char *cap = linfo->captures[ci];
+                int outer_cap_idx = -1;
+                if (current_lambda) {
+                    for (int oc = 0; oc < current_lambda->n_captures; oc++)
+                        if (strcmp(current_lambda->captures[oc], cap) == 0) {
+                            outer_cap_idx = oc; break;
+                        }
+                }
                 if (is_top_level_var(cap))
                     sb_printf(s, "__cenv_%d[%d] = &%s;\n", lid, ci, cap);
+                else if (outer_cap_idx >= 0)
+                    /* Forwarded from the enclosing lambda's env: re-use
+                     * the same box pointer so writes propagate up. */
+                    sb_printf(s, "__cenv_%d[%d] = ((xs_val**)__env)[%d];\n",
+                              lid, ci, outer_cap_idx);
                 else
                     sb_printf(s, "__cenv_%d[%d] = __box_%s;\n", lid, ci, cap);
             }
@@ -7930,6 +8014,18 @@ char *transpile_c(Node *program, const char *filename) {
         }
         sb_addc(&s, '\n');
     }
+
+    /* forward-declare every lambda so an earlier-emitted lambda body
+     * can hand off to a later one. Mutual / nested lambda chains both
+     * need this; without the prototypes gcc errors with
+     * "__xs_lambda_N undeclared". */
+    for (int li = 0; li < n_lambdas; li++) {
+        Node *ln = lambdas[li].node;
+        if (!ln || VAL_TAG(ln) != NODE_LAMBDA) continue;
+        sb_printf(&s, "static xs_val __xs_lambda_%d(void *__env, xs_val *__args, int __argc);\n",
+                  lambdas[li].id);
+    }
+    if (n_lambdas > 0) sb_addc(&s, '\n');
 
     /* emit lambda static functions */
     for (int li = 0; li < n_lambdas; li++) {

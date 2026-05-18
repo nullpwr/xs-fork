@@ -2796,12 +2796,42 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 int kl = 0;
                 int koff = strtab_add_with_len(ctx->strtab, fi->captures[ci], &kl);
                 emit_str_val(code, koff, kl);
-                /* Get the captured variable's current value */
+                /* Get the captured variable's current value. Look first
+                   for a local in the enclosing scope; if not found, the
+                   value is itself a capture of the current function and
+                   has to be forwarded out of __env so the inner closure
+                   sees through this layer. */
                 int var_idx = locals_find(locals, fi->captures[ci]);
-                if (var_idx >= 0)
+                if (var_idx >= 0) {
                     emit_local_get(code, var_idx);
-                else
-                    emit_null(code);
+                } else {
+                    int found_outer = 0;
+                    if (ctx->fn_infos && ctx->cur_fn_idx >= 0) {
+                        FuncInfo *outer = &((FuncInfo*)ctx->fn_infos)[ctx->cur_fn_idx];
+                        for (int oc = 0; oc < outer->n_captures; oc++) {
+                            if (outer->captures[oc] &&
+                                strcmp(outer->captures[oc], fi->captures[ci]) == 0) {
+                                int env_idx = locals_find(locals, "__env");
+                                if (env_idx >= 0) {
+                                    emit_local_get(code, env_idx);
+                                    int okl = 0;
+                                    int ookoff = strtab_add_with_len(ctx->strtab,
+                                                                     fi->captures[ci], &okl);
+                                    emit_str_val(code, ookoff, okl);
+                                    emit_call(code, RT_MAP_GET);
+                                    found_outer = 1;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (!found_outer) {
+                        int gidx = ctx->top_bindings ?
+                            top_bindings_find(ctx->top_bindings, fi->captures[ci]) : -1;
+                        if (gidx >= 0) emit_global_get(code, gidx);
+                        else emit_null(code);
+                    }
+                }
                 emit_call(code, RT_MAP_SET);
             }
             /* Closure value: payload = func_idx (so call_indirect works
@@ -4326,8 +4356,39 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             int koff = strtab_add_with_len(ctx->strtab, fi->captures[ci], &kl);
             emit_str_val(code, koff, kl);
             int var_idx = locals_find(locals, fi->captures[ci]);
-            if (var_idx >= 0) emit_local_get(code, var_idx);
-            else              emit_null(code);
+            if (var_idx >= 0) {
+                emit_local_get(code, var_idx);
+            } else {
+                /* Same env-forwarding logic as the NODE_LAMBDA path:
+                   if the name is itself a capture of the enclosing fn,
+                   pull it out of __env so the chain stays intact. */
+                int found_outer = 0;
+                if (ctx->fn_infos && ctx->cur_fn_idx >= 0) {
+                    FuncInfo *outer = &((FuncInfo*)ctx->fn_infos)[ctx->cur_fn_idx];
+                    for (int oc = 0; oc < outer->n_captures; oc++) {
+                        if (outer->captures[oc] &&
+                            strcmp(outer->captures[oc], fi->captures[ci]) == 0) {
+                            int env_idx = locals_find(locals, "__env");
+                            if (env_idx >= 0) {
+                                emit_local_get(code, env_idx);
+                                int okl = 0;
+                                int ookoff = strtab_add_with_len(ctx->strtab,
+                                                                 fi->captures[ci], &okl);
+                                emit_str_val(code, ookoff, okl);
+                                emit_call(code, RT_MAP_GET);
+                                found_outer = 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!found_outer) {
+                    int gidx = ctx->top_bindings ?
+                        top_bindings_find(ctx->top_bindings, fi->captures[ci]) : -1;
+                    if (gidx >= 0) emit_global_get(code, gidx);
+                    else           emit_null(code);
+                }
+            }
             emit_call(code, RT_MAP_SET);
         }
         emit_val_new(code, TAG_FUNC, NUM_RT_FUNCS + fn_idx);
@@ -9349,6 +9410,44 @@ static void collect_free_vars(Node *node, ParamList *params, FuncMap *funcs,
     case NODE_STRUCT_INIT: {
         for (int i = 0; i < node->struct_init.fields.len; i++)
             collect_free_vars(node->struct_init.fields.items[i].val, params, funcs, out, n, max);
+        break;
+    }
+    case NODE_LAMBDA: {
+        /* A nested lambda's free vars must propagate up so the enclosing
+           function can capture them and forward through its env. Without
+           this, only the innermost lambda knows about transitively-used
+           outer locals, and the env chain breaks at the middle level. */
+        collect_free_vars(node->lambda.body, &node->lambda.params, funcs, out, n, max);
+        /* Inner lambda's own params are not free in the outer: scrub
+           them so we don't accidentally capture e.g. a param-shadowed
+           outer name. */
+        for (int p = 0; p < node->lambda.params.len; p++) {
+            const char *pn = node->lambda.params.items[p].name;
+            if (!pn) continue;
+            for (int i = 0; i < *n; ) {
+                if (strcmp(out[i], pn) == 0) {
+                    free(out[i]);
+                    for (int j = i; j < *n - 1; j++) out[j] = out[j + 1];
+                    (*n)--;
+                } else i++;
+            }
+        }
+        break;
+    }
+    case NODE_FN_DECL: {
+        if (!node->fn_decl.body) break;
+        collect_free_vars(node->fn_decl.body, &node->fn_decl.params, funcs, out, n, max);
+        for (int p = 0; p < node->fn_decl.params.len; p++) {
+            const char *pn = node->fn_decl.params.items[p].name;
+            if (!pn) continue;
+            for (int i = 0; i < *n; ) {
+                if (strcmp(out[i], pn) == 0) {
+                    free(out[i]);
+                    for (int j = i; j < *n - 1; j++) out[j] = out[j + 1];
+                    (*n)--;
+                } else i++;
+            }
+        }
         break;
     }
     default: break;
