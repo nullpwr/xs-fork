@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.2.29
+
+Closes db, actor closure capture, and process.run on the transpilers.
+Skip-emit corpus narrows from 5 files to 3.
+
+C+WASM grow an in-memory db polyfill. `import db` becomes a small
+embedded module covering `CREATE TABLE`, `INSERT INTO ... VALUES`,
+and `SELECT * FROM t [WHERE col op v] [ORDER BY c [ASC|DESC]]
+[LIMIT n]`. Rows expose both real column names and the positional
+cN keys the native runtime uses, so `rows[0].c1` keeps working.
+No sqlite link, intentional: both targets stay zero-dep. WHERE
+supports `=` / `==` / `!=` / `<` / `>` / `<=` / `>=`.
+
+C+WASM lift nested actor decls. `actor X { ... }` declared inside
+a fn body now closure-captures outer-scope upvalues. Each upvalue
+is heap-promoted into a 1-element box; the actor instance map
+carries pointers to those boxes alongside its method closures.
+Two sibling actors capturing the same outer var observe each
+other's writes through the shared box. The lowering pass also
+tightened the free-variable analyser (LIT_ARRAY / LIT_MAP /
+RANGE / WHILE / FOR / MATCH / TRY / SPAWN / AWAIT / THROW cases
+filled in) so any ident hidden inside an array literal or a try
+arm no longer drops out of the capture list.
+
+C lands `process.run` (popen/pclose, returns `{ok, stdout,
+code}`), `os.setenv` (setenv with overwrite=1), and `fs.temp_dir`
+(uses TMPDIR / TEMP / TMP env vars, falls back to /tmp). Gated
+on `import process`. WIFEXITED / WEXITSTATUS gated behind
+`#if defined(WIFEXITED)` so the Win32 build that lacks sys/wait.h
+still compiles and just uses pclose's raw return.
+
+WASM os.platform returns "wasi" so the bug055 skip branch fires
+correctly. The test itself stays `skip-emit: wasm` because the
+skip branch's stdout differs from the interp baseline that the
+corpus matrix diffs against. The c side runs the full test
+including the popen fork against ./xs.
+
 ## 1.2.28
 
 Picked off the wasi-threads / watch / value-model gaps that v1.2.27
