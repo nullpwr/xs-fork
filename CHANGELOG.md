@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.26
+
+`--emit js`: `import process` now extends Node's process global
+with `run` / `popen` / `popen_read` methods that wrap
+`child_process.execSync`. The polyfill is gated on the program
+containing `import process` so the bare global stays untouched
+for code that doesn't ask for it.
+
 ## 1.2.25
 
 C+JS emit grow a trigger registry: `__trigger_registry_size`,
