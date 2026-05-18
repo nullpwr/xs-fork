@@ -1,3 +1,4 @@
+-- skip-emit: c, wasm (TODO: c+wasm transpilers don't lower pthread spawn / channel)
 -- bug018: spawn used to run synchronously on the calling thread
 -- ("Execute immediately (no real threads yet)"). Channels also did
 -- not block. Fix: pthread-backed spawn with a recursive GIL, plus a

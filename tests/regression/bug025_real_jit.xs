@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't reproduce the jit/native emit path under wasm)
 -- bug025: --jit was previously a fork-and-exec of the system C
 -- compiler (AOT in disguise). It now emits real x86-64 machine code
 -- into mmap(PROT_EXEC) memory and executes it in-process by driving

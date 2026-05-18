@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: stdlib http module not lowered by --emit transpilers)
 -- bug042: http.get on a failed connect / TLS handshake / URL parse
 -- silently returned null (or worse, an object with null fields when
 -- the bytes-coming-back-after-half-failed-handshake parser produced

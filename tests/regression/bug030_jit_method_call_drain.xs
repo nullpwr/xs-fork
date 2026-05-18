@@ -1,3 +1,4 @@
+-- skip-emit: c, wasm (TODO: c+wasm transpilers don't reproduce the jit native dispatch path)
 -- bug030: when a JIT-compiled outer proto issued OP_METHOD_CALL on
 -- an instance whose method was a user-defined closure, the IR_METHOD_CALL
 -- codegen called vm_step_jit and immediately popped vm->sp expecting the

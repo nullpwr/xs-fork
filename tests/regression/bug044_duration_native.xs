@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: first-class duration type not lowered by --emit transpilers)
 -- bug044: duration is a real first-class type rather than a sugared
 -- number of milliseconds, and the time-literal suffixes (ns, us, ms, s,
 -- m, h, d) work without the old `use literals duration` opt-in. The

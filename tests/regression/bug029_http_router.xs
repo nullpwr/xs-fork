@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: stdlib http module not lowered by --emit transpilers)
 -- skip-backend: jit (JIT method-call dispatch on module receivers
 -- pre-dates v1.0; same path that breaks fs.read on temp files. The
 -- VM and interpreter cover this contract.)

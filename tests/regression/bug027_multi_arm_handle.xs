@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't lower multi-arm effect handle routing)
 -- bug027: multi-arm `handle` used to send every effect to arm[0], so
 -- a handler that wanted to route Log/Metric/Audit by name would just
 -- run the first arm three times and silently drop the rest. The

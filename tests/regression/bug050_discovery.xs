@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: @bench/@example discovery registry not lowered by --emit transpilers)
 -- bug050: @bench and @example are tracked in the runtime trigger
 -- registry so xs bench / xs doc can find them without re-walking
 -- the AST. they don't fire from the run loop themselves; the cli

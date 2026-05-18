@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't reproduce the jit native dispatch path)
 -- bug036: OP_MAKE_ARRAY / OP_MAKE_TUPLE / OP_MAKE_MAP used to flow
 -- through vm_step_jit's slow dispatch on every literal. bench_json
 -- alone fired ~1000 of these per run (500 arrays + 500 maps in the

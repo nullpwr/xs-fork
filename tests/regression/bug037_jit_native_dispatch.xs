@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't reproduce the jit native dispatch path)
 -- bug037: cuts the per-instruction dispatch tax on the most common
 -- hot ops the JIT was still routing through vm_step_jit:
 --

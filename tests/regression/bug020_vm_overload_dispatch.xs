@@ -1,3 +1,4 @@
+-- skip-emit: js, wasm (TODO: js+wasm transpilers don't merge multi-arity fn decls into an overload dispatcher)
 -- bug020: VM compiler emitted plain STORE_GLOBAL for every fn decl,
 -- so a second fn with the same name shadowed the first. The interp
 -- merged into XS_OVERLOAD; the VM did not. Fix: OP_STORE_GLOBAL now

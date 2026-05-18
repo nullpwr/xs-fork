@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: actor closure capture not lowered by --emit transpilers)
 -- bug026: VM actors used to compile with flattened state and dropped
 -- captures of outer-scope variables, so a method that referenced an
 -- outer `let` either crashed or read garbage. The interpreter handled

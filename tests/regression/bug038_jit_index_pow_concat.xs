@@ -1,3 +1,4 @@
+-- skip-emit: c, wasm (TODO: c+wasm transpilers lack int->bigint promotion on overflow (10 ** 20))
 -- bug038: more dispatch elimination on top of bug037.
 --
 -- 1. compile-time fold for binary `LIT op LIT` on int / float operands.

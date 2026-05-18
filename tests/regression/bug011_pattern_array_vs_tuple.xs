@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't differentiate slice vs tuple patterns)
 -- bug011: slice and tuple patterns used to ignore the subject's actual
 -- shape. `match (1,2) { [a,b] => ... }` would fire on a tuple, and
 -- `match [1,2] { (a,b) => ... }` would fire on an array. Fix:

@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: @watch inotify/stat-poll not lowered by --emit transpilers)
 -- bug049: @watch fires when the watched path changes. Linux uses
 -- inotify, macOS / other unixes fall back to a stat poll. parity
 -- covers interp / vm / jit. Path is cwd-relative so the test runs

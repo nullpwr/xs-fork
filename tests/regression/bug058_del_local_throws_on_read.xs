@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't lower the `del x` tombstone path)
 -- bug058: `del x` on a local slot in the VM was storing null instead
 -- of tombstoning the slot. A subsequent read of x returned null and
 -- the catch block never fired. Fixed by introducing OP_DEL_LOCAL which

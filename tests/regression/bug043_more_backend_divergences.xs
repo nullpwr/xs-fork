@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: effect/try operator + map destructure + map insertion order not in --emit transpilers)
 -- bug043: a sweep across documented features turned up four
 -- additional silent divergences between --interp and --vm/--jit.
 -- Each one was a "feature claimed to work" case where the VM compiler

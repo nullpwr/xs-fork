@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: tagged blocks (__block yield) not lowered by --emit transpilers)
 -- bug040: tagged blocks worked on --interp but were no-ops on --vm
 -- and --jit. The interp's NODE_YIELD case checked at runtime whether
 -- __block was in scope (env_get) and called it; the VM compiler

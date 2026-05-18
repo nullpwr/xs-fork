@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: stdlib reactive `bind` not lowered by --emit transpilers)
 -- bug022: reactive `bind` only fired when the dependency was rebound
 -- via env_set (i.e. plain `x = v`). Mutations through `arr[i] = v` or
 -- `m.k = v` modified the value in place without notifying, so any bind

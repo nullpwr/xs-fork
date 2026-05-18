@@ -1,3 +1,4 @@
+-- skip-emit: wasm (TODO: wasm transpiler doesn't lower dynamic method-on-map dispatch)
 -- bug041: keywords like `handle`, `fn`, `effect`, `type` couldn't
 -- appear as bareword map keys or as method names after a dot. The
 -- parser saw `{ handle: ... }` and dispatched to parse_handle for

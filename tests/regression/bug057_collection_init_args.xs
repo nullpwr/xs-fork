@@ -1,3 +1,4 @@
+-- skip-emit: c, wasm (TODO: collections.Deque/Stack constructors not lowered by --emit c/wasm)
 -- bug057: Deque and Stack constructors silently dropped their init
 -- argument; Set already accepted one. The constructors now mirror
 -- each other: Deque([...]) seeds the buffer, Stack([...]) pushes

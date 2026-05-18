@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: runtime trigger registry not lowered by --emit transpilers)
 -- bug046: top-level fns with trigger / discovery decorators register
 -- one entry each in the runtime trigger registry. @once doesn't get
 -- its own entry: it's recorded as a flag on the trigger it composes

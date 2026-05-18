@@ -257,6 +257,22 @@ if [ -f tests/test_transpiler_diff.sh ]; then
     fi
 fi
 
+# 6. Cross-backend corpus matrix. Same idea as section 5 but iterates
+#    over every file in tests/regression instead of inline probes.
+#    Per-file `-- skip-emit: c, js, wasm` markers opt individual
+#    files out of backends whose transpiler doesn't lower the
+#    feature the regression repros.
+if [ -f tests/test_corpus_matrix.sh ]; then
+    cm_output=$(bash tests/test_corpus_matrix.sh 2>&1)
+    cm_rc=$?
+    cm_pass=$(echo "$cm_output" | grep -oE 'corpus matrix: [0-9]+ passed' | tail -1 | grep -oE '[0-9]+')
+    if [ "$cm_rc" -eq 0 ]; then
+        pass=$((pass + 1)); echo "  ok    test_corpus_matrix (${cm_pass:-0} files)"
+    else
+        report_fail "FAIL" "test_corpus_matrix" "$(echo "$cm_output" | grep -E 'FAIL|rc=')"
+    fi
+fi
+
 echo
 echo "results: $pass passed, $fail failed, $diverge diverged"
 if [ -n "$fails" ]; then

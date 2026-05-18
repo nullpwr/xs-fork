@@ -1,3 +1,4 @@
+-- skip-emit: c, js, wasm (TODO: os.platform / process / fs stdlib calls not lowered by --emit transpilers)
 -- bug055: the VM and JIT used to report runtime method-not-found
 -- errors at "<unknown>:0:0" because the bytecode chunk carried no
 -- per-instruction line info. The compiler now stamps a (line, col)
