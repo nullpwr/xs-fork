@@ -305,7 +305,10 @@ static const char *c_libc_names[] = {
     "sinh","cosh","tanh","asinh","acosh","atanh",
     "ceil","floor","round","trunc","fabs","fmod","fmin","fmax",
     "abs","labs","llabs","div","ldiv","lldiv",
-    "exit","_Exit","abort","atexit","getenv","system","rand","srand",
+    /* `exit` and `abort` are intentionally NOT in this list: when an XS
+     * program calls `exit(0)` the libc `exit` is what the user wants.
+     * Rewriting to `xs_user_exit` produces an undefined symbol at link. */
+    "_Exit","atexit","getenv","system","rand","srand",
     "malloc","calloc","realloc","free","alloca",
     "nan","nanf","nanl","inf","infinity",
     "printf","fprintf","sprintf","snprintf","vprintf","vfprintf","vsprintf","vsnprintf",
@@ -1477,6 +1480,17 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (n->call.args.len > 1) emit_expr(s, n->call.args.items[1], depth);
             else sb_add(s, "XS_STR(\"assertion failed\")");
             sb_addc(s, ')');
+        } else if (is_callee_name(n->call.callee, "exit")) {
+            /* lower exit(N) to libc exit. comma operator keeps the call
+             * an expression so contexts like `let _ = exit(0)` still
+             * type-check; libc exit never returns so the XS_NULL is
+             * just there to satisfy the C type system. */
+            sb_add(s, "(exit((int)(");
+            if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
+            else sb_add(s, "XS_INT(0)");
+            sb_add(s, ").i), XS_NULL)");
+        } else if (is_callee_name(n->call.callee, "abort")) {
+            sb_add(s, "(abort(), XS_NULL)");
         } else {
             /* check if callee might be a closure (variable holding fn) */
             int might_be_closure = 0;

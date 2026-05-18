@@ -1,4 +1,4 @@
--- skip-emit: c, js, wasm (TODO: @every/@delayed run-loop scheduling not lowered by --emit transpilers)
+-- skip-emit: js, wasm (TODO: @every/@delayed run-loop scheduling not lowered by --emit js / --emit wasm)
 -- bug048: @every and @delayed actually fire from the run-loop after
 -- the script finishes. tests use very short intervals (50ms) and the
 -- counter exits the process so the runner doesn't hang. parity covers
