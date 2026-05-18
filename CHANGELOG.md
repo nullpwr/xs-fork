@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.2.27
+
+Three parallel transpiler passes, each agent pinned to one file
+(wasm.c / c_gen.c / js.c) so the runs couldn't step on each
+other. Closed the skip-emit corpus from 26 files to 11.
+
+JS fully closes: every js marker lifted. Includes a db
+polyfill, reactive bind via Proxy, message-queue actors, sync
+http via child_process.execSync('curl'), tagged blocks via a
+__block sentinel, the `?` try operator, map destructure, a
+Duration class with arithmetic and repr, fs.watch glue for
+@watch, and process.run returning the {ok, stdout, code} map
+shape the interp uses.
+
+C narrows from 18 to 6. Wrapping decorators
+(memoize/retry/timed/trace/throttle/debounce) finally lift on
+the C path: the inner fn emits under a mangled name so the user
+binding holds the wrapper closure. Multi-shot resume via setjmp
+re-entry. Collections module (Deque/Stack/Set/Counter/
+OrderedMap/PriorityQueue). Class init synthesis + bound
+method-as-value (lifts the bug030..033 jit-native parity tests).
+Tagged blocks, spawn + channels, reactive bind, Duration
+first-class via XS_DUR_TAG (full arith + accessors).
+
+WASM narrows from 24 to 11. Multi-arity overload dispatch,
+multi-arm effect routing, null-callee TypeError parity, trigger
+registry, collections pre-lowered at AST level, purity
+inference output, full jit-native parity (class instantiation,
+bound methods, utf-8 char iter, array.pop/sort/size aliases).
+type/typeof now return human names instead of numeric tag
+strings.
+
+Remaining 11 markers are external-dep / event-loop / OS-specific
+territory: db (sqlite/postgres lib), http (sockets + 300KB TLS
+bundle inline), @watch (inotify/kqueue + timer loop), actor
+capture inside fn bodies (closure lifting), pthread spawn under
+wasi-preview1 (no thread-spawn import), bug055 (test forks
+./xs; wasi has no exec). Plus duration / reactive bind / tagged
+blocks in wasm (need new value tags + listener slots that the
+wasm value model doesn't have today).
+
 ## 1.2.26
 
 `--emit js`: `import process` now extends Node's process global
