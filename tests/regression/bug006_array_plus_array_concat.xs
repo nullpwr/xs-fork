@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler traps on array+array (no value_add for arrays))
 -- bug006: [1,2] + [3,4] used to silently return null because OP_ADD
 -- fell through the float coerce path for arrays. Fix: array+array now
 -- concatenates in both interp and vm.

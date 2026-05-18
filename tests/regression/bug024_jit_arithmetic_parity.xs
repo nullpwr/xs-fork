@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower //, %, <=>, **, is)
 -- bug024: when --jit was wired into the test architecture (running
 -- programs through the C transpiler + system C compiler) it disagreed
 -- with VM/interp on five arithmetic operators that the C runtime

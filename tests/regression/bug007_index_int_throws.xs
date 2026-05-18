@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower the runtime-error throw path)
 -- bug007: indexing a non-collection (int, float, bool, null) used to
 -- silently return null. Fix: OP_INDEX_GET and NODE_INDEX both call
 -- xs_runtime_error for these tags. The actual error case lives in

@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower the catchable runtime-error path)
 -- bug019: xs_runtime_error used to print to stderr and continue with
 -- a null sentinel. try/catch could not catch divide-by-zero, type
 -- mismatches, indexing errors, etc. Fix: xs_runtime_error now installs

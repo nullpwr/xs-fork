@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't raise the typed-arith runtime error path)
 -- bug012: arithmetic ops on incompatible tags used to silently return
 -- null. Fix: OP_ADD/SUB/MUL now raise xs_runtime_error when neither
 -- operand is numeric, string, or array.

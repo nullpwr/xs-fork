@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower range method dispatch)
 -- bug016: range objects had no method dispatch in the VM, so `.len()`,
 -- `.to_array()`, etc. silently returned null. Fix: added a XS_RANGE
 -- branch mirroring the interpreter.

@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower arr.flat/.flatten)
 -- bug010: arr.flat() worked in the VM but not the interpreter (the
 -- interpreter only knew "flatten"). Fix: alias "flat" to "flatten" in
 -- both backends so cross-backend code stays uniform.

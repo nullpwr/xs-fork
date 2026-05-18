@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler doesn't lower the find_index callback path)
 -- bug056: arr.find_index(pred) was equality-checking against the
 -- predicate value itself instead of running it as a callback. The
 -- method now takes either a value (equality) or a callable (run as

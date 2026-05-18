@@ -1,4 +1,4 @@
--- skip-emit: c, js, wasm (TODO: wrapping decorators rejected by --emit c/js (timing line nondet on wasm))
+-- skip-emit: c, js (TODO: wrapping decorators rejected by --emit c/js)
 -- bug054: wrapping decorators -- @memoize / @retry / @trace / @timed
 -- transform the bound fn into a dispatcher that intercepts the call.
 -- Trigger decorators only register side-effects; wrapping ones must
