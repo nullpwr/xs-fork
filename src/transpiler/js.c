@@ -205,10 +205,8 @@ static const char *find_unsupported_for_js(Node *n) {
         for (int i = 0; i < n->fn_decl.n_decorators; i++) {
             const char *dn = n->fn_decl.decorators[i].name;
             if (!dn) continue;
-            if (strcmp(dn, "memoize") == 0 || strcmp(dn, "retry") == 0 ||
-                strcmp(dn, "timed") == 0   || strcmp(dn, "trace") == 0 ||
-                strcmp(dn, "throttle") == 0|| strcmp(dn, "debounce") == 0)
-                return "wrapping decorators (@memoize/@retry/@timed/@trace/@throttle/@debounce)";
+            if (strcmp(dn, "throttle") == 0 || strcmp(dn, "debounce") == 0)
+                return "wrapping decorators (@throttle/@debounce)";
         }
         return find_unsupported_for_js(n->fn_decl.body);
     }
@@ -2639,6 +2637,33 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_indent(s, depth);
             sb_printf(s, "__xs_mark_pure(%s);\n\n", fn_name);
         }
+        /* Wrapping decorators: replace the bound name with a wrapper
+         * (@memoize / @retry / @timed / @trace). Innermost decorator
+         * runs first, so iterate top-down and reassign. */
+        if (named) {
+            for (int di = 0; di < n->fn_decl.n_decorators; di++) {
+                const char *dn = n->fn_decl.decorators[di].name;
+                if (!dn) continue;
+                Node **dargs = n->fn_decl.decorators[di].args;
+                int    dnargs = n->fn_decl.decorators[di].n_args;
+                if (strcmp(dn, "memoize") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s = __xs_memoize(%s);\n", fn_name, fn_name);
+                } else if (strcmp(dn, "retry") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s = __xs_retry(", fn_name);
+                    if (dnargs > 0) emit_expr(s, dargs[0], depth);
+                    else            sb_add(s, "3");
+                    sb_printf(s, ")(%s);\n", fn_name);
+                } else if (strcmp(dn, "timed") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s = __xs_timed(%s);\n", fn_name, fn_name);
+                } else if (strcmp(dn, "trace") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s = __xs_trace(%s);\n", fn_name, fn_name);
+                }
+            }
+        }
         /* Scheduling decorators: emit setInterval / setTimeout glue
          * after the fn body so the runtime fires it without a caller.
          * Duration arg is a Node; emit it with __xs_to_ms() which
@@ -4191,6 +4216,14 @@ char *transpile_js(Node *program, const char *filename) {
     /* bare exit(n) / abort() in user code: route to host equivalents. */
     sb_add(&s, "const exit = (c) => process.exit(typeof c === 'number' ? c : (typeof c === 'bigint' ? Number(c) : 0));\n");
     sb_add(&s, "const abort = () => { throw new Error('abort()'); };\n");
+    /* Wrapping decorators: memoize / retry / timed / trace. The purity
+     * gate runs at static-analysis time in interp/vm; here we trust
+     * the source-level @decorator and just wrap. Cache key uses the
+     * stringified arg list (same shape as the runtime). */
+    sb_add(&s, "const __xs_memoize = (fn) => { const c = new Map(); return function(...a) { const k = JSON.stringify(a); if (c.has(k)) return c.get(k); const v = fn.apply(this, a); c.set(k, v); return v; }; };\n");
+    sb_add(&s, "const __xs_retry = (n) => (fn) => function(...a) { let last; for (let i = 0; i < (n||3); i++) { try { return fn.apply(this, a); } catch (e) { last = e; } } throw last; };\n");
+    sb_add(&s, "const __xs_timed = (fn) => function(...a) { const t0 = (typeof performance!=='undefined'?performance.now():Date.now()); const r = fn.apply(this, a); const ms = ((typeof performance!=='undefined'?performance.now():Date.now()) - t0); process.stderr.write('[timed] ' + (fn.name||'<anon>') + ': ' + ms.toFixed(3) + ' ms\\n'); return r; };\n");
+    sb_add(&s, "const __xs_trace = (fn) => function(...a) { process.stderr.write((fn.name||'<anon>') + '(' + a.map(__xs_repr).join(', ') + ')\\n'); const r = fn.apply(this, a); process.stderr.write('  => ' + __xs_repr(r) + '\\n'); return r; };\n");
     /* Stdlib polyfills. Each module is a plain object whose methods
        map onto host primitives (JSON, Math, Node builtins). Sync APIs
        are preferred so the calling code doesn't have to be async. */

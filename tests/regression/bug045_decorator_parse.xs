@@ -1,4 +1,3 @@
--- skip-emit: c, js, wasm (TODO: @trigger/@discovery/@api/@modifier decorators not lowered by --emit transpilers)
 -- bug045: the new trigger / discovery / api / modifier decorators
 -- parse cleanly and attach to the function declaration. The runtime
 -- doesn't fire any of them yet (later chunks land each handler), but
