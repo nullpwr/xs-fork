@@ -3579,6 +3579,19 @@ static int program_imports_module(Node *program, const char *name) {
     return 0;
 }
 
+/* Trigger registry collection. Walk the program top-level and emit one
+ * entry per trigger-decorated fn. @once is a modifier, not a trigger;
+ * it doesn't get its own entry. memoize/retry/timed/trace are wrapping
+ * decorators, not triggers. */
+static int is_trigger_decorator(const char *n) {
+    if (!n) return 0;
+    return strcmp(n, "bench") == 0    || strcmp(n, "example") == 0  ||
+           strcmp(n, "every") == 0    || strcmp(n, "cron") == 0     ||
+           strcmp(n, "delayed") == 0  || strcmp(n, "watch") == 0    ||
+           strcmp(n, "on_start") == 0 || strcmp(n, "on_exit") == 0  ||
+           strcmp(n, "on_signal") == 0|| strcmp(n, "on_panic") == 0;
+}
+
 char *transpile_js(Node *program, const char *filename) {
     const char *unsupported = find_unsupported_for_js(program);
     if (unsupported) {
@@ -4216,6 +4229,28 @@ char *transpile_js(Node *program, const char *filename) {
     /* bare exit(n) / abort() in user code: route to host equivalents. */
     sb_add(&s, "const exit = (c) => process.exit(typeof c === 'number' ? c : (typeof c === 'bigint' ? Number(c) : 0));\n");
     sb_add(&s, "const abort = () => { throw new Error('abort()'); };\n");
+    /* Trigger registry: walk the top-level fn decls and build a static
+     * array of {name, fn_name}, then ship the __trigger_registry_* and
+     * __trigger_registry_name builtins the runtime exposes. */
+    sb_add(&s, "const __trigger_registry = [");
+    if (VAL_TAG(program) == NODE_PROGRAM) {
+        int first = 1;
+        for (int i = 0; i < program->program.stmts.len; i++) {
+            Node *st = program->program.stmts.items[i];
+            if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
+            for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+                const char *dn = st->fn_decl.decorators[di].name;
+                if (!is_trigger_decorator(dn)) continue;
+                if (!first) sb_add(&s, ", ");
+                sb_printf(&s, "{name:\"%s\",fn:\"%s\"}", dn, st->fn_decl.name ? st->fn_decl.name : "");
+                first = 0;
+            }
+        }
+    }
+    sb_add(&s, "];\n");
+    sb_add(&s, "const __trigger_registry_size = () => __trigger_registry.length;\n");
+    sb_add(&s, "const __trigger_registry_name = (i) => __trigger_registry[i].name;\n");
+    sb_add(&s, "const __trigger_registry_fn = (i) => __trigger_registry[i].fn;\n");
     /* Wrapping decorators: memoize / retry / timed / trace. The purity
      * gate runs at static-analysis time in interp/vm; here we trust
      * the source-level @decorator and just wrap. Cache key uses the

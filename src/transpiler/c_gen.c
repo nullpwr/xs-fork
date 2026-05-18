@@ -8471,8 +8471,42 @@ char *transpile_c(Node *program, const char *filename) {
             }
         }
 
+        /* Trigger registry: emit the static array of trigger-decorated
+         * fn names so __trigger_registry_size / __trigger_registry_name
+         * resolve at runtime. */
+        sb_add(&s, "static struct { const char *name; const char *fn; } __xs_trigger_reg[] = {\n");
+        if (VAL_TAG(program) == NODE_PROGRAM) {
+            for (int i = 0; i < program->program.stmts.len; i++) {
+                Node *st = program->program.stmts.items[i];
+                if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
+                for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+                    const char *dn = st->fn_decl.decorators[di].name;
+                    if (!dn) continue;
+                    if (strcmp(dn, "bench") != 0 && strcmp(dn, "example") != 0 &&
+                        strcmp(dn, "every") != 0 && strcmp(dn, "cron") != 0 &&
+                        strcmp(dn, "delayed") != 0 && strcmp(dn, "watch") != 0 &&
+                        strcmp(dn, "on_start") != 0 && strcmp(dn, "on_exit") != 0 &&
+                        strcmp(dn, "on_signal") != 0 && strcmp(dn, "on_panic") != 0)
+                        continue;
+                    sb_printf(&s, "    {\"%s\", \"%s\"},\n", dn,
+                              st->fn_decl.name ? st->fn_decl.name : "");
+                }
+            }
+        }
+        sb_add(&s, "    {NULL, NULL}\n};\n");
+        sb_add(&s, "static int __xs_trigger_reg_size(void) {\n");
+        sb_add(&s, "    int n = 0; while (__xs_trigger_reg[n].name) n++; return n;\n");
+        sb_add(&s, "}\n");
+        sb_add(&s, "static xs_val __trigger_registry_size_fn(void *e, xs_val *a, int n) { (void)e;(void)a;(void)n; return XS_INT(__xs_trigger_reg_size()); }\n");
+        sb_add(&s, "static xs_val __trigger_registry_name_fn(void *e, xs_val *a, int n) { (void)e;(void)n; int i=(int)a[0].i; if(i<0||i>=__xs_trigger_reg_size())return XS_NULL; return XS_STR(strdup(__xs_trigger_reg[i].name)); }\n");
+        sb_add(&s, "static xs_val __trigger_registry_fn_fn(void *e, xs_val *a, int n) { (void)e;(void)n; int i=(int)a[0].i; if(i<0||i>=__xs_trigger_reg_size())return XS_NULL; return XS_STR(strdup(__xs_trigger_reg[i].fn)); }\n");
+
         sb_add(&s, "int main(int argc, char **argv) {\n");
         sb_add(&s, "    xs_user_argc = argc; xs_user_argv = argv;\n");
+        sb_add(&s, "    xs_val __trigger_registry_size = xs_fn_new(__trigger_registry_size_fn, NULL);\n");
+        sb_add(&s, "    xs_val __trigger_registry_name = xs_fn_new(__trigger_registry_name_fn, NULL);\n");
+        sb_add(&s, "    xs_val __trigger_registry_fn = xs_fn_new(__trigger_registry_fn_fn, NULL);\n");
+        sb_add(&s, "    (void)__trigger_registry_size; (void)__trigger_registry_name; (void)__trigger_registry_fn;\n");
 
         /* emit actor state initializations */
         for (int i = 0; i < n_actor_vars; i++) {
