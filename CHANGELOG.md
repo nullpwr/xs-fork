@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.2.28
+
+Picked off the wasi-threads / watch / value-model gaps that v1.2.27
+explicitly left in place. Skip-emit corpus narrows from 11 files to 5.
+
+C grows a trigger event loop. `@watch` spawns one pthread per fn
+that stat-polls the path every 50ms and fires when st_mtime moves;
+`@delayed` and `@every` get their own thread helpers; `@on_start`
+runs inline; `@on_exit` registers via atexit. Duration / int-ms /
+float-ms decorator args all coerce through one helper. `main()`
+joins the trigger threads so the process stays alive until a
+callback calls `exit()`. Linux uses st_mtim.tv_nsec for full ns
+resolution; macOS via st_mtimespec; otherwise st_mtime seconds.
+
+WASM lands the value-model work that was previously documented as
+"needs new value tags". Duration is a real tag-13 cell with the i64
+ns at offset 8; typeof returns "duration", arithmetic and ordering
+dispatch on the tag, the repr collapses to the smallest readable
+form (5s, 100ms, 1.5us, 1m30s). Reactive bind builds a compile-time
+registry: every `bind name = expr` records its root-ident
+dependencies; every NODE_ASSIGN through INDEX / FIELD walks back to
+the root and re-runs every matching recompute. Tagged blocks lower
+NODE_TAG_DECL with a trailing __block param, rewrite NODE_YIELD to
+a direct closure call, and inject a synthetic _yv param into bare
+trailing-block lambdas so their wasm function type lines up.
+
+WASM spawn + channels lower as synchronous queues (channel() is a
+fresh array; send pushes, recv shifts). The wasi-preview1 target
+has no thread-spawn import, so observable test behavior is what
+matters: producer runs to completion before the consumer touches
+the queue. `time.sleep` is a no-op stub.
+
+WASM @watch + @delayed get an end-of-main trigger sequencer that
+fires @every once, then @delayed fns in ascending due-time order,
+calling @watch callbacks before and after each delayed step.
+`proc_exit` import gives exit(N) real semantics. Sorted by user fn
+name so a fn with multiple trigger decorators only fires once.
+
+bug043 finally closes on wasm: the try operator `x?` collects all
+enum Err / None ordinals at compile time and short-circuits Result
+flow; `let {a: aa, b: bb} = m` map destructure routes through
+NODE_PAT_MAP; NODE_MAP_COMP nests its clauses (mirrors
+NODE_LIST_COMP) and stringifies int keys; trait method dispatch
+stamps `__class` on struct constructor maps so the IC can fold the
+type tag and avoid heap-slot cache collisions. Enum value encoding
+gets a 3-byte `\x1e\x01\x1e` marker on the path string so
+val_to_str distinguishes enum cells from plain `(string, int)`
+tuples without burning a new tag.
+
+Remaining 5 skip-emit markers are pure external-dep or
+fork-the-runtime territory: db (sqlite/postgres), http (POSIX
+sockets + BearSSL inline), actor decls inside fn bodies (closure
+lifting + outer-scope upvalues), bug055 (test forks `./xs` to
+inspect runtime error span; wasi has no exec).
+
 ## 1.2.27
 
 Three parallel transpiler passes, each agent pinned to one file
