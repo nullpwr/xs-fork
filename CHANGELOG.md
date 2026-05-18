@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.23
+
+`--emit js` lowers scheduling decorators: `@every` emits
+`setInterval`, `@delayed` emits `setTimeout`, `@on_start` calls
+the body once at module top, `@on_exit` registers a
+`process.on('exit', ...)` hook. `@once` composes with `@every`
+via a wrapper that clears the interval after the first fire.
+`@cron`, `@watch`, `@bench`, `@example`, `@on_signal` are
+accepted as no-ops (no portable cron parser / fs.watch /
+test harness in standalone JS).
+
+Bare `exit(n)` / `abort()` route to `process.exit` / a thrown
+error so decorated bodies that want to stop the runtime actually
+do; without that the @every test couldn't terminate.
+
+bug048 (`@every` / `@delayed`) and bug052 (`@once @every`) lift
+the js skip markers and round-trip across interp / vm / jit /
+--emit c / --emit js with identical output.
+
 ## 1.2.22
 
 `--emit js` now lowers `import fs` and `import os` the same way
