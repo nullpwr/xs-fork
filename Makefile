@@ -341,7 +341,7 @@ UNIT_TESTS = tests/unit/lexer_test tests/unit/parser_test tests/unit/sema_test \
              tests/unit/value_test tests/unit/gc_test tests/unit/utf8_test \
              tests/unit/bigint_test tests/unit/regex_test tests/unit/msgpack_test \
              tests/unit/strbuf_test tests/unit/limits_test \
-             tests/unit/bytecode_buf_test
+             tests/unit/bytecode_buf_test tests/unit/self_test
 
 tests/unit/%_test: tests/unit/%_test.c $(UNIT_LINK_SRCS)
 	$(CC) $(UNIT_CFLAGS) -o $@ $< $(UNIT_LINK_SRCS) $(UNIT_LDFLAGS)
@@ -358,6 +358,12 @@ BYTECODE_BUF_TEST_SRCS = src/core/value.c src/core/gc.c \
 tests/unit/bytecode_buf_test: tests/unit/bytecode_buf_test.c $(BYTECODE_BUF_TEST_SRCS)
 	$(CC) $(UNIT_CFLAGS) -DXSC_ENABLE_VM -o $@ $< \
 	    $(BYTECODE_BUF_TEST_SRCS) $(UNIT_LDFLAGS)
+
+# self_test only needs pkg/self.c plus a stub for pkg_http (provided
+# inline in the test file). Keeps it independent of the network
+# stack, the bearssl object files, and the rest of the build.
+tests/unit/self_test: tests/unit/self_test.c src/pkg/self.c
+	$(CC) $(UNIT_CFLAGS) -o $@ $< src/pkg/self.c $(UNIT_LDFLAGS)
 
 test-unit: $(TARGET) $(UNIT_TESTS)
 	@failed=0; for t in $(UNIT_TESTS); do \

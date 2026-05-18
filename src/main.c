@@ -846,6 +846,9 @@ int main(int argc, char **argv) {
         if (term && strcmp(term, "dumb") == 0) g_no_color = 1;
     }
     if (!g_sema_cache) g_sema_cache = cache_new();
+    /* Sweep any <self>.old file left behind by a previous Windows
+       self-upgrade. Cheap and silent on every other platform. */
+    xs_self_cleanup_stale_old();
     /* Initialize the global interpreter lock; main thread holds it for
        the duration. spawned threads acquire on entry. */
     xs_gil_init();

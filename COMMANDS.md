@@ -96,11 +96,7 @@ xs upgrade --yes   # skip confirmation
 
 Compares the current version against the GitHub releases API. If already up to date, exits 0 without touching anything. Verifies the SHA-256 of the downloaded binary against the sibling `.sha256` file before swapping.
 
-Not supported on Windows in this build - re-run the install script instead:
-
-```powershell
-irm xslang.org/install.ps1 | iex
-```
+On Windows the running `xs.exe` is locked, so the upgrade renames the old binary to `xs.exe.old`, writes the new binary into the original path, then sweeps `xs.exe.old` opportunistically the next time `xs` is launched. Already-open shells continue running the old version until they're restarted.
 
 ### `xs uninstall`
 
@@ -111,6 +107,8 @@ xs uninstall                 # remove only the binary (prompts)
 xs uninstall --with-data     # also remove ~/.xs and ~/.xs_cache
 xs uninstall --yes           # skip confirmation
 ```
+
+On Windows the binary is moved to `xs.exe.old` and scheduled for deletion at the next reboot, since the OS won't let a running .exe be removed in place.
 
 Prompts for confirmation by default. Use `--yes` or `-y` to skip.
 
