@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: tagged blocks need the wasm pass to resolve __block as an upvalue and rewrite NODE_YIELD inside a tag fn into a closure call; currently every yield routes through the generator-buf path)
 -- bug040: tagged blocks worked on --interp but were no-ops on --vm
 -- and --jit. The interp's NODE_YIELD case checked at runtime whether
 -- __block was in scope (env_get) and called it; the VM compiler

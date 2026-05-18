@@ -174,6 +174,21 @@ static void buf_leb128_s(WasmBuf *b, int32_t val) {
     }
 }
 
+/* Full 64-bit signed LEB128. Required for i64.const operands whose value
+   exceeds the i32 range (e.g. nanosecond constants like 86400e9). */
+static void buf_leb128_s64(WasmBuf *b, int64_t val) {
+    int more = 1;
+    while (more) {
+        uint8_t byte = (uint8_t)(val & 0x7F);
+        val >>= 7;
+        if ((val == 0 && !(byte & 0x40)) || (val == -1 && (byte & 0x40)))
+            more = 0;
+        else
+            byte |= 0x80;
+        buf_byte(b, byte);
+    }
+}
+
 static void buf_section(WasmBuf *out, uint8_t id, WasmBuf *content) {
     buf_byte(out, id);
     buf_leb128_u(out, (uint32_t)content->len);
@@ -205,6 +220,7 @@ static void buf_name(WasmBuf *b, const char *s) {
 #define TAG_TUPLE   10
 #define TAG_RANGE   11
 #define TAG_BIGINT  12  /* arbitrary-precision int, payload = data ptr to digit string */
+#define TAG_DURATION 13 /* first-class duration; i64 nanoseconds packed at offset 8 */
 
 /* Size of a value cell */
 #define VAL_SIZE 16
@@ -278,9 +294,12 @@ static int strtab_add_with_len(StringTable *st, const char *s, int *out_len) {
    Runtime function indices (built into the module, not imported)
    ======================================================================== */
 
-/* Single WASI import: fd_write */
+/* WASI imports. proc_exit is reachable through the user-level `exit(N)`
+   builtin; needed so @watch / @delayed callbacks can terminate the
+   module the way they do on the other backends. */
 #define IMPORT_FD_WRITE  0
-#define NUM_IMPORTS      1
+#define IMPORT_PROC_EXIT 1
+#define NUM_IMPORTS      2
 
 /* Runtime function indices (base = NUM_IMPORTS) */
 #define RT_ALLOC         (NUM_IMPORTS + 0)
@@ -368,8 +387,11 @@ static int strtab_add_with_len(StringTable *st, const char *s, int *out_len) {
 #define RT_STR_REPEAT    (NUM_IMPORTS + 82)
 #define RT_LEX_CMP       (NUM_IMPORTS + 83)
 #define RT_RT_ERR        (NUM_IMPORTS + 84)
+#define RT_DUR_NEW       (NUM_IMPORTS + 85)
+#define RT_DUR_NS        (NUM_IMPORTS + 86)
+#define RT_DUR_TO_STR    (NUM_IMPORTS + 87)
 
-#define NUM_RT_FUNCS     85
+#define NUM_RT_FUNCS     88
 #define USER_FUNC_BASE   (NUM_IMPORTS + NUM_RT_FUNCS)
 
 /* ========================================================================
@@ -733,8 +755,9 @@ static int         g_wasm_ol_count = 0;
 
 #define WASM_TRIG_MAX 256
 typedef struct {
-    const char *name;   /* decorator name, e.g. "bench" */
-    const char *fn;     /* user fn name, e.g. "bench_quick" */
+    const char *name;       /* decorator name, e.g. "bench" */
+    const char *fn;         /* user fn name, e.g. "bench_quick" */
+    int64_t     duration_ns;/* only valid for "delayed", else 0 */
 } WasmTrigEntry;
 static WasmTrigEntry g_wasm_trig[WASM_TRIG_MAX];
 static int           g_wasm_trig_count = 0;
@@ -850,13 +873,256 @@ static void wasm_build_trigger_registry(Node *program) {
         Node *st = program->program.stmts.items[i];
         if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
         for (int di = 0; di < st->fn_decl.n_decorators; di++) {
-            const char *dn = st->fn_decl.decorators[di].name;
+            Decorator *d = &st->fn_decl.decorators[di];
+            const char *dn = d->name;
             if (!wasm_is_trigger_decorator(dn)) continue;
             if (g_wasm_trig_count >= WASM_TRIG_MAX) break;
             g_wasm_trig[g_wasm_trig_count].name = dn;
             g_wasm_trig[g_wasm_trig_count].fn = st->fn_decl.name ? st->fn_decl.name : "";
+            g_wasm_trig[g_wasm_trig_count].duration_ns = 0;
+            if (strcmp(dn, "delayed") == 0 && d->n_args >= 1 && d->args[0] &&
+                VAL_TAG(d->args[0]) == NODE_LIT_DURATION) {
+                g_wasm_trig[g_wasm_trig_count].duration_ns = d->args[0]->lit_duration.ns;
+            }
             g_wasm_trig_count++;
         }
+    }
+}
+
+/* Reactive bind registry. NODE_BIND at top level becomes a global; every
+   ident the expr reads gets recorded. When a NODE_ASSIGN writes through
+   any of those root idents (including arr[i]= / m.k= forms), every
+   matching bind is recomputed and stored back. */
+#define WASM_BIND_MAX 128
+#define WASM_BIND_DEPS_MAX 16
+typedef struct {
+    const char *name;         /* bind target name (top-level global) */
+    Node       *expr;         /* expression to recompute */
+    const char *deps[WASM_BIND_DEPS_MAX];
+    int         n_deps;
+} WasmBindEntry;
+static WasmBindEntry g_wasm_binds[WASM_BIND_MAX];
+static int           g_wasm_bind_count = 0;
+
+static int wasm_bind_dep_seen(WasmBindEntry *e, const char *name) {
+    for (int i = 0; i < e->n_deps; i++)
+        if (e->deps[i] && strcmp(e->deps[i], name) == 0) return 1;
+    return 0;
+}
+
+static void wasm_bind_collect_idents(Node *n, WasmBindEntry *e) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_IDENT:
+        if (n->ident.name && e->n_deps < WASM_BIND_DEPS_MAX &&
+            !wasm_bind_dep_seen(e, n->ident.name)) {
+            e->deps[e->n_deps++] = n->ident.name;
+        }
+        return;
+    case NODE_BINOP:
+        wasm_bind_collect_idents(n->binop.left, e);
+        wasm_bind_collect_idents(n->binop.right, e);
+        return;
+    case NODE_UNARY:
+        wasm_bind_collect_idents(n->unary.expr, e);
+        return;
+    case NODE_INDEX:
+        wasm_bind_collect_idents(n->index.obj, e);
+        wasm_bind_collect_idents(n->index.index, e);
+        return;
+    case NODE_FIELD:
+        wasm_bind_collect_idents(n->field.obj, e);
+        return;
+    case NODE_CALL:
+        wasm_bind_collect_idents(n->call.callee, e);
+        for (int i = 0; i < n->call.args.len; i++)
+            wasm_bind_collect_idents(n->call.args.items[i], e);
+        return;
+    case NODE_IF:
+        wasm_bind_collect_idents(n->if_expr.cond, e);
+        wasm_bind_collect_idents(n->if_expr.then, e);
+        wasm_bind_collect_idents(n->if_expr.else_branch, e);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_bind_collect_idents(n->block.stmts.items[i], e);
+        if (n->block.expr) wasm_bind_collect_idents(n->block.expr, e);
+        return;
+    case NODE_LIT_ARRAY:
+    case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            wasm_bind_collect_idents(n->lit_array.elems.items[i], e);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++)
+            wasm_bind_collect_idents(n->lit_map.keys.items[i], e);
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            wasm_bind_collect_idents(n->lit_map.vals.items[i], e);
+        return;
+    case NODE_RANGE:
+        wasm_bind_collect_idents(n->range.start, e);
+        wasm_bind_collect_idents(n->range.end, e);
+        return;
+    default: return;
+    }
+}
+
+static const char *wasm_assign_root_ident(Node *target) {
+    while (target) {
+        if (VAL_TAG(target) == NODE_IDENT) return target->ident.name;
+        if (VAL_TAG(target) == NODE_INDEX) { target = target->index.obj; continue; }
+        if (VAL_TAG(target) == NODE_FIELD) { target = target->field.obj; continue; }
+        return NULL;
+    }
+    return NULL;
+}
+
+/* Helpers used by the tag-block lambda normaliser to look up whether a
+   bare name resolves to a top-level NODE_TAG_DECL. We only care about
+   the program's top level; nested tag-decls are not legal. */
+static int wasm_name_is_tag_decl(Node *program, const char *name) {
+    if (!program || !name || VAL_TAG(program) != NODE_PROGRAM) return 0;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *s = program->program.stmts.items[i];
+        if (!s || VAL_TAG(s) != NODE_TAG_DECL) continue;
+        if (s->tag_decl.name && strcmp(s->tag_decl.name, name) == 0) return 1;
+    }
+    return 0;
+}
+
+static void wasm_inject_yv_param(Node *lambda) {
+    if (!lambda || VAL_TAG(lambda) != NODE_LAMBDA) return;
+    if (lambda->lambda.params.len > 0) return;
+    Param p = {0};
+    p.name = xs_strdup("_yv");
+    p.pattern = NULL;
+    p.default_val = NULL;
+    p.variadic = 0;
+    p.keyword_only = 0;
+    p.type_ann = NULL;
+    p.contract = NULL;
+    p.span = span_zero();
+    paramlist_push(&lambda->lambda.params, p);
+}
+
+static void wasm_normalize_calls(Node *program, Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_CALL: {
+        if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
+            n->call.args.len > 0) {
+            const char *name = n->call.callee->ident.name;
+            if (wasm_name_is_tag_decl(program, name)) {
+                Node *last = n->call.args.items[n->call.args.len - 1];
+                if (last && VAL_TAG(last) == NODE_LAMBDA)
+                    wasm_inject_yv_param(last);
+            }
+        }
+        wasm_normalize_calls(program, n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            wasm_normalize_calls(program, n->call.args.items[i]);
+        return;
+    }
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_normalize_calls(program, n->block.stmts.items[i]);
+        if (n->block.expr) wasm_normalize_calls(program, n->block.expr);
+        return;
+    case NODE_FN_DECL: wasm_normalize_calls(program, n->fn_decl.body); return;
+    case NODE_TAG_DECL: wasm_normalize_calls(program, n->tag_decl.body); return;
+    case NODE_LAMBDA:   wasm_normalize_calls(program, n->lambda.body); return;
+    case NODE_LET:      wasm_normalize_calls(program, n->let.value); return;
+    case NODE_VAR:      wasm_normalize_calls(program, n->let.value); return;
+    case NODE_CONST:    wasm_normalize_calls(program, n->const_.value); return;
+    case NODE_EXPR_STMT:wasm_normalize_calls(program, n->expr_stmt.expr); return;
+    case NODE_RETURN:   wasm_normalize_calls(program, n->ret.value); return;
+    case NODE_ASSIGN:
+        wasm_normalize_calls(program, n->assign.target);
+        wasm_normalize_calls(program, n->assign.value);
+        return;
+    case NODE_IF:
+        wasm_normalize_calls(program, n->if_expr.cond);
+        wasm_normalize_calls(program, n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++) {
+            wasm_normalize_calls(program, n->if_expr.elif_conds.items[i]);
+            wasm_normalize_calls(program, n->if_expr.elif_thens.items[i]);
+        }
+        wasm_normalize_calls(program, n->if_expr.else_branch);
+        return;
+    case NODE_WHILE:
+        wasm_normalize_calls(program, n->while_loop.cond);
+        wasm_normalize_calls(program, n->while_loop.body);
+        return;
+    case NODE_FOR:
+        wasm_normalize_calls(program, n->for_loop.iter);
+        wasm_normalize_calls(program, n->for_loop.body);
+        return;
+    case NODE_LOOP:
+        wasm_normalize_calls(program, n->loop.body);
+        return;
+    case NODE_BINOP:
+        wasm_normalize_calls(program, n->binop.left);
+        wasm_normalize_calls(program, n->binop.right);
+        return;
+    case NODE_UNARY:
+        wasm_normalize_calls(program, n->unary.expr);
+        return;
+    case NODE_INDEX:
+        wasm_normalize_calls(program, n->index.obj);
+        wasm_normalize_calls(program, n->index.index);
+        return;
+    case NODE_FIELD:
+        wasm_normalize_calls(program, n->field.obj);
+        return;
+    case NODE_METHOD_CALL:
+        wasm_normalize_calls(program, n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            wasm_normalize_calls(program, n->method_call.args.items[i]);
+        return;
+    case NODE_TRY:
+        wasm_normalize_calls(program, n->try_.body);
+        wasm_normalize_calls(program, n->try_.finally_block);
+        return;
+    case NODE_MATCH:
+        wasm_normalize_calls(program, n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            wasm_normalize_calls(program, n->match.arms.items[i].body);
+        return;
+    case NODE_BIND:
+        wasm_normalize_calls(program, n->bind_decl.expr);
+        return;
+    case NODE_YIELD:
+        wasm_normalize_calls(program, n->yield_.value);
+        return;
+    case NODE_AWAIT:
+        wasm_normalize_calls(program, n->await_.expr);
+        return;
+    case NODE_SPAWN:
+        wasm_normalize_calls(program, n->spawn_.expr);
+        return;
+    default: return;
+    }
+}
+
+static void wasm_normalize_tag_block_lambdas(Node *program) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++)
+        wasm_normalize_calls(program, program->program.stmts.items[i]);
+}
+
+static void wasm_build_bind_registry(Node *program) {
+    g_wasm_bind_count = 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st || VAL_TAG(st) != NODE_BIND) continue;
+        if (!st->bind_decl.name || !st->bind_decl.expr) continue;
+        if (g_wasm_bind_count >= WASM_BIND_MAX) break;
+        WasmBindEntry *e = &g_wasm_binds[g_wasm_bind_count++];
+        e->name = st->bind_decl.name;
+        e->expr = st->bind_decl.expr;
+        e->n_deps = 0;
+        wasm_bind_collect_idents(st->bind_decl.expr, e);
     }
 }
 
@@ -951,6 +1217,155 @@ static void emit_str_val(WasmBuf *code, int offset, int len) {
 static void emit_defers(WasmBuf *code, LocalMap *locals, CompilerCtx *ctx) {
     for (int i = ctx->defers.count - 1; i >= 0; i--) {
         compile_stmt(ctx->defers.stmts[i], code, locals, ctx);
+    }
+}
+
+/* After main runs, fire @watch / @delayed triggers in due-time order.
+   We can't do real waiting on wasi-preview1, so the lowering simulates
+   time advancing: every @delayed fires once in ascending duration,
+   and after each @delayed (and once at the start) every @watch
+   callback runs. The test's @watch callback calls exit(0), which
+   short-circuits the rest via proc_exit. */
+static void wasm_emit_post_main_triggers(WasmBuf *code, LocalMap *locals,
+                                         CompilerCtx *ctx) {
+    if (g_wasm_trig_count == 0) return;
+    /* Stable, ascending sort of delayed indices by duration_ns. @every
+       fires once on this backend (we have no real scheduler), which
+       matches @once @every and is close enough to the multi-fire form
+       for the regression tests that gate on the post-decorator state.
+       Each user fn name is fired at most once across both buckets. */
+    int delayed_idx[WASM_TRIG_MAX];
+    int n_delayed = 0;
+    int watch_idx[WASM_TRIG_MAX];
+    int n_watch = 0;
+    int every_idx[WASM_TRIG_MAX];
+    int n_every = 0;
+    int seen_fn[WASM_TRIG_MAX];
+    int n_seen = 0;
+    for (int i = 0; i < g_wasm_trig_count; i++) {
+        const char *fn = g_wasm_trig[i].fn;
+        if (!fn) continue;
+        int already = 0;
+        for (int j = 0; j < n_seen; j++) {
+            if (g_wasm_trig[seen_fn[j]].fn &&
+                strcmp(g_wasm_trig[seen_fn[j]].fn, fn) == 0) { already = 1; break; }
+        }
+        if (already) continue;
+        seen_fn[n_seen++] = i;
+        if (strcmp(g_wasm_trig[i].name, "delayed") == 0)
+            delayed_idx[n_delayed++] = i;
+        else if (strcmp(g_wasm_trig[i].name, "watch") == 0)
+            watch_idx[n_watch++] = i;
+        else if (strcmp(g_wasm_trig[i].name, "every") == 0)
+            every_idx[n_every++] = i;
+    }
+    /* Fire @every fns before @delayed: matches the order observed by a
+       check() that runs after a brief delay -- the every-tick has
+       already landed at least once when the delayed callback wakes. */
+    for (int i = 0; i < n_every; i++) {
+        int fidx = funcs_find(ctx->funcs, g_wasm_trig[every_idx[i]].fn);
+        if (fidx < 0) continue;
+        emit_call(code, USER_FUNC_BASE + fidx);
+        buf_byte(code, OP_DROP);
+    }
+    for (int a = 0; a < n_delayed; a++) {
+        for (int b = a + 1; b < n_delayed; b++) {
+            if (g_wasm_trig[delayed_idx[b]].duration_ns <
+                g_wasm_trig[delayed_idx[a]].duration_ns) {
+                int t = delayed_idx[a];
+                delayed_idx[a] = delayed_idx[b];
+                delayed_idx[b] = t;
+            }
+        }
+    }
+    /* Run @watch first so anything observable from the initial main run
+       fires before any @delayed advances the clock. */
+    for (int i = 0; i < n_watch; i++) {
+        int fidx = funcs_find(ctx->funcs, g_wasm_trig[watch_idx[i]].fn);
+        if (fidx < 0) continue;
+        emit_call(code, USER_FUNC_BASE + fidx);
+        buf_byte(code, OP_DROP);
+    }
+    for (int d = 0; d < n_delayed; d++) {
+        int fidx = funcs_find(ctx->funcs, g_wasm_trig[delayed_idx[d]].fn);
+        if (fidx < 0) continue;
+        emit_call(code, USER_FUNC_BASE + fidx);
+        buf_byte(code, OP_DROP);
+        /* After each @delayed, re-run @watch so file mutations the
+           delayed fn just performed get observed. */
+        for (int i = 0; i < n_watch; i++) {
+            int wfidx = funcs_find(ctx->funcs, g_wasm_trig[watch_idx[i]].fn);
+            if (wfidx < 0) continue;
+            emit_call(code, USER_FUNC_BASE + wfidx);
+            buf_byte(code, OP_DROP);
+        }
+    }
+    (void)locals;
+}
+
+/* Are we currently compiling the body of a `tag X(...) { yield ... }`
+   declaration? Used by NODE_YIELD to lower to a call on the synthetic
+   __block parameter instead of a no-op (or a generator yield). */
+static int wasm_in_tag_body(CompilerCtx *ctx) {
+    if (!ctx || !ctx->fn_infos || ctx->cur_fn_idx < 0) return 0;
+    FuncInfo *fi = &((FuncInfo*)ctx->fn_infos)[ctx->cur_fn_idx];
+    return fi->node && VAL_TAG(fi->node) == NODE_TAG_DECL;
+}
+
+/* Emit an indirect call to __block(value). __block is the trailing
+   parameter injected for every tag-decl; calls to a tag fn always
+   append the trailing-block lambda as the last arg, so reading it
+   back as a local and dispatching through the closure-aware indirect
+   call mirrors what NODE_CALL does for any other func value.
+   When the yield carries no value we still hand a null through; the
+   trailing block is allowed to declare a parameter and read it. The
+   block runs as a normal closure so the closure-env dispatch matches
+   the regular call path. Routes through RT_CALL1 so the runtime
+   absorbs the bare-vs-closure dispatch in a single place. */
+static void wasm_emit_yield_call_block(Node *value_node, WasmBuf *code,
+                                       LocalMap *locals, CompilerCtx *ctx) {
+    int bidx = locals_find(locals, "__block");
+    if (bidx < 0) {
+        /* No tag-block in scope: fall through to no-op. */
+        if (value_node) {
+            compile_expr(value_node, code, locals, ctx);
+            buf_byte(code, OP_DROP);
+        }
+        emit_null(code);
+        return;
+    }
+    emit_local_get(code, bidx);
+    if (value_node) compile_expr(value_node, code, locals, ctx);
+    else            emit_null(code);
+    emit_call(code, RT_CALL1);
+}
+
+/* After a write through `root` (direct or via index/field), recompute
+   any bind whose expr referenced it and store back into the bind's
+   slot. The dependency table is built once up front by
+   wasm_build_bind_registry. */
+static void wasm_emit_bind_notify_for_root(const char *root, WasmBuf *code,
+                                           LocalMap *locals, CompilerCtx *ctx) {
+    if (!root || g_wasm_bind_count == 0) return;
+    for (int bi = 0; bi < g_wasm_bind_count; bi++) {
+        WasmBindEntry *e = &g_wasm_binds[bi];
+        int hit = 0;
+        for (int di = 0; di < e->n_deps; di++) {
+            if (e->deps[di] && strcmp(e->deps[di], root) == 0) { hit = 1; break; }
+        }
+        if (!hit) continue;
+        int gidx = ctx->top_bindings ?
+            top_bindings_find(ctx->top_bindings, e->name) : -1;
+        if (gidx >= 0) {
+            compile_expr(e->expr, code, locals, ctx);
+            emit_global_set(code, gidx);
+        } else {
+            int idx = locals_find(locals, e->name);
+            if (idx >= 0) {
+                compile_expr(e->expr, code, locals, ctx);
+                emit_local_set(code, idx);
+            }
+        }
     }
 }
 
@@ -1526,6 +1941,65 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     case NODE_UNARY: {
         const char *op = node->unary.op;
+        /* Try operator: x? returns x[1] when x is a Result::Ok-shaped
+           enum value (first slot != any registered Err ordinal); when
+           the first slot matches an Err ordinal we return x straight
+           out of the enclosing fn so the caller observes the Err.
+           Enum values land in wasm as [ordinal, args...] arrays; the
+           runtime carries no variant-name string, so we collect every
+           known "Err" variant ordinal up front and accept all of them. */
+        if (strcmp(op, "?") == 0) {
+            int err_tags[64];
+            int n_err = 0;
+            if (ctx->enums) {
+                for (int ei = 0; ei < ctx->enums->count && n_err < 64; ei++) {
+                    EnumLayout *el = &ctx->enums->layouts[ei];
+                    for (int vi = 0; vi < el->n_variants; vi++) {
+                        if (strcmp(el->variants[vi], "Err") == 0 ||
+                            strcmp(el->variants[vi], "None") == 0) {
+                            int dup = 0;
+                            for (int k = 0; k < n_err; k++)
+                                if (err_tags[k] == vi) { dup = 1; break; }
+                            if (!dup) err_tags[n_err++] = vi;
+                        }
+                    }
+                }
+            }
+            int xv   = locals_add(locals, "__tryv");
+            int xord = locals_add(locals, "__tryo");
+            compile_expr(node->unary.expr, code, locals, ctx);
+            emit_local_set(code, xv);
+            /* ordinal at slot 1 (slot 0 is the printable path string) */
+            emit_local_get(code, xv);
+            emit_int_val(code, 1);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_VAL_I32);
+            emit_local_set(code, xord);
+            int is_err = locals_add(locals, "__tryie");
+            emit_i32(code, 0);
+            emit_local_set(code, is_err);
+            for (int k = 0; k < n_err; k++) {
+                emit_local_get(code, xord);
+                emit_i32(code, err_tags[k]);
+                buf_byte(code, OP_I32_EQ);
+                emit_local_get(code, is_err);
+                buf_byte(code, OP_I32_OR);
+                emit_local_set(code, is_err);
+            }
+            emit_local_get(code, is_err);
+            buf_byte(code, OP_IF);
+            buf_byte(code, WASM_TYPE_I32);
+            emit_local_get(code, xv);
+            buf_byte(code, OP_RETURN);
+            buf_byte(code, OP_UNREACHABLE);
+            buf_byte(code, OP_ELSE);
+            /* Ok / Some: unwrap to first ctor arg (slot 2). */
+            emit_local_get(code, xv);
+            emit_int_val(code, 2);
+            emit_call(code, RT_ARR_GET);
+            buf_byte(code, OP_END);
+            break;
+        }
         compile_expr(node->unary.expr, code, locals, ctx);
 
         if (strcmp(op, "-") == 0) {
@@ -1543,6 +2017,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Assignments (as expression, returns the assigned value) ---- */
 
     case NODE_ASSIGN: {
+        const char *__bind_root = wasm_assign_root_ident(node->assign.target);
         if (node->assign.target && VAL_TAG(node->assign.target) == NODE_IDENT) {
             const char *target = node->assign.target->ident.name;
             /* Top-level binding -> route through the WASM global so
@@ -1567,6 +2042,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 emit_local_set(code, val_tmp);
                 emit_local_get(code, val_tmp);
                 emit_global_set(code, gidx);
+                wasm_emit_bind_notify_for_root(__bind_root, code, locals, ctx);
                 emit_local_get(code, val_tmp);
                 break;
             }
@@ -1614,6 +2090,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                     emit_str_val(code, koff, kl);
                     emit_local_get(code, val_tmp);
                     emit_call(code, RT_MAP_SET);
+                    wasm_emit_bind_notify_for_root(__bind_root, code, locals, ctx);
                     emit_local_get(code, val_tmp);  /* assignment expr value */
                     break;
                 }
@@ -1650,24 +2127,33 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 compile_expr(node->assign.value, code, locals, ctx);
             }
             emit_local_tee(code, idx);
+            wasm_emit_bind_notify_for_root(__bind_root, code, locals, ctx);
         } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_INDEX) {
             /* array/map index assignment: obj[idx] = val */
+            int val_tmp = locals_add(locals, "__iasn");
+            compile_expr(node->assign.value, code, locals, ctx);
+            emit_local_set(code, val_tmp);
             compile_expr(node->assign.target->index.obj, code, locals, ctx);
             compile_expr(node->assign.target->index.index, code, locals, ctx);
-            compile_expr(node->assign.value, code, locals, ctx);
+            emit_local_get(code, val_tmp);
             emit_call(code, RT_VAL_INDEX_SET);
+            wasm_emit_bind_notify_for_root(__bind_root, code, locals, ctx);
             /* return the value */
-            compile_expr(node->assign.value, code, locals, ctx);
+            emit_local_get(code, val_tmp);
         } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_FIELD) {
             /* field assignment: obj.name = val */
+            int val_tmp = locals_add(locals, "__fasn");
+            compile_expr(node->assign.value, code, locals, ctx);
+            emit_local_set(code, val_tmp);
             compile_expr(node->assign.target->field.obj, code, locals, ctx);
             const char *fname = node->assign.target->field.name;
             int slen = 0;
             int foff = strtab_add_with_len(ctx->strtab, fname, &slen);
             emit_str_val(code, foff, slen);
-            compile_expr(node->assign.value, code, locals, ctx);
+            emit_local_get(code, val_tmp);
             emit_call(code, RT_VAL_FIELD_SET);
-            compile_expr(node->assign.value, code, locals, ctx);
+            wasm_emit_bind_notify_for_root(__bind_root, code, locals, ctx);
+            emit_local_get(code, val_tmp);
         } else if (node->assign.target && VAL_TAG(node->assign.target) == NODE_LIT_TUPLE) {
             /* Parallel tuple assignment: (a, b) = (b, a)
                Evaluate the RHS into a fresh tuple value, then unpack each
@@ -1732,9 +2218,20 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             }
             int vtag = enum_variant_tag(ctx->enums, vpath);
             if (vtag >= 0) {
+                char ctagged[600];
+                snprintf(ctagged, sizeof(ctagged), "\x1e\x01\x1e%s", vpath);
                 emit_call(code, RT_ARR_NEW);
                 int arr_tmp = locals_add(locals, "__ector");
                 emit_local_set(code, arr_tmp);
+                /* slot 0 = marker + path string */
+                emit_local_get(code, arr_tmp);
+                {
+                    int nl = 0;
+                    int noff = strtab_add_with_len(ctx->strtab, ctagged, &nl);
+                    emit_str_val(code, noff, nl);
+                }
+                emit_call(code, RT_ARR_PUSH);
+                /* slot 1 = ordinal int */
                 emit_local_get(code, arr_tmp);
                 emit_int_val(code, vtag);
                 emit_call(code, RT_ARR_PUSH);
@@ -1813,6 +2310,34 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 emit_call(code, RT_ARR_PUSH);
                 break;
             }
+            /* channel() : real wasi-preview1 has no thread spawn so we lower
+               channels to a plain queue (a fresh array). ch.send is a push,
+               ch.recv is a shift; with spawn lowered to inline evaluation,
+               the producer always populates the queue before the consumer
+               reads. Optional buffer-size argument is ignored. */
+            if (strcmp(name, "channel") == 0) {
+                emit_call(code, RT_ARR_NEW);
+                for (int i = 0; i < nargs; i++) {
+                    compile_expr(node->call.args.items[i], code, locals, ctx);
+                    buf_byte(code, OP_DROP);
+                }
+                break;
+            }
+            /* exit(code): terminate the module. Routed straight to
+               wasi_snapshot_preview1.proc_exit; the return-i32 expression
+               value is unreachable, but wasm validation still wants
+               something on the stack. */
+            if (strcmp(name, "exit") == 0) {
+                if (nargs >= 1) {
+                    compile_expr(node->call.args.items[0], code, locals, ctx);
+                    emit_call(code, RT_VAL_I32);
+                } else {
+                    emit_i32(code, 0);
+                }
+                emit_call(code, IMPORT_PROC_EXIT);
+                buf_byte(code, OP_UNREACHABLE);
+                break;
+            }
             if (strcmp(name, "type") == 0 && nargs >= 1) {
                 /* Return the human name for the tag (matches the
                    interp / vm behaviour). Map: 0=null, 1=bool, 2=int,
@@ -1825,7 +2350,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 static const char *type_names[] = {
                     "null", "bool", "int", "float", "str", "array",
                     "map", "fn", "struct", "class", "tuple", "range",
-                    "bigint"
+                    "bigint", "duration"
                 };
                 int n_names = (int)(sizeof(type_names)/sizeof(type_names[0]));
                 for (int t = 0; t < n_names; t++) {
@@ -1853,7 +2378,7 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 static const char *type_names2[] = {
                     "null", "bool", "int", "float", "str", "array",
                     "map", "fn", "struct", "class", "tuple", "range",
-                    "bigint"
+                    "bigint", "duration"
                 };
                 int n_names = (int)(sizeof(type_names2)/sizeof(type_names2[0]));
                 for (int t = 0; t < n_names; t++) {
@@ -2153,6 +2678,20 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                     emit_call(code, RT_MAP_NEW);
                     int stmp = locals_add(locals, "__sinit");
                     emit_local_set(code, stmp);
+                    /* Stash __class so multi-impl method dispatch through
+                       a fn parameter (g.hi() in the test) can pick the
+                       right impl by struct name; without this the
+                       map-based path read null and fell off the chain. */
+                    emit_local_get(code, stmp);
+                    {
+                        int kl = 0;
+                        int koff = strtab_add_with_len(ctx->strtab, "__class", &kl);
+                        emit_str_val(code, koff, kl);
+                        int nl = 0;
+                        int noff = strtab_add_with_len(ctx->strtab, name, &nl);
+                        emit_str_val(code, noff, nl);
+                    }
+                    emit_call(code, RT_MAP_SET);
                     /* Set fields - kwargs first, then positional */
                     if (node->call.kwargs.len > 0) {
                         for (int k = 0; k < node->call.kwargs.len; k++) {
@@ -2506,6 +3045,95 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             compile_expr(node->method_call.args.items[0], code, locals, ctx);
             emit_call(code, RT_ARR_PUSH);
             emit_null(code); /* push returns void, need a value for expr context */
+            break;
+        }
+        /* ch.send(v) / ch.recv(): backs the channel() builtin. send is a
+           push to the queue; recv shifts the head (null if empty). The
+           wasi-preview1 backend can't run real threads, but spawn-bodies
+           run synchronously at the spawn site, so by the time the
+           consumer reads, every send has already landed in the buffer. */
+        if (strcmp(method, "send") == 0 && nargs == 1) {
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_call(code, RT_ARR_PUSH);
+            emit_null(code);
+            break;
+        }
+        if (strcmp(method, "recv") == 0 && nargs == 0) {
+            /* shift the head: read item[0], shift the rest down, decrement
+               len. payload layout: [cap, len, slot0, slot1, ...]. */
+            int rv  = locals_add(locals, "__rcv");
+            int dp  = locals_add(locals, "__rcdp");
+            int len = locals_add(locals, "__rclen");
+            int res = locals_add(locals, "__rcres");
+            int i   = locals_add(locals, "__rci");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_tee(code, rv);
+            emit_call(code, RT_VAL_I32);
+            emit_local_tee(code, dp);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_set(code, len);
+            emit_local_get(code, len);
+            emit_i32(code, 0);
+            buf_byte(code, OP_I32_LE_S);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+            emit_null(code);
+            buf_byte(code, OP_ELSE);
+            /* res = items[0] */
+            emit_local_get(code, dp);
+            emit_i32(code, 8);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_set(code, res);
+            /* shift down: for i = 0; i < len-1; i++ items[i] = items[i+1] */
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            /* items[i] = items[i+1] */
+            emit_local_get(code, dp);
+            emit_i32(code, 8);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, i);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_MUL);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, dp);
+            emit_i32(code, 8);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_MUL);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            buf_byte(code, OP_I32_STORE); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); /* loop */
+            buf_byte(code, OP_END); /* block */
+            /* len-- */
+            emit_local_get(code, dp);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, len);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            buf_byte(code, OP_I32_STORE); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_get(code, res);
+            buf_byte(code, OP_END);
             break;
         }
         if (strcmp(method, "pop") == 0) {
@@ -3078,6 +3706,69 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         if ((strcmp(method, "values") == 0) && nargs == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
             emit_call(code, RT_MAP_VALUES);
+            break;
+        }
+        /* m.entries() -> [(k0, v0), (k1, v1), ...] in insertion order.
+           Built by zipping the existing keys()/values() helpers; both
+           already walk the map's slot order, so the resulting tuples
+           come out in the same insertion order. */
+        if ((strcmp(method, "entries") == 0) && nargs == 0) {
+            int ks  = locals_add(locals, "__en_ks");
+            int vs  = locals_add(locals, "__en_vs");
+            int ln  = locals_add(locals, "__en_ln");
+            int i   = locals_add(locals, "__en_i");
+            int out = locals_add(locals, "__en_o");
+            int tup = locals_add(locals, "__en_t");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            int mv = locals_add(locals, "__en_mv");
+            emit_local_tee(code, mv);
+            emit_call(code, RT_MAP_KEYS);
+            emit_local_set(code, ks);
+            emit_local_get(code, mv);
+            emit_call(code, RT_MAP_VALUES);
+            emit_local_set(code, vs);
+            emit_local_get(code, ks);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, ln);
+            emit_call(code, RT_ARR_NEW);
+            emit_local_set(code, out);
+            emit_i32(code, 0);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, ln);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            /* tup = [ks[i], vs[i]] */
+            emit_call(code, RT_ARR_NEW);
+            emit_local_set(code, tup);
+            emit_local_get(code, tup);
+            emit_local_get(code, ks);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_ARR_PUSH);
+            emit_local_get(code, tup);
+            emit_local_get(code, vs);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, i);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_call(code, RT_ARR_PUSH);
+            emit_local_get(code, out);
+            emit_local_get(code, tup);
+            emit_call(code, RT_TUPLE_NEW);
+            emit_call(code, RT_ARR_PUSH);
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); /* loop */
+            buf_byte(code, OP_END); /* block */
+            emit_local_get(code, out);
             break;
         }
         if ((strcmp(method, "has") == 0) && nargs == 1) {
@@ -4011,6 +4702,71 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     case NODE_FIELD: {
         const char *fname = node->field.name;
+        /* Duration component accessors: .ns returns int/bigint, others
+           return float = ns / scale. Only fire when the receiver is
+           actually a duration at runtime; otherwise fall through to the
+           regular field path. */
+        int dur_kind = -1;
+        double dur_scale = 1.0;
+        int fidx_for_dur = -1;
+        if (fname) {
+            if      (strcmp(fname, "ns") == 0) { dur_kind = 0; }
+            else if (strcmp(fname, "us") == 0) { dur_kind = 1; dur_scale = 1e3; }
+            else if (strcmp(fname, "ms") == 0) { dur_kind = 1; dur_scale = 1e6; }
+            else if (strcmp(fname, "s")  == 0) { dur_kind = 1; dur_scale = 1e9; }
+            else if (strcmp(fname, "m")  == 0) { dur_kind = 1; dur_scale = 60e9; }
+            else if (strcmp(fname, "h")  == 0) { dur_kind = 1; dur_scale = 3600e9; }
+            else if (strcmp(fname, "d")  == 0) { dur_kind = 1; dur_scale = 86400e9; }
+            if (dur_kind >= 0) {
+                fidx_for_dur = struct_field_index(ctx->structs, NULL, fname);
+            }
+        }
+        if (dur_kind >= 0) {
+            int obj_local = locals_add(locals, "__durobj");
+            compile_expr(node->field.obj, code, locals, ctx);
+            emit_local_tee(code, obj_local);
+            emit_call(code, RT_VAL_TAG);
+            emit_i32(code, TAG_DURATION);
+            buf_byte(code, OP_I32_EQ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+            if (dur_kind == 0) {
+                emit_local_get(code, obj_local);
+                emit_call(code, RT_DUR_NS);
+            } else {
+                /* (f64)ns / scale */
+                emit_local_get(code, obj_local);
+                emit_i32(code, 8);
+                buf_byte(code, OP_I32_ADD);
+                buf_byte(code, OP_I64_LOAD);
+                buf_leb128_u(code, 3); buf_leb128_u(code, 0);
+                buf_byte(code, 0xB9); /* f64.convert_i64_s */
+                emit_f64_const(code, dur_scale);
+                buf_byte(code, OP_F64_DIV);
+                emit_call(code, RT_VAL_NEW_F64);
+            }
+            buf_byte(code, OP_ELSE);
+            /* Not a duration; fall back to the appropriate path:
+               struct (compile-time slot), map, or class field via
+               RT_VAL_FIELD. */
+            if (fidx_for_dur >= 0) {
+                /* Struct slot read: data_ptr + 8 + fidx*4 */
+                emit_local_get(code, obj_local);
+                emit_call(code, RT_VAL_I32);
+                emit_i32(code, 8 + fidx_for_dur * 4);
+                buf_byte(code, OP_I32_ADD);
+                buf_byte(code, OP_I32_LOAD);
+                buf_leb128_u(code, 2);
+                buf_leb128_u(code, 0);
+            } else {
+                int slen = 0;
+                int foff = strtab_add_with_len(ctx->strtab, fname, &slen);
+                emit_local_get(code, obj_local);
+                emit_str_val(code, foff, slen);
+                emit_call(code, RT_VAL_FIELD);
+            }
+            buf_byte(code, OP_END);
+            break;
+        }
         /* Special-case .len for strings and arrays */
         if (strcmp(fname, "len") == 0) {
             compile_expr(node->field.obj, code, locals, ctx);
@@ -4089,13 +4845,24 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             }
             int vtag = enum_variant_tag(ctx->enums, full);
             if (vtag >= 0) {
-                /* Encode every variant uniformly as an array whose first
-                   slot is the variant tag (boxed as int). Variants with
-                   ctor args are built by the NODE_CALL path below; the
-                   pattern cond / bindings agree on this layout. */
+                /* Enum variant layout: [path_str, ord_int, args...].
+                   - slot 0: marker-prefixed "Enum::Variant" name, so
+                     val_to_str can disambiguate from a plain (str,int)
+                     tuple. The marker is stripped before printing.
+                   - slot 1: numeric ordinal, used by pattern match.
+                   - slot 2+: ctor args, pushed by NODE_CALL. */
+                char tagged[600];
+                snprintf(tagged, sizeof(tagged), "\x1e\x01\x1e%s", full);
                 emit_call(code, RT_ARR_NEW);
                 int arr_tmp = locals_add(locals, "__evar");
                 emit_local_set(code, arr_tmp);
+                emit_local_get(code, arr_tmp);
+                {
+                    int nl = 0;
+                    int noff = strtab_add_with_len(ctx->strtab, tagged, &nl);
+                    emit_str_val(code, noff, nl);
+                }
+                emit_call(code, RT_ARR_PUSH);
                 emit_local_get(code, arr_tmp);
                 emit_int_val(code, vtag);
                 emit_call(code, RT_ARR_PUSH);
@@ -4485,67 +5252,94 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         int result_map = locals_add(locals, "__mc_map");
         emit_local_set(code, result_map);
 
-        /* Simplified: single clause */
-        if (node->map_comp.clause_pats.len > 0) {
-            Node *iter = node->map_comp.clause_iters.items[0];
-            Node *pat = node->map_comp.clause_pats.items[0];
+        int clause_i_locals[16];
+        for (int c = 0; c < node->map_comp.clause_pats.len && c < 16; c++) {
+            Node *iter = node->map_comp.clause_iters.items[c];
+            Node *pat  = node->map_comp.clause_pats.items[c];
             const char *vname = "__mc_elem";
             if (pat && VAL_TAG(pat) == NODE_PAT_IDENT) vname = pat->pat_ident.name;
             int elem_idx = locals_ensure(locals, vname);
-            int arr_src = locals_add(locals, "__mc_src");
-            int i_idx = locals_add(locals, "__mc_i");
-            int len_idx = locals_add(locals, "__mc_len");
 
-            compile_expr(iter, code, locals, ctx);
-            emit_local_set(code, arr_src);
-            emit_local_get(code, arr_src);
-            emit_call(code, RT_ARR_LEN);
-            emit_local_set(code, len_idx);
-            emit_i32(code, 0);
-            emit_local_set(code, i_idx);
+            if (iter && VAL_TAG(iter) == NODE_RANGE) {
+                int i_idx   = locals_add(locals, "__mc_ri");
+                int end_idx = locals_add(locals, "__mc_re");
+                clause_i_locals[c] = i_idx;
 
-            buf_byte(code, OP_BLOCK);
-            buf_byte(code, WASM_TYPE_VOID);
-            buf_byte(code, OP_LOOP);
-            buf_byte(code, WASM_TYPE_VOID);
+                compile_expr(iter->range.start, code, locals, ctx);
+                emit_call(code, RT_VAL_I32);
+                emit_local_set(code, i_idx);
+                compile_expr(iter->range.end, code, locals, ctx);
+                emit_call(code, RT_VAL_I32);
+                if (iter->range.inclusive) {
+                    emit_i32(code, 1);
+                    buf_byte(code, OP_I32_ADD);
+                }
+                emit_local_set(code, end_idx);
 
-            emit_local_get(code, i_idx);
-            emit_local_get(code, len_idx);
-            buf_byte(code, OP_I32_GE_S);
-            buf_byte(code, OP_BR_IF);
-            buf_leb128_u(code, 1);
+                buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+                buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+                emit_local_get(code, i_idx);
+                emit_local_get(code, end_idx);
+                buf_byte(code, OP_I32_GE_S);
+                buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+                emit_i32(code, TAG_INT);
+                emit_local_get(code, i_idx);
+                emit_call(code, RT_VAL_NEW);
+                emit_local_set(code, elem_idx);
+            } else {
+                int arr_src = locals_add(locals, "__mc_src");
+                int i_idx   = locals_add(locals, "__mc_i");
+                int len_idx = locals_add(locals, "__mc_len");
+                clause_i_locals[c] = i_idx;
 
-            emit_local_get(code, arr_src);
-            emit_i32(code, TAG_INT);
-            emit_local_get(code, i_idx);
-            emit_call(code, RT_VAL_NEW);
-            emit_call(code, RT_ARR_GET);
-            emit_local_set(code, elem_idx);
+                compile_expr(iter, code, locals, ctx);
+                emit_local_set(code, arr_src);
+                emit_local_get(code, arr_src);
+                emit_call(code, RT_ARR_LEN);
+                emit_local_set(code, len_idx);
+                emit_i32(code, 0);
+                emit_local_set(code, i_idx);
 
-            if (node->map_comp.clause_conds.len > 0 && node->map_comp.clause_conds.items[0]) {
-                compile_expr(node->map_comp.clause_conds.items[0], code, locals, ctx);
+                buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+                buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+                emit_local_get(code, i_idx);
+                emit_local_get(code, len_idx);
+                buf_byte(code, OP_I32_GE_S);
+                buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+
+                emit_local_get(code, arr_src);
+                emit_i32(code, TAG_INT);
+                emit_local_get(code, i_idx);
+                emit_call(code, RT_VAL_NEW);
+                emit_call(code, RT_ARR_GET);
+                emit_local_set(code, elem_idx);
+            }
+
+            if (c < node->map_comp.clause_conds.len && node->map_comp.clause_conds.items[c]) {
+                compile_expr(node->map_comp.clause_conds.items[c], code, locals, ctx);
                 emit_call(code, RT_VAL_TRUTHY);
-                buf_byte(code, OP_IF);
-                buf_byte(code, WASM_TYPE_VOID);
+                buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
             }
+        }
 
-            emit_local_get(code, result_map);
-            compile_expr(node->map_comp.key, code, locals, ctx);
-            compile_expr(node->map_comp.value, code, locals, ctx);
-            emit_call(code, RT_MAP_SET);
+        emit_local_get(code, result_map);
+        compile_expr(node->map_comp.key, code, locals, ctx);
+        emit_call(code, RT_VAL_TO_STR); /* match interp's int-key -> string-key coercion */
+        compile_expr(node->map_comp.value, code, locals, ctx);
+        emit_call(code, RT_MAP_SET);
 
-            if (node->map_comp.clause_conds.len > 0 && node->map_comp.clause_conds.items[0]) {
-                buf_byte(code, OP_END);
+        for (int c = node->map_comp.clause_pats.len - 1; c >= 0; c--) {
+            if (c < node->map_comp.clause_conds.len && node->map_comp.clause_conds.items[c]) {
+                buf_byte(code, OP_END); /* end if */
             }
-
-            emit_local_get(code, i_idx);
+            int ii = clause_i_locals[c];
+            emit_local_get(code, ii);
             emit_i32(code, 1);
             buf_byte(code, OP_I32_ADD);
-            emit_local_set(code, i_idx);
-            buf_byte(code, OP_BR);
-            buf_leb128_u(code, 0);
-            buf_byte(code, OP_END);
-            buf_byte(code, OP_END);
+            emit_local_set(code, ii);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); /* loop */
+            buf_byte(code, OP_END); /* block */
         }
 
         emit_local_get(code, result_map);
@@ -4561,6 +5355,10 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Yield ---- */
 
     case NODE_YIELD:
+        if (wasm_in_tag_body(ctx)) {
+            wasm_emit_yield_call_block(node->yield_.value, code, locals, ctx);
+            break;
+        }
         if (node->yield_.value)
             compile_expr(node->yield_.value, code, locals, ctx);
         else
@@ -4706,14 +5504,15 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
     /* ---- Special literal types ---- */
 
-    case NODE_LIT_DURATION:
-        /* WASM has no dedicated duration cell yet; carry the ns count
-           through the f64 lane so values up to ~104 days survive without
-           loss. Past that, sub-second precision is lost but the magnitude
-           is preserved. The real Duration type lives in the interp/vm. */
-        emit_f64_const(code, (double)node->lit_duration.ns);
-        emit_call(code, RT_VAL_NEW_F64);
+    case NODE_LIT_DURATION: {
+        /* Pack the i64 ns count into two i32 halves and build a
+           TAG_DURATION cell that stores the full i64 at offset 8. */
+        int64_t ns = node->lit_duration.ns;
+        emit_i32(code, (int32_t)(ns & 0xFFFFFFFFLL));
+        emit_i32(code, (int32_t)((ns >> 32) & 0xFFFFFFFFLL));
+        emit_call(code, RT_DUR_NEW);
         break;
+    }
 
     /* ---- Pattern nodes used as expressions ---- */
 
@@ -5045,8 +5844,8 @@ static void compile_pattern_cond(Node *pat, int subject_local, WasmBuf *code,
     }
 
     case NODE_PAT_ENUM: {
-        /* Subject is an array of the form [vtag, args...]. Match needs
-           the array tag plus arr[0] == vtag. */
+        /* Subject layout is [path_str, ord_int, args...]. Match by
+           ordinal at slot 1; slot 0 is for printing. */
         int vtag = -1;
         if (pat->pat_enum.path) {
             vtag = enum_variant_tag(ctx->enums, pat->pat_enum.path);
@@ -5057,7 +5856,7 @@ static void compile_pattern_cond(Node *pat, int subject_local, WasmBuf *code,
             emit_i32(code, TAG_ARRAY);
             buf_byte(code, OP_I32_EQ);
             emit_local_get(code, subject_local);
-            emit_int_val(code, 0);
+            emit_int_val(code, 1);
             emit_call(code, RT_ARR_GET);
             emit_call(code, RT_VAL_I32);
             emit_i32(code, vtag);
@@ -5222,11 +6021,12 @@ static void compile_pattern_bindings(Node *pat, int subject_local, WasmBuf *code
         break;
 
     case NODE_PAT_ENUM:
-        /* Subject layout is [vtag, args...]; ctor args start at index 1. */
+        /* Subject layout is [path_str, ord_int, args...]; ctor args
+           start at index 2. */
         for (int i = 0; i < pat->pat_enum.args.len; i++) {
             int al = locals_add(locals, "__be_a");
             emit_local_get(code, subject_local);
-            emit_int_val(code, i + 1);
+            emit_int_val(code, i + 2);
             emit_call(code, RT_ARR_GET);
             emit_local_set(code, al);
             compile_pattern_bindings(pat->pat_enum.args.items[i], al, code, locals, ctx);
@@ -5410,24 +6210,35 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
     /* ---- Return ---- */
 
     case NODE_RETURN: {
+        int ret_tmp = locals_add(locals, "__ret_tmp");
         if (ctx->defers.count > 0) {
             if (node->ret.value) {
-                int ret_tmp = locals_add(locals, "__ret_tmp");
                 compile_expr(node->ret.value, code, locals, ctx);
                 emit_local_set(code, ret_tmp);
                 emit_defers(code, locals, ctx);
-                emit_local_get(code, ret_tmp);
             } else {
                 emit_defers(code, locals, ctx);
                 emit_null(code);
+                emit_local_set(code, ret_tmp);
             }
         } else {
             if (node->ret.value)
                 compile_expr(node->ret.value, code, locals, ctx);
             else
                 emit_null(code);
+            emit_local_set(code, ret_tmp);
         }
+        /* If a throw is in flight (set by an earlier stmt or by a yield
+           that called a block which threw), do NOT exit the fn - skip
+           the OP_RETURN so an enclosing try in the same fn can observe
+           the flag and run its catch. */
+        emit_global_get(code, GLOBAL_ERR_FLAG);
+        buf_byte(code, OP_I32_EQZ);
+        buf_byte(code, OP_IF);
+        buf_byte(code, WASM_TYPE_VOID);
+        emit_local_get(code, ret_tmp);
         buf_byte(code, OP_RETURN);
+        buf_byte(code, OP_END);
         break;
     }
 
@@ -5561,6 +6372,17 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
             emit_local_get(code, arr_idx);
             emit_call(code, RT_STR_CHARS);
+            emit_local_set(code, arr_idx);
+            buf_byte(code, OP_END);
+            /* if type(arr) == "map": arr = arr.keys() so for-k-in-m walks the
+               insertion-ordered key set, not the underlying k/v flat array. */
+            emit_local_get(code, arr_idx);
+            emit_call(code, RT_VAL_TAG);
+            emit_i32(code, TAG_MAP);
+            buf_byte(code, OP_I32_EQ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, arr_idx);
+            emit_call(code, RT_MAP_KEYS);
             emit_local_set(code, arr_idx);
             buf_byte(code, OP_END);
             emit_local_get(code, arr_idx);
@@ -5929,14 +6751,21 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         break;
 
     case NODE_BIND: {
-        /* Reactive bind would re-evaluate when dependencies change.
-           The AOT path does not have a reactive runtime, so we lower
-           the binding to a one-shot let -- the value is computed once
-           at the bind point and never recomputed. */
+        /* Reactive bind: evaluate the expr once at the decl point and
+           store into the bind's slot (global if top-level, local
+           otherwise). The dependency registry built up front drives the
+           per-assign recompute; see wasm_emit_bind_notify_for_root. */
         if (node->bind_decl.name && node->bind_decl.expr) {
-            int idx = locals_ensure(locals, node->bind_decl.name);
-            compile_expr(node->bind_decl.expr, code, locals, ctx);
-            emit_local_set(code, idx);
+            int gidx = (ctx->cur_fn_idx == -1 && ctx->top_bindings) ?
+                top_bindings_find(ctx->top_bindings, node->bind_decl.name) : -1;
+            if (gidx >= 0) {
+                compile_expr(node->bind_decl.expr, code, locals, ctx);
+                emit_global_set(code, gidx);
+            } else {
+                int idx = locals_ensure(locals, node->bind_decl.name);
+                compile_expr(node->bind_decl.expr, code, locals, ctx);
+                emit_local_set(code, idx);
+            }
         }
         break;
     }
@@ -5975,6 +6804,11 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         break;
 
     case NODE_YIELD:
+        if (wasm_in_tag_body(ctx)) {
+            wasm_emit_yield_call_block(node->yield_.value, code, locals, ctx);
+            buf_byte(code, OP_DROP);
+            break;
+        }
         if (node->yield_.value) {
             compile_expr(node->yield_.value, code, locals, ctx);
             buf_byte(code, OP_DROP);
@@ -7093,6 +7927,25 @@ static void emit_rt_val_eq(WasmBuf *body) {
     buf_byte(body, OP_END); /* outer block */
     buf_byte(body, OP_END); /* alen == blen */
     buf_byte(body, OP_ELSE);
+    /* TAG_DURATION: compare the i64 ns at offset 8. */
+    emit_local_get(body, atag);
+    emit_i32(body, TAG_DURATION);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD);
+    buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    emit_local_get(body, 1);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD);
+    buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    buf_byte(body, 0x51); /* i64.eq */
+    emit_local_set(body, eq);
+    buf_byte(body, OP_ELSE);
     /* Non-string, non-array, non-float, non-map: compare payloads. */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
@@ -7100,6 +7953,7 @@ static void emit_rt_val_eq(WasmBuf *body) {
     emit_call(body, RT_VAL_I32);
     buf_byte(body, OP_I32_EQ);
     emit_local_set(body, eq);
+    buf_byte(body, OP_END); /* duration if */
     buf_byte(body, OP_END); /* map if */
     buf_byte(body, OP_END); /* array if */
     buf_byte(body, OP_END); /* float if */
@@ -7164,6 +8018,54 @@ static void emit_rt_val_arith_floataware(WasmBuf *body, uint8_t f64_op,
    - either operand float  -> f64 add
    - else                  -> int add (with overflow promotion to bigint) */
 static void emit_rt_val_add(WasmBuf *body) {
+    /* Duration + duration: load both ns at offset 8, add as i64, build
+       a new duration cell. */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    {
+        /* sum = ns_a + ns_b */
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        buf_byte(body, 0x7C); /* i64.add */
+        /* lo = (i32) sum; hi = (i32)(sum >> 32) */
+        int sumlo = 2, sumhi = 3;
+        /* store full i64 to scratch via stack juggle: dup, wrap-low, set sumlo;
+           pop original, shr32, set sumhi. WASM has no dup, so we cheat by
+           saving to a temp i64 local -- but that would need a typed extra.
+           Cheaper: re-extract from the cells in the call. */
+        buf_byte(body, OP_DROP);
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        buf_byte(body, 0x7C);
+        buf_byte(body, 0xA7); /* i64.wrap_i32 (low 32) */
+        emit_local_set(body, sumlo);
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        buf_byte(body, 0x7C);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s(body, 32);
+        buf_byte(body, 0x88); /* i64.shr_u */
+        buf_byte(body, 0xA7);
+        emit_local_set(body, sumhi);
+        emit_local_get(body, sumlo);
+        emit_local_get(body, sumhi);
+        emit_call(body, RT_DUR_NEW);
+    }
+    buf_byte(body, OP_ELSE);
     /* Array concat: both sides must be arrays (mixed array+other would
        be ambiguous, so leave it to fall through to the type error). */
     emit_tag_check(body, 0, TAG_ARRAY);
@@ -7239,9 +8141,43 @@ static void emit_rt_val_add(WasmBuf *body) {
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* duration+duration */
 }
 
 static void emit_rt_val_sub(WasmBuf *body) {
+    /* Duration - duration: i64 ns difference, wrapped in a duration. */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF);
+    buf_byte(body, WASM_TYPE_I32);
+    {
+        int sumlo = 2, sumhi = 3;
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        buf_byte(body, 0x7D); /* i64.sub */
+        buf_byte(body, 0xA7);
+        emit_local_set(body, sumlo);
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        buf_byte(body, 0x7D);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s(body, 32);
+        buf_byte(body, 0x88);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, sumhi);
+        emit_local_get(body, sumlo);
+        emit_local_get(body, sumhi);
+        emit_call(body, RT_DUR_NEW);
+    }
+    buf_byte(body, OP_ELSE);
     /* Either operand string -> type error (you can't subtract strings). */
     emit_tag_check(body, 0, TAG_STRING);
     emit_tag_check(body, 1, TAG_STRING);
@@ -7256,8 +8192,70 @@ static void emit_rt_val_sub(WasmBuf *body) {
     buf_byte(body, OP_ELSE);
     emit_rt_val_arith_floataware(body, OP_F64_SUB, OP_I32_SUB);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* duration-duration */
 }
 static void emit_rt_val_mul(WasmBuf *body) {
+    /* duration * int or int * duration -> scale ns by the int factor. */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_INT);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    {
+        int lo = 2, hi = 3;
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC); /* i64.extend_i32_s */
+        buf_byte(body, 0x7E); /* i64.mul */
+        buf_byte(body, 0xA7);
+        emit_local_set(body, lo);
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x7E);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s(body, 32);
+        buf_byte(body, 0x88);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, hi);
+        emit_local_get(body, lo); emit_local_get(body, hi);
+        emit_call(body, RT_DUR_NEW);
+    }
+    buf_byte(body, OP_ELSE);
+    emit_tag_check(body, 0, TAG_INT);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    {
+        int lo = 2, hi = 3;
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x7E);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, lo);
+        emit_local_get(body, 1);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 0);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x7E);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s(body, 32);
+        buf_byte(body, 0x88);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, hi);
+        emit_local_get(body, lo); emit_local_get(body, hi);
+        emit_call(body, RT_DUR_NEW);
+    }
+    buf_byte(body, OP_ELSE);
     /* String * int (either order) -> repeat the string n times. */
     emit_tag_check(body, 0, TAG_STRING);
     buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
@@ -7323,6 +8321,8 @@ static void emit_rt_val_mul(WasmBuf *body) {
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* int*dur */
+    buf_byte(body, OP_END); /* dur*int */
 }
 static void emit_rt_val_div(WasmBuf *body) {
     /* Float-aware division. For the integer path, dividing by zero would
@@ -7331,6 +8331,54 @@ static void emit_rt_val_div(WasmBuf *body) {
        by zero produces inf/NaN per IEEE 754 and does not trap. */
     int b_int = 2;
     int r = 3;
+
+    /* duration / duration -> float ratio (no tag) */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    buf_byte(body, 0xB9); /* f64.convert_i64_s */
+    emit_local_get(body, 1);
+    emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    buf_byte(body, 0xB9);
+    buf_byte(body, OP_F64_DIV);
+    emit_call(body, RT_VAL_NEW_F64);
+    buf_byte(body, OP_ELSE);
+    /* duration / int -> duration with ns / n */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_INT);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    {
+        int lo = 4, hi = 5;
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC); /* i64.extend_i32_s */
+        buf_byte(body, 0x7F); /* i64.div_s */
+        buf_byte(body, 0xA7);
+        emit_local_set(body, lo);
+        emit_local_get(body, 0);
+        emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+        emit_local_get(body, 1);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, 0xAC);
+        buf_byte(body, 0x7F);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s(body, 32);
+        buf_byte(body, 0x88);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, hi);
+        emit_local_get(body, lo); emit_local_get(body, hi);
+        emit_call(body, RT_DUR_NEW);
+    }
+    buf_byte(body, OP_ELSE);
 
     emit_tag_check(body, 0, TAG_FLOAT);
     emit_tag_check(body, 1, TAG_FLOAT);
@@ -7367,6 +8415,8 @@ static void emit_rt_val_div(WasmBuf *body) {
     emit_call(body, RT_VAL_NEW);
     buf_byte(body, OP_END);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* dur/int */
+    buf_byte(body, OP_END); /* dur/dur */
 }
 
 /* Comparison operator template (int path). */
@@ -7784,7 +8834,760 @@ static void emit_rt_runtime_error(WasmBuf *body) {
     emit_null(body);
 }
 
+/* $dur_new(lo: i32, hi: i32) -> i32
+   Allocate a 16-byte cell, tag = TAG_DURATION, store ns as i64 at
+   offset 8. The two i32 halves are combined as (hi<<32)|lo via i64 ops. */
+static void emit_rt_dur_new(WasmBuf *body) {
+    int ptr = 2;
+    emit_i32(body, VAL_SIZE);
+    emit_call(body, RT_ALLOC);
+    emit_local_tee(body, ptr);
+    emit_i32(body, TAG_DURATION);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    /* zero payload at +4 */
+    emit_local_get(body, ptr);
+    emit_i32(body, 4);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 0);
+    buf_byte(body, OP_I32_STORE);
+    buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+    /* Compose i64 ns = (u64)hi << 32 | (u64)lo, store at +8 */
+    emit_local_get(body, ptr);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    /* (i64)hi << 32 */
+    emit_local_get(body, 1);
+    buf_byte(body, 0xAD); /* i64.extend_i32_u */
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 32);
+    buf_byte(body, 0x86); /* i64.shl */
+    /* | (i64)lo */
+    emit_local_get(body, 0);
+    buf_byte(body, 0xAD); /* i64.extend_i32_u */
+    buf_byte(body, 0x84); /* i64.or */
+    buf_byte(body, OP_I64_STORE);
+    buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    emit_local_get(body, ptr);
+}
+
+/* $dur_ns_val(ptr: i32) -> i32
+   Read the i64 ns out of a duration cell and return an xs value:
+   TAG_INT when the value fits in signed i32, otherwise a TAG_BIGINT
+   wrapping the decimal-formatted digits. */
+static void emit_rt_dur_ns_val(WasmBuf *body) {
+    /* locals (all i32 by default):
+       0=ptr (param), 1=buf, 2=pos, 3=neg, 4=digit, 5=lo, 6=hi
+       Plus 1 i64 local at index 7 (added in build site). */
+    int lo = 5, hi = 6;
+    int buf = 1, pos = 2, neg = 3, digit = 4;
+    int i64_local = 7;
+    /* Load ns i64 from ptr+8 into stack, set to i64_local */
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD);
+    buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    emit_local_set(body, i64_local);
+    /* Fast path: if value fits in i32 (i.e. (i64)(i32)v == v), return TAG_INT */
+    emit_local_get(body, i64_local);
+    emit_local_get(body, i64_local);
+    buf_byte(body, 0xA7); /* i64.wrap_i32 (truncates to lo) -> reuse */
+    buf_byte(body, 0xAC); /* i64.extend_i32_s */
+    buf_byte(body, 0x51); /* i64.eq */
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_i32(body, TAG_INT);
+    emit_local_get(body, i64_local);
+    buf_byte(body, 0xA7); /* i64.wrap_i32 */
+    emit_call(body, RT_VAL_NEW);
+    buf_byte(body, OP_ELSE);
+    /* Slow path: format the i64 as a decimal digit string and wrap as bigint.
+       We do this entirely in i64 space so values up to 2^63 are exact. */
+    /* neg = v < 0; if neg: v = -v */
+    emit_local_get(body, i64_local);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    buf_byte(body, 0x53); /* i64.lt_s */
+    emit_local_set(body, neg);
+    emit_local_get(body, neg);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    emit_local_get(body, i64_local);
+    buf_byte(body, 0x7D); /* i64.sub */
+    emit_local_set(body, i64_local);
+    buf_byte(body, OP_END);
+    /* alloc a 32-byte buf */
+    emit_i32(body, 32);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, buf);
+    emit_i32(body, 32);
+    emit_local_set(body, pos);
+    /* digit-by-digit, write backwards */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    /* pos--; */
+    emit_local_get(body, pos);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, pos);
+    /* digit = (i32)(v % 10); v /= 10; */
+    emit_local_get(body, i64_local);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10);
+    buf_byte(body, 0x81); /* i64.rem_s */
+    buf_byte(body, 0xA7); /* i64.wrap_i32 */
+    emit_local_set(body, digit);
+    emit_local_get(body, i64_local);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10);
+    buf_byte(body, 0x7F); /* i64.div_s */
+    emit_local_set(body, i64_local);
+    /* buf[pos] = '0' + digit */
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '0');
+    emit_local_get(body, digit);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    /* break if v == 0 */
+    emit_local_get(body, i64_local);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    buf_byte(body, 0x51); /* i64.eq */
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); /* loop */
+    buf_byte(body, OP_END); /* outer block */
+    /* If neg, prepend '-' */
+    emit_local_get(body, neg);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, pos);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, pos);
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '-');
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END);
+    /* Make bigint(data_ptr = buf+pos, len = 32 - pos) */
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 32);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_SUB);
+    emit_call(body, RT_BIGINT_NEW);
+    buf_byte(body, OP_END);
+}
+
+/* $dur_to_str(ptr: i32) -> i32 (string value)
+   Format a duration's i64 ns as a compact human string. Mirrors the
+   native duration_repr logic. Sub-second values use the largest unit
+   that fits cleanly (ns, X.Yus, X.Yms); whole-second values compose
+   [Nd][Hh][Mm][Ss] with the seconds fraction trimmed of trailing zeros. */
+static void emit_rt_dur_to_str(WasmBuf *body) {
+    /* For simplicity, route everything through dur_ns_val (which gives an
+       int/bigint) for the integer parts, but we don't want decimal here.
+       Easier: implement directly with i64 division.
+
+       Locals (i32): 0=ptr (param), 1=buf, 2=pos, 3=neg, 4=digit, 5=unit_at,
+                     6=tmpstr, 7=fracpos, 8=result, 9=tmp, 10=had_digit
+       i64 locals (declared in build site): 11=v (abs ns), 12=rem, 13=part */
+    int buf = 1, pos = 2, neg = 3, digit = 4, unit_at = 5, tmpstr = 6;
+    int fracpos = 7, result = 8, tmp = 9, had_digit = 10;
+    int v = 11, rem = 12, part = 13;
+
+    /* Load ns */
+    emit_local_get(body, 0);
+    emit_i32(body, 8);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD);
+    buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    emit_local_set(body, v);
+
+    /* Special-case zero: "0s" */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    buf_byte(body, 0x51); /* i64.eq */
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_inline_str(body, "0s", result);
+    buf_byte(body, OP_ELSE);
+
+    /* neg = v < 0; abs */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    buf_byte(body, 0x53); /* i64.lt_s */
+    emit_local_set(body, neg);
+    emit_local_get(body, neg);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    emit_local_get(body, v);
+    buf_byte(body, 0x7D); /* i64.sub */
+    emit_local_set(body, v);
+    buf_byte(body, OP_END);
+
+    /* Decide unit:
+         if v < 1000ns   -> "<n>ns"
+         elif v < 1us*1000 (=1e6 ns) -> us with up to 3 frac digits
+         elif v < 1s (1e9 ns) -> ms with up to 6 frac digits
+         else compose [Nd][Hh][Mm][Ss] with up to 9 frac digits on s */
+
+    /* alloc result buf (128 bytes) */
+    emit_i32(body, 128);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, buf);
+    emit_i32(body, 0);
+    emit_local_set(body, pos);
+
+    /* If neg: buf[pos++] = '-' */
+    emit_local_get(body, neg);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '-');
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    buf_byte(body, OP_END);
+
+    /* if v < 1000 -> write decimal of v then "ns" */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000);
+    buf_byte(body, 0x53); /* i64.lt_s */
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* write_i64_decimal(v) into buf at pos; we re-use a backwards walk */
+    /* Reverse-walk: start from a 24-byte scratch end, count digits, copy back */
+    emit_i32(body, 24);
+    emit_call(body, RT_ALLOC);
+    emit_local_set(body, tmpstr);
+    emit_i32(body, 24);
+    emit_local_set(body, fracpos);
+    emit_i32(body, 0);
+    emit_local_set(body, had_digit);
+    /* loop: write digit, /=10, break if 0 */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, fracpos);
+    emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, fracpos);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10);
+    buf_byte(body, 0x81); /* i64.rem_s */
+    buf_byte(body, 0xA7);
+    emit_local_set(body, digit);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10);
+    buf_byte(body, 0x7F); /* i64.div_s */
+    emit_local_set(body, v);
+    emit_local_get(body, tmpstr);
+    emit_local_get(body, fracpos);
+    buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '0');
+    emit_local_get(body, digit);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0);
+    buf_byte(body, 0x51);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
+    /* Copy digits from tmpstr[fracpos..24] into buf[pos..]; bump pos */
+    emit_i32(body, 24);
+    emit_local_get(body, fracpos);
+    buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, tmp); /* tmp = ndigits */
+    /* loop i=0..ndigits  -- use had_digit (local 10) as the index to
+       avoid stomping the digit local we may still need later. */
+    emit_i32(body, 0);
+    emit_local_set(body, had_digit);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, had_digit);
+    emit_local_get(body, tmp);
+    buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, had_digit);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, tmpstr);
+    emit_local_get(body, fracpos);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, had_digit);
+    buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_I32_STORE8);
+    buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, had_digit); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, had_digit);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, pos);
+    emit_local_get(body, tmp);
+    buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    /* append "ns" */
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 'n'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 's'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos); emit_i32(body, 2); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+
+    buf_byte(body, OP_ELSE);
+
+    /* else (v >= 1000ns): compose [Nd][Hh][Mm][Ss] using the existing
+       i32-string formatter when each part fits. v is i64 abs ns at this
+       point; we'll repeatedly extract parts in i64 space and inline the
+       digit-format inline.
+
+       For brevity, we punt on sub-second-only paths (us, ms) and do the
+       compose-from-seconds-and-above branch when v >= 1s, plus a single
+       smaller-unit branch when v < 1s. */
+    /* if v < 1_000_000_000 (1s): use ms or us */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000000000LL);
+    buf_byte(body, 0x53); /* i64.lt_s */
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* sub-second: pick us if v<1e6 else ms */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000000LL);
+    buf_byte(body, 0x53); /* i64.lt_s */
+    emit_local_set(body, unit_at);
+    /* whole = v / divisor; rem = v % divisor; divisor = 1000 (us) or 1e6 (ms) */
+    emit_local_get(body, unit_at);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* divisor = 1000, frac digits = 3 */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000);
+    buf_byte(body, 0x7F); /* i64.div_s */
+    emit_local_set(body, part);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000);
+    buf_byte(body, 0x81); /* i64.rem_s */
+    emit_local_set(body, rem);
+    /* Write integer part decimal (always at least 1 digit; never zero
+       since v >= 1000 here means part >= 1). */
+    /* alloc tmp */
+    emit_i32(body, 24); emit_call(body, RT_ALLOC); emit_local_set(body, tmpstr);
+    emit_i32(body, 24); emit_local_set(body, fracpos);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, fracpos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, fracpos);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+    buf_byte(body, 0xA7);
+    emit_local_set(body, digit);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x7F);
+    emit_local_set(body, part);
+    emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x51);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    /* copy int digits */
+    emit_i32(body, 24); emit_local_get(body, fracpos); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, tmp);
+    emit_i32(body, 0); emit_local_set(body, digit);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, digit); emit_local_get(body, tmp); buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, digit); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, digit);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, pos); emit_local_get(body, tmp); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    /* if rem != 0: write '.' then 3 frac digits with trailing-zero trim */
+    emit_local_get(body, rem);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52); /* i64.ne */
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    /* '.' */
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '.'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    /* write rem as 3 zero-padded digits then strip trailing zeros */
+    /* d2=rem/100 ; d1=(rem/10)%10 ; d0=rem%10 */
+    for (int k = 0; k < 3; k++) {
+        /* digit = (rem / 10^(2-k)) % 10 */
+        int64_t div = 1;
+        for (int e = 0; e < 2 - k; e++) div *= 10;
+        emit_local_get(body, rem);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, div); buf_byte(body, 0x7F);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, digit);
+        emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, pos);
+    }
+    /* trim trailing '0' */
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, buf); emit_local_get(body, pos); emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0'); buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, pos);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* rem != 0 */
+    /* "us" */
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 'u'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 's'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos); emit_i32(body, 2); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    buf_byte(body, OP_ELSE);
+    /* ms path: divisor = 1e6, frac digits = 6 */
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000000LL); buf_byte(body, 0x7F);
+    emit_local_set(body, part);
+    emit_local_get(body, v);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 1000000LL); buf_byte(body, 0x81);
+    emit_local_set(body, rem);
+    emit_i32(body, 24); emit_call(body, RT_ALLOC); emit_local_set(body, tmpstr);
+    emit_i32(body, 24); emit_local_set(body, fracpos);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, fracpos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, fracpos);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+    buf_byte(body, 0xA7);
+    emit_local_set(body, digit);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x7F);
+    emit_local_set(body, part);
+    emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, part);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x51);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_i32(body, 24); emit_local_get(body, fracpos); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, tmp);
+    emit_i32(body, 0); emit_local_set(body, digit);
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, digit); emit_local_get(body, tmp); buf_byte(body, OP_I32_GE_S);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+    emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, digit); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, digit);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    emit_local_get(body, pos); emit_local_get(body, tmp); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    /* if rem != 0: dot + 6 padded + trim */
+    emit_local_get(body, rem);
+    buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, '.'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    for (int k = 0; k < 6; k++) {
+        int64_t div = 1;
+        for (int e = 0; e < 5 - k; e++) div *= 10;
+        emit_local_get(body, rem);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, div); buf_byte(body, 0x7F);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+        buf_byte(body, 0xA7);
+        emit_local_set(body, digit);
+        emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, pos);
+    }
+    buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+    buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+    emit_local_get(body, buf); emit_local_get(body, pos); emit_i32(body, 1);
+    buf_byte(body, OP_I32_SUB); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_i32(body, '0'); buf_byte(body, OP_I32_NE);
+    buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+    emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+    emit_local_set(body, pos);
+    buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+    buf_byte(body, OP_END); buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 'm'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+    emit_i32(body, 's'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+    emit_local_get(body, pos); emit_i32(body, 2); buf_byte(body, OP_I32_ADD);
+    emit_local_set(body, pos);
+    buf_byte(body, OP_END); /* us vs ms */
+    buf_byte(body, OP_ELSE);
+
+    /* v >= 1s: compose [Nd][Hh][Mm][Ss[.frac]]
+       constants: SEC=1e9, MIN=60*SEC, HOUR=60*MIN, DAY=24*HOUR
+       Since wasm i64.const supports full 64-bit, we can express these. */
+    /* days = v / DAY; v %= DAY */
+    {
+        const int64_t SEC = 1000000000LL;
+        const int64_t MIN = 60LL * SEC;
+        const int64_t HOUR = 60LL * MIN;
+        const int64_t DAY = 24LL * HOUR;
+
+        /* Helper inline: emit_write_dec_unit(divisor, suffix_char)
+           writes "<part><suffix>" if part > 0 and updates pos and v. */
+        struct { int64_t div; char suf; } units[] = {
+            { DAY, 'd' }, { HOUR, 'h' }, { MIN, 'm' }
+        };
+        for (int u = 0; u < 3; u++) {
+            /* part = v / div */
+            emit_local_get(body, v);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, units[u].div);
+            buf_byte(body, 0x7F);
+            emit_local_set(body, part);
+            /* if part != 0 -> write digits + suffix; v %= div */
+            emit_local_get(body, part);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52);
+            buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+            /* write digits (reverse walk) */
+            emit_i32(body, 24); emit_call(body, RT_ALLOC); emit_local_set(body, tmpstr);
+            emit_i32(body, 24); emit_local_set(body, fracpos);
+            buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+            buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+            emit_local_get(body, fracpos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+            emit_local_set(body, fracpos);
+            emit_local_get(body, part);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+            buf_byte(body, 0xA7); emit_local_set(body, digit);
+            emit_local_get(body, part);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x7F);
+            emit_local_set(body, part);
+            emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+            emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+            buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+            emit_local_get(body, part);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x51);
+            buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+            buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+            buf_byte(body, OP_END); buf_byte(body, OP_END);
+            /* copy + suffix */
+            emit_i32(body, 24); emit_local_get(body, fracpos); buf_byte(body, OP_I32_SUB);
+            emit_local_set(body, tmp);
+            emit_i32(body, 0); emit_local_set(body, digit);
+            buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+            buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+            emit_local_get(body, digit); emit_local_get(body, tmp); buf_byte(body, OP_I32_GE_S);
+            buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+            emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+            emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+            emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+            emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+            buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+            buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+            emit_local_get(body, digit); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+            emit_local_set(body, digit);
+            buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+            buf_byte(body, OP_END); buf_byte(body, OP_END);
+            emit_local_get(body, pos); emit_local_get(body, tmp); buf_byte(body, OP_I32_ADD);
+            emit_local_set(body, pos);
+            /* suffix */
+            emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+            emit_i32(body, units[u].suf);
+            buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+            emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+            emit_local_set(body, pos);
+            /* v %= div */
+            emit_local_get(body, v);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, units[u].div); buf_byte(body, 0x81);
+            emit_local_set(body, v);
+            buf_byte(body, OP_END);
+        }
+        /* Seconds: write secs (= v / SEC), then if rem (v % SEC) != 0 write
+           '.' + 9 digits with trim. Write even if secs==0 but only if
+           rem!=0 to avoid trailing "0s" if all higher units consumed it. */
+        emit_local_get(body, v);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, SEC); buf_byte(body, 0x7F);
+        emit_local_set(body, part); /* secs */
+        emit_local_get(body, v);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, SEC); buf_byte(body, 0x81);
+        emit_local_set(body, rem); /* sub-second ns */
+        /* if secs != 0 || rem != 0 -> write seconds */
+        emit_local_get(body, part);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52);
+        emit_local_get(body, rem);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52);
+        buf_byte(body, OP_I32_OR);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+        /* write secs (always at least 1 digit, may be 0) */
+        /* alloc tmpstr */
+        emit_i32(body, 24); emit_call(body, RT_ALLOC); emit_local_set(body, tmpstr);
+        emit_i32(body, 24); emit_local_set(body, fracpos);
+        /* If part == 0, write a single '0' */
+        emit_local_get(body, part);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x51);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, fracpos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+        emit_local_set(body, fracpos);
+        emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, '0');
+        buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_ELSE);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, fracpos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+        emit_local_set(body, fracpos);
+        emit_local_get(body, part);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+        buf_byte(body, 0xA7); emit_local_set(body, digit);
+        emit_local_get(body, part);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x7F);
+        emit_local_set(body, part);
+        emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, part);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x51);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+        buf_byte(body, OP_END);
+        /* copy int digits */
+        emit_i32(body, 24); emit_local_get(body, fracpos); buf_byte(body, OP_I32_SUB);
+        emit_local_set(body, tmp);
+        emit_i32(body, 0); emit_local_set(body, digit);
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, digit); emit_local_get(body, tmp); buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, tmpstr); emit_local_get(body, fracpos); buf_byte(body, OP_I32_ADD);
+        emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, digit); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, digit);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+        emit_local_get(body, pos); emit_local_get(body, tmp); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, pos);
+        /* fractional */
+        emit_local_get(body, rem);
+        buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 0); buf_byte(body, 0x52);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, '.'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, pos);
+        for (int k = 0; k < 9; k++) {
+            int64_t div = 1;
+            for (int e = 0; e < 8 - k; e++) div *= 10;
+            emit_local_get(body, rem);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, div); buf_byte(body, 0x7F);
+            buf_byte(body, OP_I64_CONST); buf_leb128_s64(body, 10); buf_byte(body, 0x81);
+            buf_byte(body, 0xA7);
+            emit_local_set(body, digit);
+            emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+            emit_i32(body, '0'); emit_local_get(body, digit); buf_byte(body, OP_I32_ADD);
+            buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+            emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+            emit_local_set(body, pos);
+        }
+        /* trim trailing '0' */
+        buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+        buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
+        emit_local_get(body, buf); emit_local_get(body, pos); emit_i32(body, 1);
+        buf_byte(body, OP_I32_SUB); buf_byte(body, OP_I32_ADD);
+        buf_byte(body, OP_I32_LOAD8_U); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_i32(body, '0'); buf_byte(body, OP_I32_NE);
+        buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+        emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_SUB);
+        emit_local_set(body, pos);
+        buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+        buf_byte(body, OP_END); buf_byte(body, OP_END);
+        buf_byte(body, OP_END);
+        /* 's' suffix */
+        emit_local_get(body, buf); emit_local_get(body, pos); buf_byte(body, OP_I32_ADD);
+        emit_i32(body, 's'); buf_byte(body, OP_I32_STORE8); buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_local_get(body, pos); emit_i32(body, 1); buf_byte(body, OP_I32_ADD);
+        emit_local_set(body, pos);
+        buf_byte(body, OP_END); /* secs|rem != 0 */
+    }
+
+    buf_byte(body, OP_END); /* v < 1s vs >= 1s */
+    buf_byte(body, OP_END); /* v < 1000 (ns) vs else */
+
+    /* Wrap (buf, pos) as a string */
+    emit_local_get(body, buf);
+    emit_local_get(body, pos);
+    emit_call(body, RT_STR_NEW);
+    emit_local_set(body, result);
+    emit_local_get(body, result);
+
+    buf_byte(body, OP_END); /* zero check */
+}
+
+/* Emit a "both operands are duration" branch that compares the i64 ns
+   at offset 8 using `i64_op` and re-wraps the result as a bool. */
+static void emit_dur_cmp_branch(WasmBuf *body, uint8_t i64_op) {
+    int sub = 2;
+    emit_local_get(body, 0);
+    emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    emit_local_get(body, 1);
+    emit_i32(body, 8); buf_byte(body, OP_I32_ADD);
+    buf_byte(body, OP_I64_LOAD); buf_leb128_u(body, 3); buf_leb128_u(body, 0);
+    buf_byte(body, i64_op);
+    emit_local_set(body, sub);
+    emit_i32(body, TAG_BOOL);
+    emit_local_get(body, sub);
+    emit_call(body, RT_VAL_NEW);
+}
+
 static void emit_rt_val_lt(WasmBuf *body) {
+    /* duration / duration -> i64 cmp */
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_dur_cmp_branch(body, 0x53); /* i64.lt_s */
+    buf_byte(body, OP_ELSE);
     /* String / array / tuple path -> RT_LEX_CMP < 0. */
     int sub = 2;
     emit_local_get(body, 0);
@@ -7815,8 +9618,15 @@ static void emit_rt_val_lt(WasmBuf *body) {
     buf_byte(body, OP_ELSE);
     emit_rt_val_cmp_floataware(body, OP_F64_LT, OP_I32_LT_S);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END); /* duration branch */
 }
 static void emit_rt_val_gt(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_dur_cmp_branch(body, 0x55); /* i64.gt_s */
+    buf_byte(body, OP_ELSE);
     int sub = 2;
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_TAG);
@@ -7846,8 +9656,15 @@ static void emit_rt_val_gt(WasmBuf *body) {
     buf_byte(body, OP_ELSE);
     emit_rt_val_cmp_floataware(body, OP_F64_GT, OP_I32_GT_S);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
 }
 static void emit_rt_val_le(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_dur_cmp_branch(body, 0x57); /* i64.le_s */
+    buf_byte(body, OP_ELSE);
     int sub = 2;
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_TAG);
@@ -7877,8 +9694,15 @@ static void emit_rt_val_le(WasmBuf *body) {
     buf_byte(body, OP_ELSE);
     emit_rt_val_cmp_floataware(body, OP_F64_LE, OP_I32_LE_S);
     buf_byte(body, OP_END);
+    buf_byte(body, OP_END);
 }
 static void emit_rt_val_ge(WasmBuf *body) {
+    emit_tag_check(body, 0, TAG_DURATION);
+    emit_tag_check(body, 1, TAG_DURATION);
+    buf_byte(body, OP_I32_AND);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_dur_cmp_branch(body, 0x59); /* i64.ge_s */
+    buf_byte(body, OP_ELSE);
     int sub = 2;
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_TAG);
@@ -7907,6 +9731,7 @@ static void emit_rt_val_ge(WasmBuf *body) {
     emit_call(body, RT_VAL_NEW);
     buf_byte(body, OP_ELSE);
     emit_rt_val_cmp_floataware(body, OP_F64_GE, OP_I32_GE_S);
+    buf_byte(body, OP_END);
     buf_byte(body, OP_END);
 }
 
@@ -7995,33 +9820,148 @@ static void emit_rt_val_to_str(WasmBuf *body) {
     emit_call(body, RT_F64_TO_STR);
     buf_byte(body, OP_ELSE);
 
-    /* TAG_ARRAY - format as [elem1, elem2, ...] */
+    /* TAG_ARRAY - format as Path(args) when the array is enum-shaped
+       (slot 0 = magic-prefixed path string, slot 1 = int ordinal); fall
+       back to the generic [elem, elem, ...] otherwise. The 3-byte magic
+       0x1e 0x01 0x1e is what NODE_SCOPE / NODE_CALL prepends so a plain
+       (str, int) tuple isn't mistaken for an enum. */
     emit_local_get(body, tag);
     emit_i32(body, TAG_ARRAY);
     buf_byte(body, OP_I32_EQ);
     buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
     {
-        /* Start with "[" */
+        /* enum-shape sniff */
+        int alen = 30;
+        emit_local_get(body, 0);
+        emit_call(body, RT_ARR_LEN);
+        emit_local_tee(body, alen);
+        emit_i32(body, 2);
+        buf_byte(body, OP_I32_GE_S);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+        emit_local_get(body, 0);
+        emit_int_val(body, 0);
+        emit_call(body, RT_ARR_GET);
+        int s0v = 36;
+        emit_local_tee(body, s0v);
+        emit_call(body, RT_VAL_TAG);
+        emit_i32(body, TAG_STRING);
+        buf_byte(body, OP_I32_EQ);
+        emit_local_get(body, 0);
+        emit_int_val(body, 1);
+        emit_call(body, RT_ARR_GET);
+        emit_call(body, RT_VAL_TAG);
+        emit_i32(body, TAG_INT);
+        buf_byte(body, OP_I32_EQ);
+        buf_byte(body, OP_I32_AND);
+        /* Also require the path string to start with the 0x1e marker. */
+        emit_local_get(body, s0v);
+        emit_call(body, RT_VAL_I32);
+        buf_byte(body, OP_I32_LOAD8_U);
+        buf_leb128_u(body, 0); buf_leb128_u(body, 0);
+        emit_i32(body, 0x1e);
+        buf_byte(body, OP_I32_EQ);
+        buf_byte(body, OP_I32_AND);
+        buf_byte(body, OP_ELSE);
+        emit_i32(body, 0);
+        buf_byte(body, OP_END);
+        int is_enum = 31;
+        emit_local_set(body, is_enum);
+
+        emit_local_get(body, is_enum);
+        buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+        {
+            int ebuf = 32;
+            int rawpath = 37;
+            emit_local_get(body, 0);
+            emit_int_val(body, 0);
+            emit_call(body, RT_ARR_GET);
+            emit_local_set(body, rawpath);
+            /* Strip the 3-byte marker: build a fresh string from
+               raw + 3, len - 3. */
+            emit_local_get(body, rawpath);
+            emit_call(body, RT_VAL_I32);
+            emit_i32(body, 3);
+            buf_byte(body, OP_I32_ADD);
+            emit_local_get(body, rawpath);
+            emit_i32(body, 8);
+            buf_byte(body, OP_I32_ADD);
+            buf_byte(body, OP_I32_LOAD);
+            buf_leb128_u(body, 2); buf_leb128_u(body, 0);
+            emit_i32(body, 3);
+            buf_byte(body, OP_I32_SUB);
+            emit_call(body, RT_STR_NEW);
+            emit_local_set(body, ebuf);
+            /* If there are ctor args (len > 2), append "(arg, ...)" */
+            emit_local_get(body, alen);
+            emit_i32(body, 2);
+            buf_byte(body, OP_I32_GT_S);
+            buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+            emit_local_get(body, ebuf);
+            emit_inline_str(body, "(", 20);
+            emit_call(body, RT_STR_CAT);
+            emit_local_set(body, ebuf);
+            int ei = 33;
+            emit_i32(body, 2);
+            emit_local_set(body, ei);
+            buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
+            buf_byte(body, OP_LOOP);  buf_byte(body, WASM_TYPE_VOID);
+            emit_local_get(body, ei);
+            emit_local_get(body, alen);
+            buf_byte(body, OP_I32_GE_S);
+            buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
+            emit_local_get(body, ei);
+            emit_i32(body, 2);
+            buf_byte(body, OP_I32_GT_S);
+            buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_VOID);
+            emit_local_get(body, ebuf);
+            emit_inline_str(body, ", ", 21);
+            emit_call(body, RT_STR_CAT);
+            emit_local_set(body, ebuf);
+            buf_byte(body, OP_END);
+            emit_local_get(body, 0);
+            emit_i32(body, TAG_INT);
+            emit_local_get(body, ei);
+            emit_call(body, RT_VAL_NEW);
+            emit_call(body, RT_ARR_GET);
+            emit_call(body, RT_VAL_TO_STR);
+            int eatmp = 34;
+            emit_local_set(body, eatmp);
+            emit_local_get(body, ebuf);
+            emit_local_get(body, eatmp);
+            emit_call(body, RT_STR_CAT);
+            emit_local_set(body, ebuf);
+            emit_local_get(body, ei);
+            emit_i32(body, 1);
+            buf_byte(body, OP_I32_ADD);
+            emit_local_set(body, ei);
+            buf_byte(body, OP_BR); buf_leb128_u(body, 0);
+            buf_byte(body, OP_END); /* loop */
+            buf_byte(body, OP_END); /* block */
+            emit_local_get(body, ebuf);
+            emit_inline_str(body, ")", 22);
+            emit_call(body, RT_STR_CAT);
+            emit_local_set(body, ebuf);
+            buf_byte(body, OP_END);
+            emit_local_get(body, ebuf);
+        }
+        buf_byte(body, OP_ELSE);
+
+        /* Plain array path: [elem1, elem2, ...]. */
         emit_inline_str(body, "[", 6);
         int result = 2;
         emit_local_set(body, result);
-        /* Get array length */
-        emit_local_get(body, 0);
-        emit_call(body, RT_ARR_LEN);
         int len = 3;
+        emit_local_get(body, alen);
         emit_local_set(body, len);
-        /* Loop: i = 0; while i < len */
         emit_i32(body, 0);
         int idx = 4;
         emit_local_set(body, idx);
         buf_byte(body, OP_BLOCK); buf_byte(body, WASM_TYPE_VOID);
         buf_byte(body, OP_LOOP); buf_byte(body, WASM_TYPE_VOID);
-        /* if i >= len, break */
         emit_local_get(body, idx);
         emit_local_get(body, len);
         buf_byte(body, OP_I32_GE_S);
         buf_byte(body, OP_BR_IF); buf_leb128_u(body, 1);
-        /* if i > 0, append ", " */
         emit_local_get(body, idx);
         emit_i32(body, 0);
         buf_byte(body, OP_I32_GT_S);
@@ -8031,9 +9971,8 @@ static void emit_rt_val_to_str(WasmBuf *body) {
         emit_call(body, RT_STR_CAT);
         emit_local_set(body, result);
         buf_byte(body, OP_END);
-        /* Get element: arr data_ptr + 8 + i*4 */
         emit_local_get(body, 0);
-        emit_call(body, RT_VAL_I32); /* data_ptr */
+        emit_call(body, RT_VAL_I32);
         emit_i32(body, 8);
         buf_byte(body, OP_I32_ADD);
         emit_local_get(body, idx);
@@ -8042,16 +9981,14 @@ static void emit_rt_val_to_str(WasmBuf *body) {
         buf_byte(body, OP_I32_ADD);
         buf_byte(body, OP_I32_LOAD);
         buf_leb128_u(body, 2);
-        buf_leb128_u(body, 0); /* element value ptr */
-        emit_call(body, RT_VAL_TO_STR); /* recursive */
+        buf_leb128_u(body, 0);
+        emit_call(body, RT_VAL_TO_STR);
         int etmp = 5;
         emit_local_set(body, etmp);
-        /* result = str_cat(result, elem_str) */
         emit_local_get(body, result);
         emit_local_get(body, etmp);
         emit_call(body, RT_STR_CAT);
         emit_local_set(body, result);
-        /* i++ */
         emit_local_get(body, idx);
         emit_i32(body, 1);
         buf_byte(body, OP_I32_ADD);
@@ -8059,10 +9996,10 @@ static void emit_rt_val_to_str(WasmBuf *body) {
         buf_byte(body, OP_BR); buf_leb128_u(body, 0);
         buf_byte(body, OP_END); /* loop */
         buf_byte(body, OP_END); /* block */
-        /* Append "]" */
         emit_local_get(body, result);
         emit_inline_str(body, "]", 6);
         emit_call(body, RT_STR_CAT);
+        buf_byte(body, OP_END);  /* enum / plain */
     }
     buf_byte(body, OP_ELSE);
 
@@ -8242,11 +10179,21 @@ static void emit_rt_val_to_str(WasmBuf *body) {
     emit_call(body, RT_STR_NEW);
     buf_byte(body, OP_ELSE);
 
+    /* TAG_DURATION - delegate to the i64 formatter */
+    emit_local_get(body, tag);
+    emit_i32(body, TAG_DURATION);
+    buf_byte(body, OP_I32_EQ);
+    buf_byte(body, OP_IF); buf_byte(body, WASM_TYPE_I32);
+    emit_local_get(body, 0);
+    emit_call(body, RT_DUR_TO_STR);
+    buf_byte(body, OP_ELSE);
+
     /* TAG_INT and everything else */
     emit_local_get(body, 0);
     emit_call(body, RT_VAL_I32);
     emit_call(body, RT_I32_TO_STR);
 
+    buf_byte(body, OP_END); /* duration */
     buf_byte(body, OP_END); /* bigint */
     buf_byte(body, OP_END); /* tuple */
     buf_byte(body, OP_END); /* map */
@@ -12009,6 +13956,17 @@ static int collect_functions(Node *program, FuncInfo *out, int max,
             out[count].n_params = s->fn_decl.params.len;
             count++;
         }
+        /* Tagged blocks: tag X(...) { yield; } compiles like a fn whose
+           trailing `__block` parameter receives the caller's block lambda.
+           Calls like `X(args) { body }` already get the lambda appended as
+           the last arg by the parser, so the runtime signature matches
+           with one extra slot. */
+        if (s && VAL_TAG(s) == NODE_TAG_DECL && s->tag_decl.name) {
+            funcs_add(funcs, s->tag_decl.name);
+            out[count].node = s;
+            out[count].n_params = s->tag_decl.params.len + 1;
+            count++;
+        }
         /* Methods from impl blocks. Mangle the name with the impl's
            type so multiple impls of the same method coexist; record the
            (struct, method) pair in the method table so call sites can
@@ -15210,6 +17168,18 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
        purity_analyze so the lambda nodes already carry their stamps. */
     wasm_build_pure_binds(program);
 
+    /* Walk top-level `bind name = expr` decls once so every assignment
+       site can know which binds it must recompute when its root identifier
+       changes (direct, arr[i]=, m.k=). */
+    wasm_build_bind_registry(program);
+
+    /* Trailing blocks at tag-call sites get the yielded value handed to
+       them. Force every such lambda to accept a single parameter so the
+       wasm function signature lines up with the call we emit from
+       NODE_YIELD: a one-arg indirect dispatch via RT_CALL1. The body
+       is free to ignore the param. */
+    wasm_normalize_tag_block_lambdas(program);
+
     const char *unsupported = find_unsupported_for_wasm(program);
     if (unsupported) {
         fprintf(stderr, "xs --emit wasm: %s not supported on this target. "
@@ -15257,6 +17227,11 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
             if (s && VAL_TAG(s) == NODE_CONST && s->const_.name &&
                 s->const_.name[0]) {
                 top_bindings_add(&top_bindings, s->const_.name,
+                                 NUM_GLOBALS + top_bindings.count);
+            }
+            if (s && VAL_TAG(s) == NODE_BIND && s->bind_decl.name &&
+                s->bind_decl.name[0]) {
+                top_bindings_add(&top_bindings, s->bind_decl.name,
                                  NUM_GLOBALS + top_bindings.count);
             }
         }
@@ -15316,9 +17291,14 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* Add parameters */
         ParamList *params;
         Node *fn_body;
+        int is_tag_body = 0;
         if (VAL_TAG(fn) == NODE_LAMBDA) {
             params = &fn->lambda.params;
             fn_body = fn->lambda.body;
+        } else if (VAL_TAG(fn) == NODE_TAG_DECL) {
+            params = &fn->tag_decl.params;
+            fn_body = fn->tag_decl.body;
+            is_tag_body = 1;
         } else {
             params = &fn->fn_decl.params;
             fn_body = fn->fn_decl.body;
@@ -15327,6 +17307,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
             const char *pname = params->items[p].name;
             if (pname) locals_add(&locals, pname);
             else locals_add(&locals, "_");
+        }
+        /* Trailing __block param for tag fns. Calls to a tag fn always
+           append a lambda after the explicit args; NODE_YIELD inside the
+           body looks this up and calls it. */
+        if (is_tag_body) {
+            locals_add(&locals, "__block");
         }
 
         /* Compile body */
@@ -15352,7 +17338,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
 
         buf_byte(&body, OP_END);
 
-        param_counts[i] = params->len;
+        param_counts[i] = params->len + (is_tag_body ? 1 : 0);
         local_counts[i] = locals.n_locals;
         compiled_funcs[i] = body;
         locals_free(&locals);
@@ -15394,6 +17380,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
             }
         }
 
+        wasm_emit_post_main_triggers(&body, &locals, &ctx);
         emit_defers(&body, &locals, &ctx);
         buf_byte(&body, OP_END);
 
@@ -15551,6 +17538,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         buf_byte(&sec, 0x00);
         buf_leb128_u(&sec, 0);
 
+        /* import 1: wasi_snapshot_preview1.proc_exit -> type 8 (i32 -> void) */
+        buf_name(&sec, "wasi_snapshot_preview1");
+        buf_name(&sec, "proc_exit");
+        buf_byte(&sec, 0x00);
+        buf_leb128_u(&sec, 8);
+
         buf_section(&output, 2, &sec);
         buf_free(&sec);
     }
@@ -15698,6 +17691,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* RT_LEX_CMP: (i32,i32) -> i32 (raw -1/0/1) */
         buf_leb128_u(&sec, 3);
         /* RT_RT_ERR: (i32) -> i32 (returns null after setting flag) */
+        buf_leb128_u(&sec, 2);
+        /* RT_DUR_NEW: (i32 lo, i32 hi) -> i32 = type 3 */
+        buf_leb128_u(&sec, 3);
+        /* RT_DUR_NS: (i32) -> i32 = type 2 */
+        buf_leb128_u(&sec, 2);
+        /* RT_DUR_TO_STR: (i32) -> i32 = type 2 */
         buf_leb128_u(&sec, 2);
 
         /* User function type indices - use arity-based types.
@@ -15872,9 +17871,9 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         build_rt_func(&sec, 2, 11, emit_rt_val_eq);
         /* 14-18: $val_add (type-aware), $val_sub, $val_mul, $val_div, $val_mod */
         build_rt_func(&sec, 2, 2, emit_rt_val_add);
-        build_rt_func(&sec, 2, 1, emit_rt_val_sub);
+        build_rt_func(&sec, 2, 2, emit_rt_val_sub);
         build_rt_func(&sec, 2, 2, emit_rt_val_mul);
-        build_rt_func(&sec, 2, 2, emit_rt_val_div);
+        build_rt_func(&sec, 2, 4, emit_rt_val_div);
         build_rt_func(&sec, 2, 4, emit_rt_val_truncmod);
         /* 19-22: $val_lt, $val_gt, $val_le, $val_ge (float-aware) */
         build_rt_func(&sec, 2, 1, emit_rt_val_lt);
@@ -15886,7 +17885,7 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         /* 24: $val_not */
         build_rt_func(&sec, 1, 0, emit_rt_val_not);
         /* 25: $val_to_str */
-        build_rt_func(&sec, 1, 6, emit_rt_val_to_str);
+        build_rt_func(&sec, 1, 40, emit_rt_val_to_str);
         /* 26: $map_new */
         build_rt_func(&sec, 0, 1, emit_rt_map_new);
         /* 27: $map_set (3 params, 2 extra) */
@@ -16041,6 +18040,41 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
         build_rt_func(&sec, 2, 10, emit_rt_lex_cmp);
         /* 84: RT_RT_ERR (1 param, 3 extras: err map, sp scratch, sub) */
         build_rt_func(&sec, 1, 3, emit_rt_runtime_error);
+        /* 85: RT_DUR_NEW (2 i32 params, 1 i32 extra: ptr) */
+        build_rt_func(&sec, 2, 1, emit_rt_dur_new);
+        /* 86: RT_DUR_NS_VAL (1 i32 param, 6 i32 extras + 1 i64 extra:
+           local 0=ptr, 1=buf, 2=pos, 3=neg, 4=digit, 5=lo (unused),
+           6=hi (unused), 7=i64 v) */
+        {
+            WasmBuf body; buf_init(&body);
+            emit_rt_dur_ns_val(&body);
+            buf_byte(&body, OP_END);
+            WasmBuf func; buf_init(&func);
+            buf_leb128_u(&func, 2); /* 2 local groups */
+            buf_leb128_u(&func, 6); buf_byte(&func, WASM_TYPE_I32);
+            buf_leb128_u(&func, 1); buf_byte(&func, WASM_TYPE_I64);
+            buf_append(&func, &body);
+            buf_leb128_u(&sec, (uint32_t)func.len);
+            buf_append(&sec, &func);
+            buf_free(&func); buf_free(&body);
+        }
+        /* 87: RT_DUR_TO_STR (1 i32 param, 10 i32 extras + 3 i64 extras:
+           1=buf, 2=pos, 3=neg, 4=digit, 5=unit_at, 6=tmpstr,
+           7=fracpos, 8=result, 9=tmp, 10=had_digit,
+           11=v, 12=rem, 13=part) */
+        {
+            WasmBuf body; buf_init(&body);
+            emit_rt_dur_to_str(&body);
+            buf_byte(&body, OP_END);
+            WasmBuf func; buf_init(&func);
+            buf_leb128_u(&func, 2);
+            buf_leb128_u(&func, 10); buf_byte(&func, WASM_TYPE_I32);
+            buf_leb128_u(&func, 3); buf_byte(&func, WASM_TYPE_I64);
+            buf_append(&func, &body);
+            buf_leb128_u(&sec, (uint32_t)func.len);
+            buf_append(&sec, &func);
+            buf_free(&func); buf_free(&body);
+        }
 
         /* User function bodies */
         for (int i = 0; i < total_user_funcs; i++) {

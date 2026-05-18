@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: Duration is a new value tag with its own arithmetic / comparison / repr fast paths; the wasm runtime helpers ship int / float / string / array / map / range only, so `5s + 500ms` etc all collapse to null)
 -- bug044: duration is a real first-class type rather than a sugared
 -- number of milliseconds, and the time-literal suffixes (ns, us, ms, s,
 -- m, h, d) work without the old `use literals duration` opt-in. The
