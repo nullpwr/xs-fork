@@ -133,7 +133,7 @@ Expression results print automatically, prefixed with `=> `. Declarations
 (let, fn, struct, etc.) are registered silently.
 
 ```
-xs 1.2.14
+xs 1.2.15
 type :help for commands, :quit to exit (or Ctrl-D)
 >> let x = 10
 >> x * 3

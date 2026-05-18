@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.2.15
+
+Four cross-backend divergences found by a strict probe matrix beyond
+the conformance suite.
+
+Closures that pass through more than one nested function now forward
+captures all the way through. Both transpilers walked only one level
+of the lexical chain, so `fn outer() { var x; fn middle() { fn inner()
+{ x } } }` returned the wrong value or failed to compile because the
+middle frame never saw `x` at all. The C path's free-var collector
+now recurses into nested lambda bodies and forwards captured names
+through `__env`; same fix for WASM.
+
+WASM's enum encoding is now uniform: every variant lowers to
+`[tag, args...]` and pattern matching dispatches on `arr[0]`. Before,
+zero-arg constructors and constructor calls took different paths and
+the call form trapped silently, which made `Maybe::Some(x)` produce
+no output at all.
+
+C transpiler stopped wrapping bigint literals to i64. A literal like
+`99999999999999999999` now lowers to `XS_BIGINT("...")` instead of
+truncating to whatever fits in `int64_t`. The overflow detection on
+arithmetic also moved off raw signed-overflow comparisons (UB at
+`-O2`) to `__builtin_add_overflow` / `__builtin_mul_overflow`, so
+`10 ** 30` promotes to bigint cleanly under any optimisation level.
+
+The strict probe matrix (every program through every backend, byte-
+for-byte against interp, with the C path checked at both `-O0` and
+`-O2`) is now clean. All 17 conformance tests + the full regression
+corpus stay 17 / 17 / 17 across `--emit c`, `--emit js`, `--emit
+wasm`.
+
 ## 1.2.14
 
 The C transpiler caught up with JS and WASM: every conformance test
