@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.21
+
+`--emit c` now lowers `import fs`, `import os`, `import time`
+with the small surface area the regression corpus exercises:
+fs.read / write / exists / cwd / list_dir / remove / mkdir;
+os.getenv / args / exit / hostname / platform; time.format on
+top of the existing now / now_ms / sleep wiring.
+
+Bigint comparison gap closed in `--emit c`: `xs_cmp` and
+`xs_eq` now have proper XS_BIGINT arms (magnitude-string compare
+after stripping leading zeros). `10 ** 20` already promoted to
+bigint on the arithmetic side; the silent fall-through in cmp
+was reducing `assert(big > 0)` to `assert(0 > 0)`. bug038 lifts
+the c skip marker.
+
 ## 1.2.20
 
 WASM AOT (`--emit wasm`) catches up most of the surface area that
