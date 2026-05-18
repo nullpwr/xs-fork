@@ -2639,6 +2639,55 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             sb_indent(s, depth);
             sb_printf(s, "__xs_mark_pure(%s);\n\n", fn_name);
         }
+        /* Scheduling decorators: emit setInterval / setTimeout glue
+         * after the fn body so the runtime fires it without a caller.
+         * Duration arg is a Node; emit it with __xs_to_ms() which
+         * divides the nanosecond bigint by 1_000_000 to get ms.
+         * @once flips an @every / @cron registration to one-shot via
+         * clearInterval after the first fire. */
+        if (named) {
+            int has_once = 0;
+            for (int di = 0; di < n->fn_decl.n_decorators; di++) {
+                if (n->fn_decl.decorators[di].name &&
+                    strcmp(n->fn_decl.decorators[di].name, "once") == 0)
+                    has_once = 1;
+            }
+            for (int di = 0; di < n->fn_decl.n_decorators; di++) {
+                const char *dn = n->fn_decl.decorators[di].name;
+                if (!dn) continue;
+                Node **dargs = n->fn_decl.decorators[di].args;
+                int    dnargs = n->fn_decl.decorators[di].n_args;
+                if (strcmp(dn, "every") == 0 && dnargs == 1) {
+                    sb_indent(s, depth);
+                    if (has_once) {
+                        sb_printf(s, "{ const __h = setInterval(() => { %s(); clearInterval(__h); }, __xs_to_ms(",
+                                  fn_name);
+                        emit_expr(s, dargs[0], depth);
+                        sb_add(s, ")); }\n\n");
+                    } else {
+                        sb_printf(s, "setInterval(%s, __xs_to_ms(", fn_name);
+                        emit_expr(s, dargs[0], depth);
+                        sb_add(s, "));\n\n");
+                    }
+                } else if (strcmp(dn, "delayed") == 0 && dnargs == 1) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "setTimeout(%s, __xs_to_ms(", fn_name);
+                    emit_expr(s, dargs[0], depth);
+                    sb_add(s, "));\n\n");
+                } else if (strcmp(dn, "on_start") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "%s();\n\n", fn_name);
+                } else if (strcmp(dn, "on_exit") == 0) {
+                    sb_indent(s, depth);
+                    sb_printf(s, "process.on('exit', () => %s());\n\n", fn_name);
+                }
+                /* @cron / @watch / @bench / @example / @on_signal
+                 * are accepted but not wired in --emit js: no portable
+                 * cron parser, no portable fs.watch shape, and the
+                 * test/bench harness is interp-only. They become
+                 * no-ops; the fn is still defined. */
+            }
+        }
         js_n_deleted_vars = __saved_n_deleted; /* unwind del scope on fn exit */
         break;
     }
@@ -4134,6 +4183,14 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    }\n");
     sb_add(&s, "    throw __xs_err('TypeError', 'int(): cannot convert from this type');\n");
     sb_add(&s, "};\n");
+    /* Duration helper: scheduling decorators emit `setInterval(name,
+     * __xs_to_ms(dur))`. Duration literals in XS lower to nanosecond
+     * bigints; raw numbers are treated as milliseconds for ergonomic
+     * parity with the runtime's @every(50) shorthand. */
+    sb_add(&s, "const __xs_to_ms = (d) => { if (typeof d === 'bigint') return Number(d / 1000000n); const n = Number(d); return n >= 1000000 ? Math.round(n / 1000000) : n; };\n");
+    /* bare exit(n) / abort() in user code: route to host equivalents. */
+    sb_add(&s, "const exit = (c) => process.exit(typeof c === 'number' ? c : (typeof c === 'bigint' ? Number(c) : 0));\n");
+    sb_add(&s, "const abort = () => { throw new Error('abort()'); };\n");
     /* Stdlib polyfills. Each module is a plain object whose methods
        map onto host primitives (JSON, Math, Node builtins). Sync APIs
        are preferred so the calling code doesn't have to be async. */

@@ -1,4 +1,3 @@
--- skip-emit: js (TODO: @once trigger composition not lowered by --emit js)
 -- bug052: @once turns a repeating trigger into a one-shot. without
 -- the modifier @every(50ms) would fire ~4 times in 200ms; with it,
 -- the entry quiesces after the first fire and the counter stays
