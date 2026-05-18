@@ -4399,6 +4399,16 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    };\n");
     sb_add(&s, "})();\n");
     }
+    if (program_imports_module(program, "process")) {
+    /* Extend Node's `process` global with the methods XS expects.
+     * Can't shadow with `const process = ...` since exit / env /
+     * argv would break. Object.assign keeps the native ones intact. */
+    sb_add(&s, "Object.assign(process, {\n");
+    sb_add(&s, "    run: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
+    sb_add(&s, "    popen: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
+    sb_add(&s, "    popen_read: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
+    sb_add(&s, "});\n");
+    }
     if (program_imports_module(program, "os")) {
     sb_add(&s, "const os = (() => {\n");
     sb_add(&s, "    let _os = null;\n");
