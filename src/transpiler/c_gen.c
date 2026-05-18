@@ -6870,6 +6870,7 @@ char *transpile_c(Node *program, const char *filename) {
         "#include <setjmp.h>\n"
         "#include <sys/stat.h>\n"
         "#include <sys/types.h>\n"
+        "#include <pthread.h>\n"
         "#if defined(_WIN32)\n"
         "#  include <direct.h>\n"
         "#  include <io.h>\n"
@@ -8981,6 +8982,77 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (n == 0) buf[0] = 0;\n"
         "    return XS_STR(strdup(buf));\n"
         "}\n\n"
+        /* trigger-decorator runtime. each @watch / @delayed / @every fn
+         * gets a small pthread that fires the wrapped fn at the right
+         * moment. on_start / on_exit run inline. duration args are
+         * accepted as Duration (ns), int (ms), or float (ms). */
+        "typedef struct { xs_val fn; long long ns; char *path; int once; } __xs_trig_arg;\n"
+        "static long long __xs_dur_to_ns(xs_val v) {\n"
+        "    if (v.tag == XS_DUR_TAG) return v.i;\n"
+        "    if (v.tag == 0) return v.i * 1000000LL;\n"
+        "    if (v.tag == 1) return (long long)(v.f * 1000000.0);\n"
+        "    return 0;\n"
+        "}\n"
+        "static void __xs_sleep_ns(long long ns) {\n"
+        "    if (ns <= 0) return;\n"
+        "    struct timespec ts;\n"
+        "    ts.tv_sec  = (time_t)(ns / 1000000000LL);\n"
+        "    ts.tv_nsec = (long)  (ns % 1000000000LL);\n"
+        "    nanosleep(&ts, NULL);\n"
+        "}\n"
+        "static long long __xs_stat_mtime_ns(const char *path) {\n"
+        "    struct stat st;\n"
+        "    if (stat(path, &st) != 0) return -1;\n"
+        "#if defined(__linux__)\n"
+        "    return (long long)st.st_mtim.tv_sec * 1000000000LL + (long long)st.st_mtim.tv_nsec;\n"
+        "#elif defined(__APPLE__)\n"
+        "    return (long long)st.st_mtimespec.tv_sec * 1000000000LL + (long long)st.st_mtimespec.tv_nsec;\n"
+        "#else\n"
+        "    return (long long)st.st_mtime * 1000000000LL;\n"
+        "#endif\n"
+        "}\n"
+        "static void *__xs_watch_thread(void *p) {\n"
+        "    __xs_trig_arg *a = (__xs_trig_arg*)p;\n"
+        "    long long last = __xs_stat_mtime_ns(a->path);\n"
+        "    for (;;) {\n"
+        "        __xs_sleep_ns(50LL * 1000000LL);\n"
+        "        long long cur = __xs_stat_mtime_ns(a->path);\n"
+        "        if (cur != last && cur >= 0) {\n"
+        "            last = cur;\n"
+        "            xs_call(a->fn, NULL, 0);\n"
+        "            if (a->once) return NULL;\n"
+        "        }\n"
+        "    }\n"
+        "    return NULL;\n"
+        "}\n"
+        "static void *__xs_delayed_thread(void *p) {\n"
+        "    __xs_trig_arg *a = (__xs_trig_arg*)p;\n"
+        "    __xs_sleep_ns(a->ns);\n"
+        "    xs_call(a->fn, NULL, 0);\n"
+        "    return NULL;\n"
+        "}\n"
+        "static void *__xs_every_thread(void *p) {\n"
+        "    __xs_trig_arg *a = (__xs_trig_arg*)p;\n"
+        "    for (;;) {\n"
+        "        __xs_sleep_ns(a->ns);\n"
+        "        xs_call(a->fn, NULL, 0);\n"
+        "        if (a->once) return NULL;\n"
+        "    }\n"
+        "    return NULL;\n"
+        "}\n"
+        "/* on_exit needs a static table because atexit takes a nullary fn. */\n"
+        "#define __XS_ONEXIT_MAX 32\n"
+        "static xs_val __xs_onexit_fns[__XS_ONEXIT_MAX];\n"
+        "static int __xs_onexit_n = 0;\n"
+        "static void __xs_run_onexit(void) {\n"
+        "    for (int i = 0; i < __xs_onexit_n; i++) xs_call(__xs_onexit_fns[i], NULL, 0);\n"
+        "}\n"
+        "static void __xs_register_onexit(xs_val fn) {\n"
+        "    static int armed = 0;\n"
+        "    if (__xs_onexit_n >= __XS_ONEXIT_MAX) return;\n"
+        "    __xs_onexit_fns[__xs_onexit_n++] = fn;\n"
+        "    if (!armed) { armed = 1; atexit(__xs_run_onexit); }\n"
+        "}\n\n"
     );
 
     if (!program) {
@@ -9378,6 +9450,93 @@ char *transpile_c(Node *program, const char *filename) {
                     continue;
                 emit_stmt(&s, st, 1);
             }
+        }
+
+        /* trigger dispatch: fire @on_start now, register @on_exit with
+         * atexit, spawn one pthread per @watch / @delayed / @every. */
+        int n_join_threads = 0;
+        if (VAL_TAG(program) == NODE_PROGRAM) {
+            int tid = 0;
+            for (int i = 0; i < program->program.stmts.len; i++) {
+                Node *st = program->program.stmts.items[i];
+                if (!st || VAL_TAG(st) != NODE_FN_DECL || !st->fn_decl.name) continue;
+                const char *fname = st->fn_decl.name;
+                /* @once applies to the same fn's other trigger decorators. */
+                int has_once = 0;
+                for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+                    const char *dn = st->fn_decl.decorators[di].name;
+                    if (dn && strcmp(dn, "once") == 0) { has_once = 1; break; }
+                }
+                for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+                    const char *dn = st->fn_decl.decorators[di].name;
+                    if (!dn) continue;
+                    int is_watch   = (strcmp(dn, "watch")    == 0);
+                    int is_delayed = (strcmp(dn, "delayed")  == 0);
+                    int is_every   = (strcmp(dn, "every")    == 0);
+                    int is_start   = (strcmp(dn, "on_start") == 0);
+                    int is_exit    = (strcmp(dn, "on_exit")  == 0);
+                    if (!(is_watch || is_delayed || is_every || is_start || is_exit))
+                        continue;
+                    if (is_start) {
+                        sb_printf(&s,
+                            "    xs_call(xs_fn_new(__xs_wrap_%s, NULL), NULL, 0);\n",
+                            fname);
+                        continue;
+                    }
+                    if (is_exit) {
+                        sb_printf(&s,
+                            "    __xs_register_onexit(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                            fname);
+                        continue;
+                    }
+                    /* @watch / @delayed / @every: build a __xs_trig_arg and
+                     * spawn the thread. join handle stays in scope so the
+                     * end-of-main loop can wait on it. */
+                    sb_printf(&s, "    pthread_t __xs_trig_t%d;\n", tid);
+                    sb_printf(&s, "    __xs_trig_arg *__xs_trig_a%d = "
+                                  "(__xs_trig_arg*)calloc(1, sizeof(__xs_trig_arg));\n", tid);
+                    sb_printf(&s, "    __xs_trig_a%d->fn = xs_fn_new(__xs_wrap_%s, NULL);\n",
+                              tid, fname);
+                    sb_printf(&s, "    __xs_trig_a%d->once = %d;\n", tid, has_once);
+                    if (is_watch) {
+                        sb_add(&s, "    {\n");
+                        sb_add(&s, "        xs_val __p = ");
+                        if (st->fn_decl.decorators[di].n_args > 0 &&
+                            st->fn_decl.decorators[di].args[0])
+                            emit_expr(&s, st->fn_decl.decorators[di].args[0], 2);
+                        else
+                            sb_add(&s, "XS_STR(\"\")");
+                        sb_add(&s, ";\n");
+                        sb_printf(&s,
+                            "        __xs_trig_a%d->path = (__p.tag == 2 && __p.s) ? strdup(__p.s) : strdup(\"\");\n",
+                            tid);
+                        sb_add(&s, "    }\n");
+                        sb_printf(&s, "    pthread_create(&__xs_trig_t%d, NULL, "
+                                      "__xs_watch_thread, __xs_trig_a%d);\n", tid, tid);
+                    } else {
+                        sb_add(&s, "    {\n");
+                        sb_add(&s, "        xs_val __d = ");
+                        if (st->fn_decl.decorators[di].n_args > 0 &&
+                            st->fn_decl.decorators[di].args[0])
+                            emit_expr(&s, st->fn_decl.decorators[di].args[0], 2);
+                        else
+                            sb_add(&s, "XS_INT(0)");
+                        sb_add(&s, ";\n");
+                        sb_printf(&s, "        __xs_trig_a%d->ns = __xs_dur_to_ns(__d);\n", tid);
+                        sb_add(&s, "    }\n");
+                        sb_printf(&s, "    pthread_create(&__xs_trig_t%d, NULL, %s, __xs_trig_a%d);\n",
+                                  tid,
+                                  is_delayed ? "__xs_delayed_thread" : "__xs_every_thread",
+                                  tid);
+                    }
+                    tid++;
+                }
+            }
+            n_join_threads = tid;
+        }
+        if (n_join_threads > 0) {
+            for (int t = 0; t < n_join_threads; t++)
+                sb_printf(&s, "    pthread_join(__xs_trig_t%d, NULL);\n", t);
         }
 
         sb_add(&s, "    return 0;\n}\n");

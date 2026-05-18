@@ -1,4 +1,3 @@
--- skip-emit: c, wasm (TODO: @watch + @delayed need an inotify/kqueue event loop with timer driver; not viable as a single-file emit)
 -- bug049: @watch fires when the watched path changes. Linux uses
 -- inotify, macOS / other unixes fall back to a stat poll. parity
 -- covers interp / vm / jit. Path is cwd-relative so the test runs

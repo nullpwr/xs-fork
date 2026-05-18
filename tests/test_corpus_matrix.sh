@@ -168,12 +168,12 @@ $(diff <(echo "$base") <(echo "$g") | head -12 | sed 's/^/    /')"
     # gcc is available (always on the platforms we test).
     if [ $skip_c -eq 0 ] && [ $have_gcc -eq 1 ]; then
         if ./xs --emit c "$f" > "$tmp/prog.c" 2>"$tmp/emit_c_err.txt"; then
-            if gcc -o "$tmp/prog_c0" "$tmp/prog.c" -lm 2>"$tmp/gcc0.txt"; then
+            if gcc -o "$tmp/prog_c0" "$tmp/prog.c" -lm -lpthread 2>"$tmp/gcc0.txt"; then
                 local c0_out c0_rc
                 c0_out=$("$tmp/prog_c0" 2>"$tmp/c0_err.txt"); c0_rc=$?
                 compare "c -O0" "$c0_out" "$c0_rc"
                 backends_run=$((backends_run + 1))
-                if gcc -O2 -o "$tmp/prog_c2" "$tmp/prog.c" -lm 2>"$tmp/gcc2.txt"; then
+                if gcc -O2 -o "$tmp/prog_c2" "$tmp/prog.c" -lm -lpthread 2>"$tmp/gcc2.txt"; then
                     local c2_out c2_rc
                     c2_out=$("$tmp/prog_c2" 2>"$tmp/c2_err.txt"); c2_rc=$?
                     compare "c -O2" "$c2_out" "$c2_rc"
