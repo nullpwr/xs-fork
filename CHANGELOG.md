@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.19
+
+VM dispatch loop caches the proto / chunk / consts pointer chain
+in locals at the top of `vm_dispatch` and refreshes on the four
+places `frame` can change (try-catch unwind, CALL push, RETURN
+pop, throw slow path). Drops four indirections per hot opcode.
+VM `fib_calls` goes from ~180 ms to ~138 ms on Linux x86_64;
+loop_sum from ~190 ms to ~144 ms. interp / jit unchanged.
+
+C transpile: `exit` and `abort` no longer get rewritten to
+`xs_user_exit` / `xs_user_abort`. The rename was killing
+`@every` / `@once` scheduling tests (bug048 / bug052) on
+--emit c the moment a decorated body called `exit(0)` to stop
+the runtime; both now pass on the c backend.
+
 ## 1.2.18
 
 Three transpiler correctness fixes surfaced by extending the strict
