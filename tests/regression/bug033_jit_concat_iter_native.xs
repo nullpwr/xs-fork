@@ -1,4 +1,3 @@
--- skip-emit: c, wasm (TODO: c+wasm transpilers don't reproduce the jit native dispatch path)
 -- bug033: OP_CONCAT and OP_ITER_GET previously routed through
 -- IR_VM_STEP, which costs ~50ns of vm_step_jit dispatch on every
 -- call (limits tick + instr fetch + switch). Both are now lowered

@@ -1,4 +1,4 @@
--- skip-emit: c, js, wasm (TODO: effect/try operator + map destructure + map insertion order not in --emit transpilers)
+-- skip-emit: wasm (TODO: wasm transpiler still needs the `x?` try operator (NODE_UNARY `?` recognition + Result::Err propagation), `let {a, b} = m` map destructure (NODE_PAT_MAP path in compile_let), nested for-clauses in list/map comprehensions, and insertion-ordered map iteration; trait IC tag also needs __class folding)
 -- bug043: a sweep across documented features turned up four
 -- additional silent divergences between --interp and --vm/--jit.
 -- Each one was a "feature claimed to work" case where the VM compiler

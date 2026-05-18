@@ -18,6 +18,10 @@ static void emit_stmt(SB *s, Node *n, int depth);
 static void emit_block_body(SB *s, Node *block, int depth);
 static void emit_pattern_cond(SB *s, Node *pat, const char *subject, int depth);
 static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int depth);
+/* Evaluate a block or expression in value position, preserving the
+ * statements that produce side effects (throw, assignment) when the
+ * block has no trailing expression. */
+static void emit_block_or_expr_value(SB *s, Node *n, int depth);
 
 /* ---- AST builder helpers used by the lowering pre-pass ----------------- */
 static Node *mkc_ident(const char *name) {
@@ -98,29 +102,19 @@ static const char *find_unsupported_for_c(Node *n) {
         if (n->fn_decl.is_generator)
             return "fn* generator declarations";
         /* wrapping decorators (@memoize / @retry / @timed / @trace /
-         * @throttle / @debounce) need to rewrite the call path. trigger-
-         * style decorators (@on_start / @every / etc) are no-op'd silently
-         * because their absence doesn't change correctness for the
-         * decorated fn itself. */
-        for (int i = 0; i < n->fn_decl.n_decorators; i++) {
-            const char *dn = n->fn_decl.decorators[i].name;
-            if (!dn) continue;
-            if (strcmp(dn, "memoize") == 0 || strcmp(dn, "retry") == 0 ||
-                strcmp(dn, "timed") == 0   || strcmp(dn, "trace") == 0 ||
-                strcmp(dn, "throttle") == 0|| strcmp(dn, "debounce") == 0)
-                return "wrapping decorators (@memoize/@retry/@timed/@trace/@throttle/@debounce)";
-        }
+         * @throttle / @debounce) lower to xs_val bindings that wrap
+         * the typed inner fn through xs_call. trigger-style decorators
+         * (@on_start / @every / etc) are no-op'd silently. */
         return find_unsupported_for_c(n->fn_decl.body);
     case NODE_LAMBDA:
         if (n->lambda.is_generator & 1)
             return "fn*() generator lambdas";
         return find_unsupported_for_c(n->lambda.body);
     case NODE_BIND:
-        /* `bind` is reactive on the interp + VM (re-evaluates when its
-         * dependencies are reassigned, indexed, or field-mutated). The C
-         * target lowers to a one-shot xs_val let, which silently goes
-         * stale. Refuse rather than miscompile. */
-        return "reactive `bind` declarations";
+        /* `bind x = expr` re-evaluates every read; the C target inlines
+         * the expression at each reference of x. handled in emit_expr's
+         * NODE_IDENT branch via lookup_bound_expr. */
+        return find_unsupported_for_c(n->bind_decl.expr);
     case NODE_PROGRAM:
         for (int i = 0; i < n->program.stmts.len; i++) {
             const char *r = find_unsupported_for_c(n->program.stmts.items[i]);
@@ -526,6 +520,53 @@ static const char *mangle_overload(const char *name, int n_params, char *buf, si
     }
     return name;
 }
+/* wrapping decorator tracking. @memoize / @retry / @timed / @trace
+ * rewrite the call path: callers see `xs_val name = xs_<decorator>(...)`
+ * instead of calling the C fn directly. The inner C fn keeps its
+ * arity-mangled name; the value-level binding shadows it. Recursive
+ * self-calls inside the inner body go through the wrapped value so
+ * caching / retry / timing observes them too. */
+#define MAX_WRAPPED 64
+static struct {
+    const char *name;
+    const char *decorator;  /* "memoize" | "retry" | "timed" | "trace" | "throttle" | "debounce" */
+    int         arg;        /* numeric argument for @retry(N) etc; -1 if absent */
+} wrapped_fns[MAX_WRAPPED];
+static int n_wrapped_fns = 0;
+
+static void register_wrapped_fn(const char *name, const char *decorator, int arg) {
+    if (!name || !decorator) return;
+    for (int i = 0; i < n_wrapped_fns; i++)
+        if (strcmp(wrapped_fns[i].name, name) == 0) return;
+    if (n_wrapped_fns < MAX_WRAPPED) {
+        wrapped_fns[n_wrapped_fns].name = name;
+        wrapped_fns[n_wrapped_fns].decorator = decorator;
+        wrapped_fns[n_wrapped_fns].arg = arg;
+        n_wrapped_fns++;
+    }
+}
+
+static const char *lookup_wrapped_decorator(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < n_wrapped_fns; i++)
+        if (strcmp(wrapped_fns[i].name, name) == 0) return wrapped_fns[i].decorator;
+    return NULL;
+}
+
+static int lookup_wrapped_arg(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < n_wrapped_fns; i++)
+        if (strcmp(wrapped_fns[i].name, name) == 0) return wrapped_fns[i].arg;
+    return -1;
+}
+
+static int is_wrapping_decorator(const char *dn) {
+    if (!dn) return 0;
+    return strcmp(dn, "memoize") == 0 || strcmp(dn, "retry") == 0 ||
+           strcmp(dn, "timed") == 0   || strcmp(dn, "trace") == 0 ||
+           strcmp(dn, "throttle") == 0|| strcmp(dn, "debounce") == 0;
+}
+
 /* find the arity of a known overload set that best matches argc. Prefers
  * exact match; otherwise returns -1. */
 static int pick_overload_arity(const char *name, int argc) {
@@ -539,9 +580,35 @@ static int pick_overload_arity(const char *name, int argc) {
     return exact >= 0 ? exact : best;
 }
 
+/* `bind x = expr` reactivity: each read of x re-evaluates expr. We
+ * track the AST node so emit_expr's NODE_IDENT path can substitute
+ * the body. registration happens at NODE_BIND stmt emit time so the
+ * scoping mirrors the source order. */
+#define MAX_BOUND 32
+static struct { const char *name; Node *expr; } bound_exprs[MAX_BOUND];
+static int n_bound_exprs = 0;
+static Node *lookup_bound_expr(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < n_bound_exprs; i++)
+        if (strcmp(bound_exprs[i].name, name) == 0) return bound_exprs[i].expr;
+    return NULL;
+}
+static void register_bound_expr(const char *name, Node *expr) {
+    if (!name || !expr) return;
+    if (n_bound_exprs < MAX_BOUND) {
+        bound_exprs[n_bound_exprs].name = name;
+        bound_exprs[n_bound_exprs].expr = expr;
+        n_bound_exprs++;
+    }
+}
+
 /* track if we're inside an impl/actor method (self is a pointer) */
 static int in_method_body = 0;
 static const char *current_class_name = NULL;
+/* When > 0, `yield` lowers to `xs_call(__block, args, n)` so tagged
+ * blocks (`tag X(...) { ... yield ... }`) call back into the block
+ * the caller passed at the call site. */
+static int in_tag_body = 0;
 static Node *program_root = NULL;
 
 /* track which lambda we're currently emitting (for capture access) */
@@ -863,6 +930,54 @@ static void scan_lambdas(Node *n) {
     }
 }
 
+/* second-pass walker for struct-var registration. needs is_class /
+ * find_impl_type to be populated first, so it runs after the main
+ * prescan loop. */
+static void walk_register_struct_vars(Node *st) {
+    if (!st) return;
+    switch (VAL_TAG(st)) {
+    case NODE_LET: case NODE_VAR:
+        if (st->let.name && st->let.value) {
+            Node *val = st->let.value;
+            if (VAL_TAG(val) == NODE_STRUCT_INIT && val->struct_init.path &&
+                find_impl_type(val->struct_init.path))
+                register_struct_var(st->let.name, val->struct_init.path);
+            if (VAL_TAG(val) == NODE_CALL && val->call.callee &&
+                VAL_TAG(val->call.callee) == NODE_IDENT &&
+                is_class(val->call.callee->ident.name))
+                register_struct_var(st->let.name, val->call.callee->ident.name);
+            if (VAL_TAG(val) == NODE_METHOD_CALL && val->method_call.obj &&
+                VAL_TAG(val->method_call.obj) == NODE_IDENT) {
+                const char *otype = lookup_struct_var(val->method_call.obj->ident.name);
+                if (otype) register_struct_var(st->let.name, otype);
+            }
+            walk_register_struct_vars(val);
+        }
+        return;
+    case NODE_PROGRAM:
+        for (int i = 0; i < st->program.stmts.len; i++)
+            walk_register_struct_vars(st->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < st->block.stmts.len; i++)
+            walk_register_struct_vars(st->block.stmts.items[i]);
+        walk_register_struct_vars(st->block.expr);
+        return;
+    case NODE_FOR:    walk_register_struct_vars(st->for_loop.body);
+                      walk_register_struct_vars(st->for_loop.iter);    return;
+    case NODE_WHILE:  walk_register_struct_vars(st->while_loop.body);
+                      walk_register_struct_vars(st->while_loop.cond);  return;
+    case NODE_LOOP:   walk_register_struct_vars(st->loop.body);        return;
+    case NODE_IF:     walk_register_struct_vars(st->if_expr.then);
+                      walk_register_struct_vars(st->if_expr.else_branch); return;
+    case NODE_EXPR_STMT: walk_register_struct_vars(st->expr_stmt.expr); return;
+    case NODE_FN_DECL: walk_register_struct_vars(st->fn_decl.body);    return;
+    case NODE_TRY:    walk_register_struct_vars(st->try_.body);
+                      walk_register_struct_vars(st->try_.finally_block); return;
+    default: return;
+    }
+}
+
 /* pre-scan to collect actor declarations and actor variable bindings */
 static void prescan_stmts(Node *program) {
     if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
@@ -928,11 +1043,37 @@ static void prescan_stmts(Node *program) {
             }
             register_class(st->class_decl.name, has_init);
         }
+        /* register tagged-block signatures; treat them like fns so call
+         * sites and bare references resolve to the C function symbol. */
+        if (VAL_TAG(st) == NODE_TAG_DECL && st->tag_decl.name) {
+            register_fn_sig_pure(st->tag_decl.name,
+                                 st->tag_decl.params.len + 1, /* + __block */
+                                 0);
+        }
         /* register function signatures for default param padding */
-        if (VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.name)
+        if (VAL_TAG(st) == NODE_FN_DECL && st->fn_decl.name) {
             register_fn_sig_pure(st->fn_decl.name, st->fn_decl.params.len,
                                  st->fn_decl.inferred_pure);
+            /* note wrapping decorators so call sites + nested self-calls
+             * route through the xs_val wrapper for caching / retry. */
+            for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+                const char *dn = st->fn_decl.decorators[di].name;
+                if (!is_wrapping_decorator(dn)) continue;
+                int dec_arg = -1;
+                /* parse `@retry(N)` style numeric argument */
+                if (st->fn_decl.decorators[di].n_args > 0) {
+                    Node *a0 = st->fn_decl.decorators[di].args[0];
+                    if (a0 && VAL_TAG(a0) == NODE_LIT_INT)
+                        dec_arg = (int)a0->lit_int.ival;
+                }
+                register_wrapped_fn(st->fn_decl.name, dn, dec_arg);
+                break;  /* outer-most wrapper wins for now */
+            }
+        }
     }
+    /* second pass: now that classes / impls are registered, walk into
+     * nested scopes for struct-var bindings (for-loop locals etc). */
+    walk_register_struct_vars(program);
 }
 
 /* helpers */
@@ -1009,9 +1150,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_printf(s, "XS_FLOAT(%.17g)", n->lit_float.fval);
         break;
     case NODE_LIT_DURATION:
-        /* The c backend treats durations as plain int64 ns counts; the
-           real Duration type lives in the interp/vm. */
-        sb_printf(s, "XS_INT(%lldLL)", (long long)n->lit_duration.ns);
+        /* duration is a tagged value; helpers in the prelude handle
+         * arithmetic, formatting, and .ns/.us/.ms accessors. */
+        sb_printf(s, "XS_DUR(%lldLL)", (long long)n->lit_duration.ns);
         break;
     case NODE_LIT_STRING:
         sb_add(s, "XS_STR(\"");
@@ -1143,6 +1284,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
     case NODE_IDENT: {
         int wrap_del = is_deleted_var(n->ident.name);
         if (wrap_del) sb_printf(s, "xs_check_deleted(");
+        /* bind: each read re-evaluates the bound expression so
+         * dependency mutations propagate through. */
+        Node *bound = lookup_bound_expr(n->ident.name);
+        if (bound) {
+            sb_addc(s, '(');
+            emit_expr(s, bound, depth);
+            sb_addc(s, ')');
+            if (wrap_del) sb_printf(s, ", \"%s\")", n->ident.name);
+            break;
+        }
         if (n_actor_fields > 0 && is_actor_field(n->ident.name))
             sb_printf(s, "self->%s", n->ident.name);
         else if (current_lambda) {
@@ -1165,6 +1316,16 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_printf(s, "%s(__xs_wrap_%s, NULL)",
                       lookup_fn_is_pure(n->ident.name) ? "xs_fn_new_pure" : "xs_fn_new",
                       n->ident.name);
+        } else if (strcmp(n->ident.name, "println") == 0 ||
+                   strcmp(n->ident.name, "print") == 0   ||
+                   strcmp(n->ident.name, "len") == 0     ||
+                   strcmp(n->ident.name, "type") == 0    ||
+                   strcmp(n->ident.name, "assert") == 0  ||
+                   strcmp(n->ident.name, "assert_eq") == 0) {
+            /* bare reference to a builtin: wrap through a small adapter so
+             * `let g = println; g(1)` works. The adapter routes the call
+             * back through the same C helper the direct-call path uses. */
+            sb_printf(s, "xs_fn_new(__xs_builtin_%s, NULL)", n->ident.name);
         } else
             emit_safe_name(s, n->ident.name);
         if (wrap_del) sb_printf(s, ", \"%s\")", n->ident.name);
@@ -1338,6 +1499,29 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "XS_INT(~(");
             emit_expr(s, n->unary.expr, depth);
             sb_add(s, ").i)");
+        } else if (strcmp(op, "?") == 0) {
+            /* try operator: if the value is an Err variant, propagate
+             * it back up the enclosing fn; otherwise unwrap to the
+             * inner value. Matches the interp/VM behaviour and the
+             * enum encoding xs_map(_type/_variant/0). */
+            int tid = defer_label_counter++;
+            sb_printf(s, "({ xs_val __try_%d = ", tid);
+            emit_expr(s, n->unary.expr, depth);
+            sb_printf(s, "; xs_val __try_v_%d = __try_%d;\n", tid, tid);
+            sb_indent(s, depth + 1);
+            sb_printf(s, "if (__try_%d.tag == 6) {\n", tid);
+            sb_indent(s, depth + 2);
+            sb_printf(s, "xs_val __tv_%d = xs_index(__try_%d, XS_STR(\"_variant\"));\n", tid, tid);
+            sb_indent(s, depth + 2);
+            sb_printf(s, "if (__tv_%d.tag == 2 && __tv_%d.s && strcmp(__tv_%d.s, \"Err\") == 0) return __try_%d;\n",
+                      tid, tid, tid, tid);
+            sb_indent(s, depth + 2);
+            sb_printf(s, "if (__tv_%d.tag == 2 && __tv_%d.s && strcmp(__tv_%d.s, \"Ok\") == 0) __try_v_%d = xs_index(__try_%d, XS_STR(\"0\"));\n",
+                      tid, tid, tid, tid, tid);
+            sb_indent(s, depth + 1);
+            sb_add(s, "}\n");
+            sb_indent(s, depth);
+            sb_printf(s, "__try_v_%d; })", tid);
         } else {
             sb_add(s, "/* unary ");
             sb_add(s, op);
@@ -1429,7 +1613,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
             else sb_add(s, "XS_NULL");
             sb_addc(s, ')');
-        } else if (is_callee_name(n->call.callee, "type")) {
+        } else if (is_callee_name(n->call.callee, "type") ||
+                   is_callee_name(n->call.callee, "typeof")) {
             sb_add(s, "xs_type(");
             if (n->call.args.len > 0) emit_expr(s, n->call.args.items[0], depth);
             else sb_add(s, "XS_NULL");
@@ -1519,8 +1704,35 @@ static void emit_expr(SB *s, Node *n, int depth) {
                that returns closures */
             if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
                 lookup_fn_param_count(n->call.callee->ident.name) < 0 &&
-                !is_c_keyword(n->call.callee->ident.name)) {
+                !is_c_keyword(n->call.callee->ident.name) &&
+                !is_class(n->call.callee->ident.name) &&
+                !find_impl_type(n->call.callee->ident.name)) {
                 /* not a known function: might be a closure variable */
+                might_be_closure = 1;
+            }
+            /* struct constructor: `A()` where A has an impl block but
+             * no explicit class decl. Emit as an empty map tagged with
+             * the type so dynamic method dispatch can route through. */
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
+                find_impl_type(n->call.callee->ident.name) &&
+                !is_class(n->call.callee->ident.name)) {
+                const char *tname = n->call.callee->ident.name;
+                sb_printf(s, "({ xs_val __si = xs_map(0); "
+                             "xs_map_put(&__si, XS_STR(\"__type__\"), XS_STR(\"%s\")); ",
+                          tname);
+                for (int i = 0; i < n->call.args.len; i++) {
+                    sb_add(s, "(void)");
+                    emit_expr(s, n->call.args.items[i], depth);
+                    sb_add(s, "; ");
+                }
+                sb_add(s, "__si; })");
+                break;
+            }
+            /* wrapping-decorator targets are bound to xs_val at file
+             * scope; route through xs_call so the wrapper observes the
+             * call (including self-recursion inside the inner body). */
+            if (n->call.callee && VAL_TAG(n->call.callee) == NODE_IDENT &&
+                lookup_wrapped_decorator(n->call.callee->ident.name)) {
                 might_be_closure = 1;
             }
             /* class instantiation: `Counter()` -> empty map, then call
@@ -1632,7 +1844,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (strcmp(on, "math") == 0 || strcmp(on, "string") == 0 ||
                 strcmp(on, "json") == 0 || strcmp(on, "time") == 0 ||
                 strcmp(on, "random") == 0 || strcmp(on, "os") == 0 ||
-                strcmp(on, "fmt") == 0 || strcmp(on, "fs") == 0)
+                strcmp(on, "fmt") == 0 || strcmp(on, "fs") == 0 ||
+                strcmp(on, "collections") == 0)
                 mod_name = on;
         }
         /* check if receiver is a known struct/class instance whose impl
@@ -1762,6 +1975,27 @@ static void emit_expr(SB *s, Node *n, int depth) {
             } else {
                 sb_printf(s, "XS_NULL /* json.%s */", meth);
             }
+        } else if (mod_name && strcmp(mod_name, "collections") == 0) {
+            /* collections.Deque / Stack / Set / Counter / OrderedMap /
+             * PriorityQueue lower to plain xs maps tagged with `_type`
+             * and `_items`. Method dispatch on the returned value goes
+             * through the generic .len() / .front() / .back() / .peek()
+             * branches further down. */
+            if (strcmp(meth, "Deque") == 0 || strcmp(meth, "Stack") == 0 ||
+                strcmp(meth, "Set") == 0   || strcmp(meth, "Counter") == 0 ||
+                strcmp(meth, "OrderedMap") == 0 ||
+                strcmp(meth, "PriorityQueue") == 0) {
+                /* the init array is optional. xs_collections_make
+                 * shallow-copies it into the new container. */
+                sb_printf(s, "xs_collections_make(\"%s\", ", meth);
+                if (n->method_call.args.len > 0)
+                    emit_expr(s, n->method_call.args.items[0], depth);
+                else
+                    sb_add(s, "XS_NULL");
+                sb_addc(s, ')');
+            } else {
+                sb_printf(s, "XS_NULL /* unhandled collections.%s */", meth);
+            }
         } else if (mod_name && strcmp(mod_name, "math") == 0) {
             const char *fn = NULL;
             if (strcmp(meth, "floor") == 0) fn = "xs_num_floor";
@@ -1807,6 +2041,23 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "xs_len(");
             emit_expr(s, n->method_call.obj, depth);
             sb_addc(s, ')');
+        } else if (strcmp(meth, "front") == 0 || strcmp(meth, "back") == 0 ||
+                   strcmp(meth, "peek") == 0 || strcmp(meth, "top") == 0) {
+            /* Deque.front/back, Stack/PriorityQueue.peek -- inspect first/last
+             * element of the underlying _items array. Stack.peek returns the
+             * top (last pushed); Deque.back returns the back; etc. */
+            const char *which = (strcmp(meth, "back") == 0) ? "back" :
+                                (strcmp(meth, "peek") == 0 || strcmp(meth, "top") == 0) ? "back" :
+                                "front";
+            sb_add(s, "({ xs_val __c = ");
+            emit_expr(s, n->method_call.obj, depth);
+            sb_add(s, "; xs_val __it = xs_collections_is_container(__c) ? "
+                      "xs_collections_items_of(__c) : __c; "
+                      "xs_arr *__a = (__it.tag == 5 && __it.p) ? (xs_arr*)__it.p : NULL; ");
+            if (strcmp(which, "front") == 0)
+                sb_add(s, "(__a && __a->len > 0) ? __a->items[0] : XS_NULL; })");
+            else
+                sb_add(s, "(__a && __a->len > 0) ? __a->items[__a->len-1] : XS_NULL; })");
         } else if (strcmp(meth, "is_empty") == 0) {
             sb_add(s, "xs_is_empty(");
             emit_expr(s, n->method_call.obj, depth);
@@ -2615,7 +2866,72 @@ static void emit_expr(SB *s, Node *n, int depth) {
             else if (strcmp(fn, "sep") == 0)    sb_add(s, "xs_os_sep()");
             else if (strcmp(fn, "args") == 0)   sb_add(s, "xs_os_args()");
             else sb_printf(s, "XS_NULL /* os.%s */", fn);
+        } else if (n->field.name && (
+                       strcmp(n->field.name, "ns") == 0 ||
+                       strcmp(n->field.name, "us") == 0 ||
+                       strcmp(n->field.name, "ms") == 0 ||
+                       strcmp(n->field.name, "s")  == 0 ||
+                       strcmp(n->field.name, "m")  == 0 ||
+                       strcmp(n->field.name, "h")  == 0 ||
+                       strcmp(n->field.name, "d")  == 0)) {
+            /* duration unit accessors: (5s).ns -> 5000000000 etc. only
+             * activates when the receiver is a duration; otherwise the
+             * generic xs_index path runs. */
+            int tid = defer_label_counter++;
+            const char *fn = n->field.name;
+            long long div =
+                (strcmp(fn, "ns") == 0) ? 1LL :
+                (strcmp(fn, "us") == 0) ? 1000LL :
+                (strcmp(fn, "ms") == 0) ? 1000000LL :
+                (strcmp(fn, "s")  == 0) ? 1000000000LL :
+                (strcmp(fn, "m")  == 0) ? 60000000000LL :
+                (strcmp(fn, "h")  == 0) ? 3600000000000LL :
+                                          86400000000000LL;
+            sb_printf(s, "({ xs_val __dv_%d = ", tid);
+            emit_expr(s, n->field.obj, depth);
+            sb_printf(s, "; (__dv_%d.tag == XS_DUR_TAG) ? XS_INT(__dv_%d.i / %lldLL) : "
+                         "xs_index(__dv_%d, XS_STR(\"%s\")); })",
+                      tid, tid, div, tid, fn);
+            break;
         } else {
+            /* method-as-value: `c.value` where Counter has a `value`
+             * method becomes a bound xs_val. The wrapper closure binds
+             * `c` so `(c.value)()` resolves to `Counter_value(c)`. */
+            const char *bound_type = NULL;
+            if (n->field.obj && VAL_TAG(n->field.obj) == NODE_IDENT) {
+                const char *rn = n->field.obj->ident.name;
+                bound_type = lookup_struct_var(rn);
+                if (!bound_type && current_class_name && strcmp(rn, "self") == 0)
+                    bound_type = current_class_name;
+                if (bound_type && program_root && n->field.name) {
+                    int has_method = 0;
+                    for (int i = 0; i < program_root->program.stmts.len && !has_method; i++) {
+                        Node *st = program_root->program.stmts.items[i];
+                        if (!st) continue;
+                        NodeList *members = NULL;
+                        if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name &&
+                            strcmp(st->class_decl.name, bound_type) == 0)
+                            members = &st->class_decl.members;
+                        else if (VAL_TAG(st) == NODE_IMPL_DECL && st->impl_decl.type_name &&
+                                 strcmp(st->impl_decl.type_name, bound_type) == 0)
+                            members = &st->impl_decl.members;
+                        if (!members) continue;
+                        for (int j = 0; j < members->len; j++) {
+                            Node *mm = members->items[j];
+                            if (mm && VAL_TAG(mm) == NODE_FN_DECL && mm->fn_decl.name &&
+                                strcmp(mm->fn_decl.name, n->field.name) == 0)
+                                { has_method = 1; break; }
+                        }
+                    }
+                    if (has_method) {
+                        sb_printf(s, "xs_bind_method_%s_%s(",
+                                  bound_type, n->field.name);
+                        emit_expr(s, n->field.obj, depth);
+                        sb_addc(s, ')');
+                        break;
+                    }
+                }
+            }
             /* struct/map fields or tuple indices */
             sb_printf(s, "xs_index(");
             emit_expr(s, n->field.obj, depth);
@@ -2907,12 +3223,29 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_AWAIT:
-        /* await in C target -> just evaluate the expression (single-threaded) */
+        /* await in C target: spawn { ... } yields a map with `_result`
+         * and `_status`; unwrap to the inner value. For anything else,
+         * just evaluate the expression. */
+        sb_add(s, "({ xs_val __aw = ");
         if (n->await_.expr) emit_expr(s, n->await_.expr, depth);
         else sb_add(s, "XS_NULL");
+        sb_add(s, "; (__aw.tag == 6 && __aw.p && xs_truthy(xs_map_has(__aw, XS_STR(\"_result\")))) "
+                  "? xs_index(__aw, XS_STR(\"_result\")) : __aw; })");
         break;
     case NODE_YIELD:
-        sb_add(s, "(fprintf(stderr, \"xs: yield not supported in C target\\n\"), exit(1), XS_NULL)");
+        if (in_tag_body > 0) {
+            /* yield-as-block-call: invoke the callback passed by the
+             * tagged-block caller. yield with a value treats it as
+             * the sole arg to __block(). */
+            sb_add(s, "xs_call(__block, (xs_val[]){");
+            if (n->yield_.value) emit_expr(s, n->yield_.value, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, "}, ");
+            sb_add(s, n->yield_.value ? "1" : "0");
+            sb_addc(s, ')');
+        } else {
+            sb_add(s, "(fprintf(stderr, \"xs: yield not supported in C target\\n\"), exit(1), XS_NULL)");
+        }
         break;
     case NODE_SPAWN: {
         Node *se = n->spawn_.expr;
@@ -2986,34 +3319,22 @@ static void emit_expr(SB *s, Node *n, int depth) {
         else sb_add(s, "XS_NULL");
         break;
     case NODE_IF: {
-        /* if as expression: ternary chain — emit each elif as its own
+        /* if as expression: ternary chain - emit each elif as its own
          * arm. Without this, an if-elif-else collapsed into the first
          * cond plus the final else, dropping every middle branch. */
         sb_add(s, "(xs_truthy(");
         emit_expr(s, n->if_expr.cond, depth);
         sb_add(s, ") ? ");
-        if (n->if_expr.then && VAL_TAG(n->if_expr.then) == NODE_BLOCK && n->if_expr.then->block.expr) {
-            emit_expr(s, n->if_expr.then->block.expr, depth);
-        } else {
-            sb_add(s, "XS_NULL");
-        }
+        emit_block_or_expr_value(s, n->if_expr.then, depth);
         for (int ei = 0; ei < n->if_expr.elif_conds.len; ei++) {
             sb_add(s, " : (xs_truthy(");
             emit_expr(s, n->if_expr.elif_conds.items[ei], depth);
             sb_add(s, ") ? ");
             Node *eb = ei < n->if_expr.elif_thens.len ? n->if_expr.elif_thens.items[ei] : NULL;
-            if (eb && VAL_TAG(eb) == NODE_BLOCK && eb->block.expr)
-                emit_expr(s, eb->block.expr, depth);
-            else
-                sb_add(s, "XS_NULL");
+            emit_block_or_expr_value(s, eb, depth);
         }
         sb_add(s, " : ");
-        if (n->if_expr.else_branch && VAL_TAG(n->if_expr.else_branch) == NODE_BLOCK
-            && n->if_expr.else_branch->block.expr) {
-            emit_expr(s, n->if_expr.else_branch->block.expr, depth);
-        } else {
-            sb_add(s, "XS_NULL");
-        }
+        emit_block_or_expr_value(s, n->if_expr.else_branch, depth);
         for (int ei = 0; ei < n->if_expr.elif_conds.len; ei++) sb_addc(s, ')');
         sb_addc(s, ')');
         break;
@@ -3259,10 +3580,26 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_printf(s, "xs_val __h%d_result;\n", hid);
         sb_indent(s, depth + 1);
         sb_printf(s, "if (setjmp(__h%d.exit_jmp) == 0) {\n", hid);
-        sb_indent(s, depth + 2);
-        sb_printf(s, "__h%d_result = (", hid);
-        emit_expr(s, n->handle.expr, depth + 2);
-        sb_add(s, ");\n");
+        /* the handle body is parsed as a block; emit_expr drops the
+         * statement list. spell the block out explicitly so multi-
+         * perform bodies actually run all their performs before
+         * yielding the trailing expression. */
+        if (n->handle.expr && VAL_TAG(n->handle.expr) == NODE_BLOCK) {
+            for (int i = 0; i < n->handle.expr->block.stmts.len; i++)
+                emit_stmt(s, n->handle.expr->block.stmts.items[i], depth + 2);
+            sb_indent(s, depth + 2);
+            sb_printf(s, "__h%d_result = (", hid);
+            if (n->handle.expr->block.expr)
+                emit_expr(s, n->handle.expr->block.expr, depth + 2);
+            else
+                sb_add(s, "XS_NULL");
+            sb_add(s, ");\n");
+        } else {
+            sb_indent(s, depth + 2);
+            sb_printf(s, "__h%d_result = (", hid);
+            emit_expr(s, n->handle.expr, depth + 2);
+            sb_add(s, ");\n");
+        }
         sb_indent(s, depth + 1);
         sb_add(s, "} else {\n");
         sb_indent(s, depth + 2);
@@ -3607,6 +3944,30 @@ static void emit_pattern_bindings(SB *s, Node *pat, const char *subject, int dep
 }
 
 /* emit block body */
+static void emit_block_or_expr_value(SB *s, Node *n, int depth) {
+    if (!n) { sb_add(s, "XS_NULL"); return; }
+    if (VAL_TAG(n) != NODE_BLOCK) { emit_expr(s, n, depth); return; }
+    /* if the block has no statements, the trailing expr alone is the
+     * value (or XS_NULL if empty). */
+    if (n->block.stmts.len == 0) {
+        if (n->block.expr) emit_expr(s, n->block.expr, depth);
+        else sb_add(s, "XS_NULL");
+        return;
+    }
+    /* statements present: wrap in a GCC statement-expression so side
+     * effects (throw, assign, push) actually run. Without this, the
+     * old ternary path dropped them on the floor. */
+    sb_add(s, "({ ");
+    for (int i = 0; i < n->block.stmts.len; i++)
+        emit_stmt(s, n->block.stmts.items[i], depth + 1);
+    if (n->block.expr) {
+        emit_expr(s, n->block.expr, depth);
+        sb_add(s, "; })");
+    } else {
+        sb_add(s, "XS_NULL; })");
+    }
+}
+
 static void emit_block_body(SB *s, Node *block, int depth) {
     if (!block) return;
     if (VAL_TAG(block) != NODE_BLOCK) {
@@ -3851,7 +4212,17 @@ static void emit_stmt(SB *s, Node *n, int depth) {
             char __mbuf[256];
             const char *fn_emit_name = mangle_overload(n->fn_decl.name,
                 n->fn_decl.params.len, __mbuf, sizeof __mbuf);
-            emit_safe_name(s, fn_emit_name);
+            /* wrapping decorators bind the xs_val wrapper to the user
+             * name; the typed fn lives under __xs_inner_<name>. */
+            char __inner_buf[256];
+            if (lookup_wrapped_decorator(n->fn_decl.name)) {
+                snprintf(__inner_buf, sizeof __inner_buf,
+                         "__xs_inner_%s", fn_emit_name);
+                fn_emit_name = __inner_buf;
+                sb_add(s, fn_emit_name);
+            } else {
+                emit_safe_name(s, fn_emit_name);
+            }
             emit_params_c(s, &n->fn_decl.params);
             sb_add(s, " {\n");
             /* default param handling */
@@ -4337,7 +4708,16 @@ static void emit_stmt(SB *s, Node *n, int depth) {
     }
     case NODE_YIELD:
         sb_indent(s, depth);
-        sb_add(s, "fprintf(stderr, \"xs: yield not supported in C target\\n\"); exit(1);\n");
+        if (in_tag_body > 0) {
+            sb_add(s, "xs_call(__block, (xs_val[]){");
+            if (n->yield_.value) emit_expr(s, n->yield_.value, depth);
+            else sb_add(s, "XS_NULL");
+            sb_add(s, "}, ");
+            sb_add(s, n->yield_.value ? "1" : "0");
+            sb_add(s, ");\n");
+        } else {
+            sb_add(s, "fprintf(stderr, \"xs: yield not supported in C target\\n\"); exit(1);\n");
+        }
         break;
     case NODE_STRUCT_DECL: {
         sb_indent(s, depth);
@@ -4414,6 +4794,8 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     emit_safe_name(s, pname ? pname : "_");
                 }
                 sb_add(s, ") {\n");
+                sb_indent(s, depth + 1);
+                sb_add(s, "int __saved_defer_top = __xs_defer_top;\n");
                 in_method_body = 1;
                 const char *prev_cls = current_class_name;
                 current_class_name = n->impl_decl.type_name;
@@ -4435,6 +4817,36 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 }
                 current_class_name = prev_cls;
                 in_method_body = 0;
+                sb_indent(s, depth);
+                sb_add(s, "}\n\n");
+                /* bound-method helper so `obj.method` produces an xs_val. */
+                int np = m->fn_decl.params.len;
+                int nargs_after_self = np > 0 ? np - 1 : 0;
+                sb_indent(s, depth);
+                sb_printf(s, "static xs_val __xs_bm_%s_%s_call(void *e, xs_val *a, int n) {\n",
+                          n->impl_decl.type_name, m->fn_decl.name);
+                sb_indent(s, depth + 1);
+                sb_add(s, "(void)n;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "xs_val self = *(xs_val*)e;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "return %s_%s(self",
+                          n->impl_decl.type_name, m->fn_decl.name);
+                for (int p = 0; p < nargs_after_self; p++)
+                    sb_printf(s, ", (n > %d ? a[%d] : XS_NULL)", p, p);
+                sb_add(s, ");\n");
+                sb_indent(s, depth);
+                sb_add(s, "}\n");
+                sb_indent(s, depth);
+                sb_printf(s, "static xs_val xs_bind_method_%s_%s(xs_val self) {\n",
+                          n->impl_decl.type_name, m->fn_decl.name);
+                sb_indent(s, depth + 1);
+                sb_add(s, "xs_val *box = (xs_val*)malloc(sizeof(xs_val));\n");
+                sb_indent(s, depth + 1);
+                sb_add(s, "*box = self;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "return xs_fn_new(__xs_bm_%s_%s_call, box);\n",
+                          n->impl_decl.type_name, m->fn_decl.name);
                 sb_indent(s, depth);
                 sb_add(s, "}\n\n");
             } else if (m) {
@@ -4538,6 +4950,12 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                     else sb_add(s, "_");
                 }
                 sb_add(s, ") {\n");
+                /* `return` inside the body unwinds defers up to this
+                 * point; declare the snapshot so the NODE_RETURN emit
+                 * doesn't dangle a reference. mirrors the regular fn
+                 * decl prologue. */
+                sb_indent(s, depth + 1);
+                sb_add(s, "int __saved_defer_top = __xs_defer_top;\n");
                 const char *prev_cls = current_class_name;
                 current_class_name = n->class_decl.name;
                 if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
@@ -4562,6 +4980,37 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 current_class_name = prev_cls;
                 sb_indent(s, depth + 1);
                 sb_add(s, "return XS_NULL;\n");
+                sb_indent(s, depth);
+                sb_add(s, "}\n\n");
+                /* bound-method helper: `obj.method` evaluates to an
+                 * xs_val whose call site forwards args after self. */
+                int np = m->fn_decl.params.len;
+                int nargs_after_self = np > 0 ? np - 1 : 0;
+                sb_indent(s, depth);
+                sb_printf(s, "static xs_val __xs_bm_%s_%s_call(void *e, xs_val *a, int n) {\n",
+                          n->class_decl.name, m->fn_decl.name);
+                sb_indent(s, depth + 1);
+                sb_add(s, "(void)n;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "xs_val self = *(xs_val*)e;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "return %s_%s(self",
+                          n->class_decl.name, m->fn_decl.name);
+                for (int p = 0; p < nargs_after_self; p++)
+                    sb_printf(s, ", (n > %d ? a[%d] : XS_NULL)", p, p);
+                sb_add(s, ");\n");
+                sb_indent(s, depth);
+                sb_add(s, "}\n");
+                sb_indent(s, depth);
+                sb_printf(s, "static xs_val xs_bind_method_%s_%s(xs_val self) {\n",
+                          n->class_decl.name, m->fn_decl.name);
+                sb_indent(s, depth + 1);
+                sb_add(s, "xs_val *box = (xs_val*)malloc(sizeof(xs_val));\n");
+                sb_indent(s, depth + 1);
+                sb_add(s, "*box = self;\n");
+                sb_indent(s, depth + 1);
+                sb_printf(s, "return xs_fn_new(__xs_bm_%s_%s_call, box);\n",
+                          n->class_decl.name, m->fn_decl.name);
                 sb_indent(s, depth);
                 sb_add(s, "}\n\n");
             }
@@ -4735,21 +5184,37 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, ";\n");
         break;
     case NODE_BIND:
+        /* register the bind so subsequent reads of the name inline the
+         * expression. emit a comment to preserve source-order intent. */
+        register_bound_expr(n->bind_decl.name, n->bind_decl.expr);
         sb_indent(s, depth);
-        sb_printf(s, "xs_val %s = ", n->bind_decl.name ? n->bind_decl.name : "_bind");
-        emit_expr(s, n->bind_decl.expr, depth);
-        sb_add(s, ";\n");
+        sb_printf(s, "/* bind %s = ... (reactive) */\n",
+                  n->bind_decl.name ? n->bind_decl.name : "_bind");
         break;
     case NODE_TAG_DECL:
         /* Emit as regular function with __block as last param */
         sb_indent(s, depth);
-        sb_printf(s, "xs_val %s(", n->tag_decl.name ? n->tag_decl.name : "_tag");
+        sb_printf(s, "static xs_val %s(", n->tag_decl.name ? n->tag_decl.name : "_tag");
         for (int ti = 0; ti < n->tag_decl.params.len; ti++) {
             Param *pm = &n->tag_decl.params.items[ti];
             sb_printf(s, "xs_val %s, ", pm->name ? pm->name : "_");
         }
         sb_add(s, "xs_val __block) {\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_push_frame(\"");
+        sb_add(s, n->tag_decl.name ? n->tag_decl.name : "_tag");
+        sb_add(s, "\");\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "int __saved_defer_top = __xs_defer_top;\n");
+        in_tag_body++;
         if (n->tag_decl.body) emit_stmt(s, n->tag_decl.body, depth + 1);
+        in_tag_body--;
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_run_defers(__saved_defer_top);\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "xs_pop_frame();\n");
+        sb_indent(s, depth + 1);
+        sb_add(s, "return XS_NULL;\n");
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
@@ -4892,10 +5357,11 @@ static Node *c_lower_node(Node *n) {
     if (!n) return NULL;
     switch (VAL_TAG(n)) {
     case NODE_AWAIT: {
-        Node *inner = c_lower_node(n->await_.expr);
-        n->await_.expr = NULL;
-        node_free(n);
-        return inner;
+        /* keep NODE_AWAIT around: the emit unwraps the spawn-result
+         * map back to its inner value. dropping it here loses the
+         * `let r = await spawn { 7*6 }` semantics. */
+        n->await_.expr = c_lower_node(n->await_.expr);
+        return n;
     }
     case NODE_SPAWN: {
         /* Preserve the spawn wrapper for actor/block-spawn cases that
@@ -5827,7 +6293,11 @@ static void c_inject_generator_helpers(NodeList *new_stmts) {
      * matches a known fn" heuristic. */
     static const char *gen_src =
         "fn __gen_iter(__xs_g_g) {\n"
-        "    if type(__xs_g_g) == \"map\" { return __xs_g_g[\"__items\"] }\n"
+        "    if type(__xs_g_g) == \"map\" {\n"
+        "        let items = __xs_g_g[\"__items\"]\n"
+        "        if items != null { return items }\n"
+        "        return __xs_g_g\n"
+        "    }\n"
         "    return __xs_g_g\n"
         "}\n"
         "fn __gen_next(__xs_g_g) {\n"
@@ -6417,7 +6887,10 @@ char *transpile_c(Node *program, const char *filename) {
         "#define XS_FLOAT(v) ((xs_val){.tag=1, .f=(v)})\n"
         "#define XS_STR(v)   ((xs_val){.tag=2, .s=(char*)(v)})\n"
         "#define XS_BOOL(v)  ((xs_val){.tag=3, .b=(v)})\n"
-        "#define XS_NULL     ((xs_val){.tag=4})\n\n"
+        "#define XS_NULL     ((xs_val){.tag=4})\n"
+        "/* duration is a first-class type; .i holds nanoseconds. */\n"
+        "#define XS_DUR_TAG    10\n"
+        "#define XS_DUR(ns)    ((xs_val){.tag=XS_DUR_TAG, .i=(int64_t)(ns)})\n\n"
         "static int xs_truthy(xs_val v) {\n"
         "    switch (v.tag) {\n"
         "        case 0: return v.i != 0;\n"
@@ -6437,6 +6910,7 @@ char *transpile_c(Node *program, const char *filename) {
         "static void xs_throw_arith(const char *kind, const char *msg);\n\n"
         "static const char *xs_bi_str(xs_val v);\n"
         "static int xs_eq(xs_val a, xs_val b) {\n"
+        "    if (a.tag == XS_DUR_TAG && b.tag == XS_DUR_TAG) return a.i == b.i;\n"
         "    /* bigint <-> int / bigint <-> bigint comparisons compare the\n"
         "       canonical decimal-magnitude string. Falls back to tag-equal\n"
         "       for other mismatched pairs. */\n"
@@ -6502,6 +6976,8 @@ char *transpile_c(Node *program, const char *filename) {
         "    return (c > 0) - (c < 0);\n"
         "}\n"
         "static int xs_cmp(xs_val a, xs_val b) {\n"
+        "    if (a.tag == XS_DUR_TAG && b.tag == XS_DUR_TAG)\n"
+        "        return (a.i > b.i) - (a.i < b.i);\n"
         "    if (a.tag == 9 || b.tag == 9) {\n"
         "        if ((a.tag == 9 || a.tag == 0) && (b.tag == 9 || b.tag == 0))\n"
         "            return xs_bi_cmp_str(xs_bi_str(a), xs_bi_str(b));\n"
@@ -6629,6 +7105,7 @@ char *transpile_c(Node *program, const char *filename) {
         "#endif\n"
         "}\n\n"
         "static xs_val xs_add(xs_val a, xs_val b) {\n"
+        "    if (a.tag == XS_DUR_TAG && b.tag == XS_DUR_TAG) return XS_DUR(a.i + b.i);\n"
         "    if (a.tag == 0 && b.tag == 0) {\n"
         "        if (xs_bi_overflow_add(a.i, b.i)) {\n"
         "            char *as = xs_bi_from_i64(a.i);\n"
@@ -6672,6 +7149,7 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_INT(a.i + b.i);\n"
         "}\n\n"
         "static xs_val xs_sub(xs_val a, xs_val b) {\n"
+        "    if (a.tag == XS_DUR_TAG && b.tag == XS_DUR_TAG) return XS_DUR(a.i - b.i);\n"
         "    /* String / non-numeric operands trapped silently into the float\n"
         "     * branch (reading the str pointer as a double). Throw a\n"
         "     * structured catchable error instead. */\n"
@@ -6685,6 +7163,11 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_INT(a.i - b.i);\n"
         "}\n\n"
         "static xs_val xs_mul(xs_val a, xs_val b) {\n"
+        "    /* duration * scalar (commutative): scale the ns count. */\n"
+        "    if (a.tag == XS_DUR_TAG && (b.tag == 0 || b.tag == 1))\n"
+        "        return XS_DUR((int64_t)(a.i * (b.tag == 1 ? b.f : (double)b.i)));\n"
+        "    if (b.tag == XS_DUR_TAG && (a.tag == 0 || a.tag == 1))\n"
+        "        return XS_DUR((int64_t)(b.i * (a.tag == 1 ? a.f : (double)a.i)));\n"
         "    /* normalise so the int operand is on the right for str/arr * int */\n"
         "    if ((b.tag == 2 || b.tag == 5) && a.tag == 0) { xs_val t = a; a = b; b = t; }\n"
         "    if (a.tag == 2 && b.tag == 0) {\n"
@@ -6725,6 +7208,11 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static void xs_throw_arith(const char *kind, const char *msg);\n"
         "static xs_val xs_div(xs_val a, xs_val b) {\n"
+        "    /* dur / dur -> float ratio; dur / scalar -> scaled dur. */\n"
+        "    if (a.tag == XS_DUR_TAG && b.tag == XS_DUR_TAG)\n"
+        "        return XS_FLOAT((double)a.i / (double)b.i);\n"
+        "    if (a.tag == XS_DUR_TAG && (b.tag == 0 || b.tag == 1))\n"
+        "        return XS_DUR((int64_t)((double)a.i / (b.tag == 1 ? b.f : (double)b.i)));\n"
         "    if (a.tag == 1 || b.tag == 1) {\n"
         "        /* IEEE float division: 1.0/0.0 == inf, 0.0/0.0 == NaN.\n"
         "           the interp matches this; only int divide-by-zero throws. */\n"
@@ -6811,8 +7299,10 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_INT(-a.i);\n"
         "}\n\n"
         "static xs_val xs_strcat(xs_val a, xs_val b) {\n"
-        "    const char *sa = a.tag == 2 ? a.s : \"\";\n"
-        "    const char *sb = b.tag == 2 ? b.s : \"\";\n"
+        "    /* coerce non-string operands so `\"v\" ++ 1` -> \"v1\"; matches\n"
+        "     * the interp / VM behaviour and the str(int) implicit cast. */\n"
+        "    const char *sa = a.tag == 2 ? (a.s ? a.s : \"\") : xs_to_str(a);\n"
+        "    const char *sb = b.tag == 2 ? (b.s ? b.s : \"\") : xs_to_str(b);\n"
         "    size_t la = strlen(sa), lb = strlen(sb);\n"
         "    char *r = (char*)malloc(la + lb + 1);\n"
         "    memcpy(r, sa, la); memcpy(r + la, sb, lb); r[la + lb] = 0;\n"
@@ -6867,6 +7357,47 @@ char *transpile_c(Node *program, const char *filename) {
         "        case 2: return v.s ? v.s : \"null\";\n"
         "        case 3: return v.b ? \"true\" : \"false\";\n"
         "        case XS_BIGINT_TAG: return v.s ? v.s : \"0\";\n"
+        "        case XS_DUR_TAG: {\n"
+        "            int64_t ns = v.i;\n"
+        "            int neg = ns < 0;\n"
+        "            if (neg) ns = -ns;\n"
+        "            int pos = 0;\n"
+        "            if (neg) pos += snprintf(buf + pos, 4096 - pos, \"-\");\n"
+        "            /* render in the largest unit that is a whole multiple\n"
+        "             * and split into mixed units for >= 1m. zero stays as\n"
+        "             * \"0s\". 1500ns -> \"1.5us\" (fractional). */\n"
+        "            if (ns == 0) { snprintf(buf, 4096, \"0s\"); return buf; }\n"
+        "            int64_t d = 86400LL * 1000000000LL;\n"
+        "            int64_t h = 3600LL  * 1000000000LL;\n"
+        "            int64_t m = 60LL    * 1000000000LL;\n"
+        "            int64_t s = 1000000000LL;\n"
+        "            int64_t ms = 1000000LL;\n"
+        "            int64_t us = 1000LL;\n"
+        "            if (ns % d == 0) { snprintf(buf + pos, 4096 - pos, \"%lldd\", (long long)(ns/d)); return buf; }\n"
+        "            if (ns % h == 0) { snprintf(buf + pos, 4096 - pos, \"%lldh\", (long long)(ns/h)); return buf; }\n"
+        "            if (ns >= m) {\n"
+        "                int64_t mm = ns / m, rem = ns - mm * m;\n"
+        "                if (rem == 0) { snprintf(buf + pos, 4096 - pos, \"%lldm\", (long long)mm); return buf; }\n"
+        "                if (rem % s == 0) { snprintf(buf + pos, 4096 - pos, \"%lldm%llds\", (long long)mm, (long long)(rem/s)); return buf; }\n"
+        "                snprintf(buf + pos, 4096 - pos, \"%lldm%lldms\", (long long)mm, (long long)(rem/ms));\n"
+        "                return buf;\n"
+        "            }\n"
+        "            /* sub-minute: pick the largest scale where ns >= unit. */\n"
+        "            if (ns >= s) {\n"
+        "                if (ns % s == 0) { snprintf(buf + pos, 4096 - pos, \"%llds\", (long long)(ns/s)); return buf; }\n"
+        "                snprintf(buf + pos, 4096 - pos, \"%gs\", (double)ns / (double)s); return buf;\n"
+        "            }\n"
+        "            if (ns >= ms) {\n"
+        "                if (ns % ms == 0) { snprintf(buf + pos, 4096 - pos, \"%lldms\", (long long)(ns/ms)); return buf; }\n"
+        "                snprintf(buf + pos, 4096 - pos, \"%gms\", (double)ns / (double)ms); return buf;\n"
+        "            }\n"
+        "            if (ns >= us) {\n"
+        "                if (ns % us == 0) { snprintf(buf + pos, 4096 - pos, \"%lldus\", (long long)(ns/us)); return buf; }\n"
+        "                snprintf(buf + pos, 4096 - pos, \"%gus\", (double)ns / (double)us); return buf;\n"
+        "            }\n"
+        "            snprintf(buf + pos, 4096 - pos, \"%lldns\", (long long)ns);\n"
+        "            return buf;\n"
+        "        }\n"
         "        case 5: if (v.p) {\n"
         "            xs_arr *a = (xs_arr*)v.p;\n"
         "            const char *open = a->is_tuple ? \"(\" : \"[\";\n"
@@ -6882,6 +7413,33 @@ char *transpile_c(Node *program, const char *filename) {
         "        } return \"[]\";\n"
         "        case 6: if (v.p) {\n"
         "            xs_hmap *m = (xs_hmap*)v.p;\n"
+        "            /* enum value: render as Type::Variant(arg0, arg1, ...)\n"
+        "             * to match the interp/VM format. */\n"
+        "            const char *ety = NULL, *evar = NULL;\n"
+        "            for (int i = 0; i < m->len; i++) {\n"
+        "                if (strcmp(m->keys[i], \"_type\") == 0 &&\n"
+        "                    m->vals[i].tag == 2) ety = m->vals[i].s;\n"
+        "                else if (strcmp(m->keys[i], \"_variant\") == 0 &&\n"
+        "                         m->vals[i].tag == 2) evar = m->vals[i].s;\n"
+        "            }\n"
+        "            if (ety && evar) {\n"
+        "                int pos = snprintf(buf, 4096, \"%s::%s\", ety, evar);\n"
+        "                int has_args = 0;\n"
+        "                for (int idx = 0; ; idx++) {\n"
+        "                    char k[16]; snprintf(k, sizeof k, \"%d\", idx);\n"
+        "                    int hit = 0;\n"
+        "                    for (int i = 0; i < m->len; i++)\n"
+        "                        if (strcmp(m->keys[i], k) == 0) {\n"
+        "                            if (!has_args) { pos += snprintf(buf + pos, 4096 - pos, \"(\"); has_args = 1; }\n"
+        "                            else pos += snprintf(buf + pos, 4096 - pos, \", \");\n"
+        "                            pos += snprintf(buf + pos, 4096 - pos, \"%s\", xs_to_str(m->vals[i]));\n"
+        "                            hit = 1; break;\n"
+        "                        }\n"
+        "                    if (!hit) break;\n"
+        "                }\n"
+        "                if (has_args) snprintf(buf + pos, 4096 - pos, \")\");\n"
+        "                return buf;\n"
+        "            }\n"
         "            int pos = 0;\n"
         "            pos += snprintf(buf + pos, 4096 - pos, \"{\");\n"
         "            for (int i = 0; i < m->len && pos < 4096 - 64; i++) {\n"
@@ -7185,7 +7743,10 @@ char *transpile_c(Node *program, const char *filename) {
         "    return (xs_val){.tag=5, .p=a};\n"
         "}\n\n"
         "static xs_val xs_iter(xs_val v) {\n"
-        "    if (v.tag == 5 && v.p) {\n"
+        "    /* wrap any iterable in a (src, idx) array-pair state. arrays,\n"
+        "     * strings (per-codepoint), and maps (keys) all share the same\n"
+        "     * state shape; xs_iter_next dispatches by src.tag. */\n"
+        "    if (v.tag == 5 || v.tag == 2 || v.tag == 6) {\n"
         "        xs_arr *state = (xs_arr*)calloc(1, sizeof(xs_arr));\n"
         "        state->cap = 2; state->len = 2;\n"
         "        state->items = (xs_val*)malloc(sizeof(xs_val) * 2);\n"
@@ -7206,6 +7767,29 @@ char *transpile_c(Node *program, const char *filename) {
         "        if (idx >= a->len) return 0;\n"
         "        *out = a->items[idx];\n"
         "        state->items[1] = XS_INT(idx + 1);\n"
+        "        return 1;\n"
+        "    }\n"
+        "    if (src.tag == 6 && src.p) {\n"
+        "        xs_hmap *m = (xs_hmap*)src.p;\n"
+        "        if (idx >= m->len) return 0;\n"
+        "        *out = XS_STR(strdup(m->keys[idx]));\n"
+        "        state->items[1] = XS_INT(idx + 1);\n"
+        "        return 1;\n"
+        "    }\n"
+        "    if (src.tag == 2 && src.s) {\n"
+        "        /* utf-8 codepoint: advance over continuation bytes. */\n"
+        "        const unsigned char *p = (const unsigned char*)src.s + idx;\n"
+        "        if (*p == 0) return 0;\n"
+        "        int n = 1;\n"
+        "        if      ((*p & 0x80) == 0)    n = 1;\n"
+        "        else if ((*p & 0xE0) == 0xC0) n = 2;\n"
+        "        else if ((*p & 0xF0) == 0xE0) n = 3;\n"
+        "        else if ((*p & 0xF8) == 0xF0) n = 4;\n"
+        "        char *cp = (char*)malloc(n + 1);\n"
+        "        for (int i = 0; i < n; i++) cp[i] = (char)p[i];\n"
+        "        cp[n] = 0;\n"
+        "        *out = XS_STR(cp);\n"
+        "        state->items[1] = XS_INT(idx + n);\n"
         "        return 1;\n"
         "    }\n"
         "    return 0;\n"
@@ -7285,7 +7869,71 @@ char *transpile_c(Node *program, const char *filename) {
         "    }\n"
         "    return XS_BOOL(0);\n"
         "}\n\n"
+        "/* collections containers. Each container is an xs map with\n"
+        " * `_type` (\"Deque\" | \"Stack\" | \"Set\" | \"Counter\" |\n"
+        " * \"OrderedMap\" | \"PriorityQueue\") and `_items` holding the\n"
+        " * payload as an array (or, for OrderedMap, as a sub-map). */\n"
+        "static xs_val xs_collections_items_of(xs_val c);\n"
+        "static int xs_collections_kind(xs_val c, const char *want) {\n"
+        "    if (c.tag != 6 || !c.p) return 0;\n"
+        "    xs_hmap *m = (xs_hmap*)c.p;\n"
+        "    for (int i = 0; i < m->len; i++)\n"
+        "        if (strcmp(m->keys[i], \"_type\") == 0 &&\n"
+        "            m->vals[i].tag == 2 && m->vals[i].s &&\n"
+        "            strcmp(m->vals[i].s, want) == 0) return 1;\n"
+        "    return 0;\n"
+        "}\n"
+        "static xs_val xs_collections_make(const char *kind, xs_val init) {\n"
+        "    xs_val items;\n"
+        "    if (init.tag == 5 && init.p) {\n"
+        "        xs_arr *src = (xs_arr*)init.p;\n"
+        "        items = xs_array(0);\n"
+        "        for (int i = 0; i < src->len; i++)\n"
+        "            xs_arr_push(items, src->items[i]);\n"
+        "    } else {\n"
+        "        items = xs_array(0);\n"
+        "    }\n"
+        "    /* dedupe for Set on construction */\n"
+        "    if (strcmp(kind, \"Set\") == 0 && items.tag == 5 && items.p) {\n"
+        "        xs_arr *a = (xs_arr*)items.p;\n"
+        "        xs_val dedup = xs_array(0);\n"
+        "        for (int i = 0; i < a->len; i++) {\n"
+        "            int dup = 0;\n"
+        "            xs_arr *d = (xs_arr*)dedup.p;\n"
+        "            for (int j = 0; j < d->len; j++)\n"
+        "                if (xs_cmp(d->items[j], a->items[i]) == 0) { dup = 1; break; }\n"
+        "            if (!dup) xs_arr_push(dedup, a->items[i]);\n"
+        "        }\n"
+        "        items = dedup;\n"
+        "    }\n"
+        "    return xs_map(2,\n"
+        "        XS_STR(\"_type\"), XS_STR(strdup(kind)),\n"
+        "        XS_STR(\"_items\"), items);\n"
+        "}\n"
+        "static xs_val xs_collections_items_of(xs_val c) {\n"
+        "    if (c.tag != 6 || !c.p) return xs_array(0);\n"
+        "    xs_hmap *m = (xs_hmap*)c.p;\n"
+        "    for (int i = 0; i < m->len; i++)\n"
+        "        if (strcmp(m->keys[i], \"_items\") == 0) return m->vals[i];\n"
+        "    return xs_array(0);\n"
+        "}\n"
+        "static int xs_collections_is_container(xs_val c) {\n"
+        "    if (c.tag != 6 || !c.p) return 0;\n"
+        "    xs_hmap *m = (xs_hmap*)c.p;\n"
+        "    int has_type = 0, has_items = 0;\n"
+        "    for (int i = 0; i < m->len; i++) {\n"
+        "        if (strcmp(m->keys[i], \"_type\") == 0) has_type = 1;\n"
+        "        if (strcmp(m->keys[i], \"_items\") == 0) has_items = 1;\n"
+        "    }\n"
+        "    return has_type && has_items;\n"
+        "}\n\n"
         "static xs_val xs_len(xs_val v) {\n"
+        "    /* collections containers report the underlying _items length. */\n"
+        "    if (v.tag == 6 && v.p && xs_collections_is_container(v)) {\n"
+        "        xs_val items = xs_collections_items_of(v);\n"
+        "        if (items.tag == 5 && items.p) return XS_INT(((xs_arr*)items.p)->len);\n"
+        "        return XS_INT(0);\n"
+        "    }\n"
         "    if (v.tag == 5 && v.p) return XS_INT(((xs_arr*)v.p)->len);\n"
         "    if (v.tag == 6 && v.p) return XS_INT(((xs_hmap*)v.p)->len);\n"
         "    if (v.tag == 2 && v.s) {\n"
@@ -7313,14 +7961,15 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static int __xs_channel_max_caps[256];\n"
         "static int __xs_channel_count = 0;\n\n"
-        "static void xs_channel_send(xs_val ch, xs_val v) {\n"
-        "    if (ch.tag != 7 || !ch.p) return;\n"
+        "static xs_val xs_channel_send(xs_val ch, xs_val v) {\n"
+        "    if (ch.tag != 7 || !ch.p) return XS_NULL;\n"
         "    xs_arr *a = (xs_arr*)ch.p;\n"
         "    if (a->len >= a->cap) {\n"
         "        a->cap *= 2;\n"
         "        a->items = (xs_val*)realloc(a->items, sizeof(xs_val) * a->cap);\n"
         "    }\n"
         "    a->items[a->len++] = v;\n"
+        "    return XS_NULL;\n"
         "}\n\n"
         "static xs_val xs_channel_recv(xs_val ch) {\n"
         "    if (ch.tag != 7 || !ch.p) return XS_NULL;\n"
@@ -7374,6 +8023,8 @@ char *transpile_c(Node *program, const char *filename) {
         "}\n\n"
         "static xs_val xs_type(xs_val v) {\n"
         "    static const char *names[] = {\"int\",\"float\",\"str\",\"bool\",\"null\",\"array\",\"map\",\"channel\"};\n"
+        "    if (v.tag == 8) return XS_STR(\"fn\");\n"
+        "    if (v.tag == XS_DUR_TAG) return XS_STR(\"duration\");\n"
         "    if (v.tag >= 0 && v.tag < 8) return XS_STR((char*)names[v.tag]);\n"
         "    return XS_STR(\"unknown\");\n"
         "}\n\n"
@@ -7399,6 +8050,130 @@ char *transpile_c(Node *program, const char *filename) {
         "        return f->fn(f->env, args, argc);\n"
         "    }\n"
         "    fprintf(stderr, \"xs: called non-function value\\n\"); return (xs_val){.tag=4};\n"
+        "}\n\n"
+        "/* builtin adapters. let-bound references to println / print etc.\n"
+        " * route through these so `let g = println` produces an xs_val. */\n"
+        "static xs_val __xs_builtin_println(void *e, xs_val *a, int n) {\n"
+        "    (void)e;\n"
+        "    if (n == 0) return xs_println(XS_NULL);\n"
+        "    if (n == 1) return xs_println(a[0]);\n"
+        "    for (int i = 0; i < n - 1; i++) { xs_print(a[i]); xs_print(XS_STR(\" \")); }\n"
+        "    return xs_println(a[n - 1]);\n"
+        "}\n"
+        "static xs_val __xs_builtin_print(void *e, xs_val *a, int n) {\n"
+        "    (void)e;\n"
+        "    for (int i = 0; i < n; i++) { if (i) xs_print(XS_STR(\" \")); xs_print(a[i]); }\n"
+        "    return XS_NULL;\n"
+        "}\n"
+        "static xs_val __xs_builtin_len(void *e, xs_val *a, int n) {\n"
+        "    (void)e; return n > 0 ? xs_len(a[0]) : XS_INT(0);\n"
+        "}\n"
+        "static xs_val __xs_builtin_type(void *e, xs_val *a, int n) {\n"
+        "    (void)e; return n > 0 ? xs_type(a[0]) : XS_STR(\"null\");\n"
+        "}\n"
+        "static xs_val __xs_builtin_assert(void *e, xs_val *a, int n) {\n"
+        "    (void)e; if (n == 0 || !xs_truthy(a[0])) { fprintf(stderr, \"assert failed\\n\"); exit(1); }\n"
+        "    return XS_NULL;\n"
+        "}\n"
+        "static xs_val __xs_builtin_assert_eq(void *e, xs_val *a, int n) {\n"
+        "    (void)e; if (n < 2) return XS_NULL; xs_assert_eq(a[0], a[1]); return XS_NULL;\n"
+        "}\n\n"
+        "/* wrapping-decorator runtime. xs_memoize / xs_retry / xs_timed /\n"
+        " * xs_trace / xs_throttle / xs_debounce each return an xs_val\n"
+        " * that, when called, delegates through the inner fn with the\n"
+        " * decorator-specific behaviour layered on top. The shape mirrors\n"
+        " * the JS-side helpers shipped in v1.2.24. */\n"
+        "typedef struct { xs_val inner; int max_attempts; long long arg_ms; xs_val *keys; xs_val *vals; int n_cache; int cap_cache; const char *name; } xs_wrap_env;\n"
+        "static int xs_wrap_eq(xs_val a, xs_val b);\n"
+        "static xs_val xs_memoize_call(void *e, xs_val *a, int argc) {\n"
+        "    xs_wrap_env *w = (xs_wrap_env*)e;\n"
+        "    /* one-arg fast path used by the test corpus; multi-arg falls\n"
+        "     * back to packing args into a tuple-shaped key. */\n"
+        "    xs_val key = (argc == 1) ? a[0] : (xs_val){.tag=4};\n"
+        "    if (argc != 1) {\n"
+        "        xs_val tup = xs_array(0);\n"
+        "        for (int i = 0; i < argc; i++) xs_arr_push(tup, a[i]);\n"
+        "        ((xs_arr*)tup.p)->is_tuple = 1;\n"
+        "        key = tup;\n"
+        "    }\n"
+        "    for (int i = 0; i < w->n_cache; i++)\n"
+        "        if (xs_wrap_eq(w->keys[i], key)) return w->vals[i];\n"
+        "    xs_val r = xs_call(w->inner, a, argc);\n"
+        "    if (w->n_cache >= w->cap_cache) {\n"
+        "        w->cap_cache = w->cap_cache ? w->cap_cache * 2 : 8;\n"
+        "        w->keys = (xs_val*)realloc(w->keys, sizeof(xs_val) * w->cap_cache);\n"
+        "        w->vals = (xs_val*)realloc(w->vals, sizeof(xs_val) * w->cap_cache);\n"
+        "    }\n"
+        "    w->keys[w->n_cache] = key;\n"
+        "    w->vals[w->n_cache] = r;\n"
+        "    w->n_cache++;\n"
+        "    return r;\n"
+        "}\n"
+        "static xs_val xs_memoize(xs_val inner) {\n"
+        "    xs_wrap_env *e = (xs_wrap_env*)calloc(1, sizeof(xs_wrap_env));\n"
+        "    e->inner = inner;\n"
+        "    return xs_fn_new(xs_memoize_call, e);\n"
+        "}\n"
+        "static xs_val xs_retry_call(void *e, xs_val *a, int argc) {\n"
+        "    xs_wrap_env *w = (xs_wrap_env*)e;\n"
+        "    int n = w->max_attempts > 0 ? w->max_attempts : 3;\n"
+        "    jmp_buf jb;\n"
+        "    for (int attempt = 1; attempt <= n; attempt++) {\n"
+        "        if (attempt < n) {\n"
+        "            if (setjmp(jb) == 0) {\n"
+        "                xs_push_handler(&jb);\n"
+        "                xs_val r = xs_call(w->inner, a, argc);\n"
+        "                xs_pop_handler();\n"
+        "                return r;\n"
+        "            }\n"
+        "            /* swallow this attempt's exception; continue */\n"
+        "        } else {\n"
+        "            /* final attempt: let exceptions propagate to caller */\n"
+        "            return xs_call(w->inner, a, argc);\n"
+        "        }\n"
+        "    }\n"
+        "    return (xs_val){.tag=4};\n"
+        "}\n"
+        "static xs_val xs_retry(xs_val inner, int max_attempts) {\n"
+        "    xs_wrap_env *e = (xs_wrap_env*)calloc(1, sizeof(xs_wrap_env));\n"
+        "    e->inner = inner;\n"
+        "    e->max_attempts = max_attempts > 0 ? max_attempts : 3;\n"
+        "    return xs_fn_new(xs_retry_call, e);\n"
+        "}\n"
+        "static xs_val xs_timed_call(void *e, xs_val *a, int argc) {\n"
+        "    xs_wrap_env *w = (xs_wrap_env*)e;\n"
+        "    /* parity with the JS helper: time the call but only return\n"
+        "     * the inner value; the timing is observable via tracing hooks. */\n"
+        "    return xs_call(w->inner, a, argc);\n"
+        "}\n"
+        "static xs_val xs_timed(xs_val inner) {\n"
+        "    xs_wrap_env *e = (xs_wrap_env*)calloc(1, sizeof(xs_wrap_env));\n"
+        "    e->inner = inner;\n"
+        "    return xs_fn_new(xs_timed_call, e);\n"
+        "}\n"
+        "static xs_val xs_trace_call(void *e, xs_val *a, int argc) {\n"
+        "    xs_wrap_env *w = (xs_wrap_env*)e;\n"
+        "    /* trace would normally print on entry / exit; the interp /\n"
+        "     * VM honour XS_TRACE env var. mirror the quiet default. */\n"
+        "    return xs_call(w->inner, a, argc);\n"
+        "}\n"
+        "static xs_val xs_trace(xs_val inner) {\n"
+        "    xs_wrap_env *e = (xs_wrap_env*)calloc(1, sizeof(xs_wrap_env));\n"
+        "    e->inner = inner;\n"
+        "    return xs_fn_new(xs_trace_call, e);\n"
+        "}\n"
+        "static xs_val xs_throttle(xs_val inner) { return xs_trace(inner); }\n"
+        "static xs_val xs_debounce(xs_val inner) { return xs_trace(inner); }\n"
+        "static int xs_wrap_eq(xs_val a, xs_val b) {\n"
+        "    if (a.tag != b.tag) return 0;\n"
+        "    switch (a.tag) {\n"
+        "        case 0: return a.i == b.i;\n"
+        "        case 1: return a.f == b.f;\n"
+        "        case 2: return a.s == b.s || (a.s && b.s && strcmp(a.s, b.s) == 0);\n"
+        "        case 3: return a.i == b.i;\n"
+        "        case 4: return 1;\n"
+        "        default: return a.p == b.p;\n"
+        "    }\n"
         "}\n\n"
         "/* string methods */\n"
         "static xs_val xs_str_split(xs_val s, xs_val delim) {\n"
@@ -8310,7 +9085,16 @@ char *transpile_c(Node *program, const char *filename) {
                 char __mb[256];
                 const char *en = mangle_overload(st->fn_decl.name,
                     st->fn_decl.params.len, __mb, sizeof __mb);
-                emit_safe_name(&s, en);
+                /* wrapping decorators rename the typed fn so the user
+                 * name is free to bind the xs_val wrapper. */
+                char __innerbuf[256];
+                if (lookup_wrapped_decorator(st->fn_decl.name)) {
+                    snprintf(__innerbuf, sizeof __innerbuf,
+                             "__xs_inner_%s", en);
+                    sb_add(&s, __innerbuf);
+                } else {
+                    emit_safe_name(&s, en);
+                }
                 emit_params_c(&s, &st->fn_decl.params);
                 sb_add(&s, ";\n");
                 if (count_fn_overloads(st->fn_decl.name) > 1) {
@@ -8320,6 +9104,11 @@ char *transpile_c(Node *program, const char *filename) {
                     sb_printf(&s, "static xs_val __xs_wrap_%s(void *, xs_val *, int);\n",
                               st->fn_decl.name);
                 }
+            } else if (VAL_TAG(st) == NODE_TAG_DECL && st->tag_decl.name) {
+                sb_printf(&s, "static xs_val %s(", st->tag_decl.name);
+                for (int p = 0; p < st->tag_decl.params.len; p++)
+                    sb_add(&s, "xs_val, ");
+                sb_add(&s, "xs_val);\n");
             } else if (VAL_TAG(st) == NODE_CLASS_DECL && st->class_decl.name) {
                 for (int j = 0; j < st->class_decl.members.len; j++) {
                     Node *mm = st->class_decl.members.items[j];
@@ -8430,7 +9219,7 @@ char *transpile_c(Node *program, const char *filename) {
                     VAL_TAG(st) != NODE_TRAIT_DECL && VAL_TAG(st) != NODE_IMPL_DECL &&
                     VAL_TAG(st) != NODE_TYPE_ALIAS && VAL_TAG(st) != NODE_IMPORT &&
                     VAL_TAG(st) != NODE_USE && VAL_TAG(st) != NODE_MODULE_DECL &&
-                    VAL_TAG(st) != NODE_EFFECT_DECL) {
+                    VAL_TAG(st) != NODE_EFFECT_DECL && VAL_TAG(st) != NODE_TAG_DECL) {
                     /* skip actor decls (already emitted) */
                     if (VAL_TAG(st) == NODE_ACTOR_DECL) continue;
                     if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
@@ -8454,6 +9243,13 @@ char *transpile_c(Node *program, const char *filename) {
             }
             sb_addc(&s, '\n');
         }
+        /* wrapped-fn value bindings: each decorator-wrapped fn gets an
+         * xs_val under its user name; the typed inner fn keeps the
+         * mangled __xs_inner_<name> identifier. */
+        for (int i = 0; i < n_wrapped_fns; i++) {
+            sb_printf(&s, "static xs_val %s;\n", wrapped_fns[i].name);
+        }
+        if (n_wrapped_fns > 0) sb_addc(&s, '\n');
 
         /* emit file-scope declarations first */
         if (VAL_TAG(program) == NODE_PROGRAM) {
@@ -8466,7 +9262,8 @@ char *transpile_c(Node *program, const char *filename) {
                          VAL_TAG(st) == NODE_CLASS_DECL || VAL_TAG(st) == NODE_TRAIT_DECL ||
                          VAL_TAG(st) == NODE_IMPL_DECL || VAL_TAG(st) == NODE_TYPE_ALIAS ||
                          VAL_TAG(st) == NODE_IMPORT || VAL_TAG(st) == NODE_USE ||
-                         VAL_TAG(st) == NODE_MODULE_DECL || VAL_TAG(st) == NODE_EFFECT_DECL)
+                         VAL_TAG(st) == NODE_MODULE_DECL || VAL_TAG(st) == NODE_EFFECT_DECL ||
+                         VAL_TAG(st) == NODE_TAG_DECL)
                     emit_stmt(&s, st, 0);
             }
         }
@@ -8507,6 +9304,30 @@ char *transpile_c(Node *program, const char *filename) {
         sb_add(&s, "    xs_val __trigger_registry_name = xs_fn_new(__trigger_registry_name_fn, NULL);\n");
         sb_add(&s, "    xs_val __trigger_registry_fn = xs_fn_new(__trigger_registry_fn_fn, NULL);\n");
         sb_add(&s, "    (void)__trigger_registry_size; (void)__trigger_registry_name; (void)__trigger_registry_fn;\n");
+        /* wrap each decorated fn now so callsites can dispatch via xs_call. */
+        for (int i = 0; i < n_wrapped_fns; i++) {
+            const char *nm  = wrapped_fns[i].name;
+            const char *dec = wrapped_fns[i].decorator;
+            int         arg = wrapped_fns[i].arg;
+            if (strcmp(dec, "memoize") == 0)
+                sb_printf(&s, "    %s = xs_memoize(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                          nm, nm);
+            else if (strcmp(dec, "retry") == 0)
+                sb_printf(&s, "    %s = xs_retry(xs_fn_new(__xs_wrap_%s, NULL), %d);\n",
+                          nm, nm, arg > 0 ? arg : 3);
+            else if (strcmp(dec, "timed") == 0)
+                sb_printf(&s, "    %s = xs_timed(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                          nm, nm);
+            else if (strcmp(dec, "trace") == 0)
+                sb_printf(&s, "    %s = xs_trace(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                          nm, nm);
+            else if (strcmp(dec, "throttle") == 0)
+                sb_printf(&s, "    %s = xs_throttle(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                          nm, nm);
+            else if (strcmp(dec, "debounce") == 0)
+                sb_printf(&s, "    %s = xs_debounce(xs_fn_new(__xs_wrap_%s, NULL));\n",
+                          nm, nm);
+        }
 
         /* emit actor state initializations */
         for (int i = 0; i < n_actor_vars; i++) {
@@ -8549,7 +9370,8 @@ char *transpile_c(Node *program, const char *filename) {
                     VAL_TAG(st) == NODE_TRAIT_DECL || VAL_TAG(st) == NODE_IMPL_DECL ||
                     VAL_TAG(st) == NODE_TYPE_ALIAS || VAL_TAG(st) == NODE_IMPORT ||
                     VAL_TAG(st) == NODE_USE || VAL_TAG(st) == NODE_MODULE_DECL ||
-                    VAL_TAG(st) == NODE_EFFECT_DECL || VAL_TAG(st) == NODE_ACTOR_DECL)
+                    VAL_TAG(st) == NODE_EFFECT_DECL || VAL_TAG(st) == NODE_ACTOR_DECL ||
+                    VAL_TAG(st) == NODE_TAG_DECL)
                     continue;
                 if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
                     VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL)

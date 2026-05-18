@@ -720,6 +720,145 @@ static void compile_pattern_cond(Node *pat, int subject_local, WasmBuf *code,
 static void compile_pattern_bindings(Node *pat, int subject_local, WasmBuf *code,
                                       LocalMap *locals, CompilerCtx *ctx);
 static void emit_inline_str(WasmBuf *body, const char *s, int local_tmp);
+/* Multi-arity overload tracker and trigger registry shared across
+   compile_expr (call sites) and collect_functions / transpile_wasm
+   (registration). Defined here at the top of the file so the call-site
+   emitters can reach for them without forward-declaring storage. */
+#define WASM_OL_MAX 128
+#define WASM_OL_PER_NAME 8
+static const char *g_wasm_ol_names[WASM_OL_MAX];
+static int         g_wasm_ol_arities[WASM_OL_MAX][WASM_OL_PER_NAME];
+static int         g_wasm_ol_arity_count[WASM_OL_MAX];
+static int         g_wasm_ol_count = 0;
+
+#define WASM_TRIG_MAX 256
+typedef struct {
+    const char *name;   /* decorator name, e.g. "bench" */
+    const char *fn;     /* user fn name, e.g. "bench_quick" */
+} WasmTrigEntry;
+static WasmTrigEntry g_wasm_trig[WASM_TRIG_MAX];
+static int           g_wasm_trig_count = 0;
+
+/* Static `let/const/var name = <lambda>` map used by the __pure?
+   builtin so a bare ident referencing a let-bound lambda hits the
+   analyzer's verdict instead of falling through to "unknown -> false".
+   Populated at the start of transpile_wasm by walking the top-level
+   statements once. The mapping is read-only after that. */
+#define WASM_PURE_BIND_MAX 256
+typedef struct {
+    const char *name;
+    Node *fn_node;   /* points at the lambda or fn_decl that backs the name */
+} WasmPureBind;
+static WasmPureBind g_wasm_pure_binds[WASM_PURE_BIND_MAX];
+static int          g_wasm_pure_bind_count = 0;
+
+static void wasm_build_pure_binds(Node *program) {
+    g_wasm_pure_bind_count = 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st) continue;
+        const char *nm = NULL;
+        Node *val = NULL;
+        if ((VAL_TAG(st) == NODE_LET || VAL_TAG(st) == NODE_VAR) &&
+            st->let.name && st->let.name[0]) {
+            nm = st->let.name; val = st->let.value;
+        } else if (VAL_TAG(st) == NODE_CONST && st->const_.name &&
+                   st->const_.name[0]) {
+            nm = st->const_.name; val = st->const_.value;
+        }
+        if (!nm || !val) continue;
+        if (VAL_TAG(val) != NODE_LAMBDA && VAL_TAG(val) != NODE_FN_DECL)
+            continue;
+        if (g_wasm_pure_bind_count >= WASM_PURE_BIND_MAX) break;
+        g_wasm_pure_binds[g_wasm_pure_bind_count].name = nm;
+        g_wasm_pure_binds[g_wasm_pure_bind_count].fn_node = val;
+        g_wasm_pure_bind_count++;
+    }
+}
+
+static Node *wasm_lookup_pure_bind(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < g_wasm_pure_bind_count; i++) {
+        if (g_wasm_pure_binds[i].name &&
+            strcmp(g_wasm_pure_binds[i].name, name) == 0)
+            return g_wasm_pure_binds[i].fn_node;
+    }
+    return NULL;
+}
+
+static int wasm_ol_lookup(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < g_wasm_ol_count; i++)
+        if (g_wasm_ol_names[i] && strcmp(g_wasm_ol_names[i], name) == 0) return i;
+    return -1;
+}
+
+static void wasm_ol_record(const char *name, int arity) {
+    if (!name) return;
+    int idx = wasm_ol_lookup(name);
+    if (idx < 0) {
+        if (g_wasm_ol_count >= WASM_OL_MAX) return;
+        idx = g_wasm_ol_count++;
+        g_wasm_ol_names[idx] = name;
+        g_wasm_ol_arity_count[idx] = 0;
+    }
+    if (g_wasm_ol_arity_count[idx] >= WASM_OL_PER_NAME) return;
+    /* Skip duplicates (same arity registered twice). */
+    for (int a = 0; a < g_wasm_ol_arity_count[idx]; a++)
+        if (g_wasm_ol_arities[idx][a] == arity) return;
+    g_wasm_ol_arities[idx][g_wasm_ol_arity_count[idx]++] = arity;
+}
+
+static int wasm_ol_is_overloaded(const char *name) {
+    int idx = wasm_ol_lookup(name);
+    return idx >= 0 && g_wasm_ol_arity_count[idx] > 1;
+}
+
+/* Pick the arity that should service a call with nargs args. Exact
+   match preferred; otherwise the smallest arity >= nargs; finally the
+   largest known arity. */
+static int wasm_ol_pick(const char *name, int nargs) {
+    int idx = wasm_ol_lookup(name);
+    if (idx < 0) return -1;
+    int *arr = g_wasm_ol_arities[idx];
+    int n = g_wasm_ol_arity_count[idx];
+    for (int i = 0; i < n; i++) if (arr[i] == nargs) return arr[i];
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (arr[i] >= nargs && (best < 0 || arr[i] < best)) best = arr[i];
+    }
+    if (best >= 0) return best;
+    int largest = arr[0];
+    for (int i = 1; i < n; i++) if (arr[i] > largest) largest = arr[i];
+    return largest;
+}
+
+static int wasm_is_trigger_decorator(const char *n) {
+    if (!n) return 0;
+    return strcmp(n, "bench") == 0    || strcmp(n, "example") == 0  ||
+           strcmp(n, "every") == 0    || strcmp(n, "cron") == 0     ||
+           strcmp(n, "delayed") == 0  || strcmp(n, "watch") == 0    ||
+           strcmp(n, "on_start") == 0 || strcmp(n, "on_exit") == 0  ||
+           strcmp(n, "on_signal") == 0|| strcmp(n, "on_panic") == 0;
+}
+
+static void wasm_build_trigger_registry(Node *program) {
+    g_wasm_trig_count = 0;
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st || VAL_TAG(st) != NODE_FN_DECL) continue;
+        for (int di = 0; di < st->fn_decl.n_decorators; di++) {
+            const char *dn = st->fn_decl.decorators[di].name;
+            if (!wasm_is_trigger_decorator(dn)) continue;
+            if (g_wasm_trig_count >= WASM_TRIG_MAX) break;
+            g_wasm_trig[g_wasm_trig_count].name = dn;
+            g_wasm_trig[g_wasm_trig_count].fn = st->fn_decl.name ? st->fn_decl.name : "";
+            g_wasm_trig_count++;
+        }
+    }
+}
 
 /* ========================================================================
    Helpers: emit common patterns
@@ -1675,9 +1814,61 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 break;
             }
             if (strcmp(name, "type") == 0 && nargs >= 1) {
+                /* Return the human name for the tag (matches the
+                   interp / vm behaviour). Map: 0=null, 1=bool, 2=int,
+                   3=float, 4=str, 5=array, 6=map, 7=fn, 8=struct,
+                   9=class, 10=tuple, 11=range, 12=bigint. */
+                int tag_local = locals_add(locals, "__typtag");
                 compile_expr(node->call.args.items[0], code, locals, ctx);
                 emit_call(code, RT_VAL_TAG);
+                emit_local_set(code, tag_local);
+                static const char *type_names[] = {
+                    "null", "bool", "int", "float", "str", "array",
+                    "map", "fn", "struct", "class", "tuple", "range",
+                    "bigint"
+                };
+                int n_names = (int)(sizeof(type_names)/sizeof(type_names[0]));
+                for (int t = 0; t < n_names; t++) {
+                    emit_local_get(code, tag_local);
+                    emit_i32(code, t);
+                    buf_byte(code, OP_I32_EQ);
+                    buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+                    int slen = 0;
+                    int soff = strtab_add_with_len(ctx->strtab, type_names[t], &slen);
+                    emit_str_val(code, soff, slen);
+                    buf_byte(code, OP_ELSE);
+                }
+                /* Unknown tag: fall back to the numeric string. */
+                emit_local_get(code, tag_local);
                 emit_call(code, RT_I32_TO_STR);
+                for (int t = 0; t < n_names; t++) buf_byte(code, OP_END);
+                break;
+            }
+            if (strcmp(name, "typeof") == 0 && nargs >= 1) {
+                /* typeof is an alias for type; same string contract. */
+                int tag_local = locals_add(locals, "__topftag");
+                compile_expr(node->call.args.items[0], code, locals, ctx);
+                emit_call(code, RT_VAL_TAG);
+                emit_local_set(code, tag_local);
+                static const char *type_names2[] = {
+                    "null", "bool", "int", "float", "str", "array",
+                    "map", "fn", "struct", "class", "tuple", "range",
+                    "bigint"
+                };
+                int n_names = (int)(sizeof(type_names2)/sizeof(type_names2[0]));
+                for (int t = 0; t < n_names; t++) {
+                    emit_local_get(code, tag_local);
+                    emit_i32(code, t);
+                    buf_byte(code, OP_I32_EQ);
+                    buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+                    int slen = 0;
+                    int soff = strtab_add_with_len(ctx->strtab, type_names2[t], &slen);
+                    emit_str_val(code, soff, slen);
+                    buf_byte(code, OP_ELSE);
+                }
+                emit_local_get(code, tag_local);
+                emit_call(code, RT_I32_TO_STR);
+                for (int t = 0; t < n_names; t++) buf_byte(code, OP_END);
                 break;
             }
             if (strcmp(name, "assert") == 0 && nargs >= 1) {
@@ -1710,17 +1901,127 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 break;
             }
             if (strcmp(name, "__pure?") == 0) {
-                /* Purity introspection on WASM is not yet wired up:
-                   the closure cell carries (tag, func_idx, env_ptr)
-                   with no slot for a per-fn purity bit, and the
-                   parallel-table lookup needs runtime support that
-                   doesn't exist here. Evaluate the argument for side
-                   effects, drop it, return false. */
+                /* Static purity introspection. The analyzer ran during
+                   transpile_wasm (purity_analyze(program)). For top-level
+                   fn-decl identifiers we can read fn_decl.is_pure off
+                   the AST node directly; for everything else we walk the
+                   captured lambda or expression to look for a pure-marked
+                   fn_decl, otherwise return false. Mirrors the static
+                   verdict the interp / vm / jit report. */
                 if (nargs >= 1) {
-                    compile_expr(node->call.args.items[0], code, locals, ctx);
+                    Node *arg = node->call.args.items[0];
+                    int verdict = 0;
+                    Node *target = arg;
+                    /* For bare identifiers, find the matching fn_decl /
+                       lambda by walking three indices in order:
+                       1. funcs map (top-level fn decl or nested name)
+                       2. let/var/const bindings whose RHS is a fn
+                       3. the overloaded-name table (any variant; the
+                          purity analyzer treats overload sets uniformly) */
+                    if (target && VAL_TAG(target) == NODE_IDENT && ctx->fn_infos) {
+                        const char *idn = target->ident.name;
+                        if (idn) {
+                            int idx = funcs_find(ctx->funcs, idn);
+                            if (idx >= 0) {
+                                FuncInfo *fi = &((FuncInfo*)ctx->fn_infos)[idx];
+                                if (fi->node) target = fi->node;
+                            } else {
+                                Node *bound = wasm_lookup_pure_bind(idn);
+                                if (bound) {
+                                    target = bound;
+                                } else if (wasm_ol_is_overloaded(idn)) {
+                                    char buf[256];
+                                    snprintf(buf, sizeof(buf), "%s_a%d",
+                                             idn,
+                                             g_wasm_ol_arities[wasm_ol_lookup(idn)][0]);
+                                    int oi = funcs_find(ctx->funcs, buf);
+                                    if (oi >= 0) {
+                                        FuncInfo *fi = &((FuncInfo*)ctx->fn_infos)[oi];
+                                        if (fi->node) target = fi->node;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (target && (VAL_TAG(target) == NODE_FN_DECL ||
+                                   VAL_TAG(target) == NODE_LAMBDA)) {
+                        if (VAL_TAG(target) == NODE_FN_DECL)
+                            verdict = (target->fn_decl.is_pure ||
+                                       target->fn_decl.inferred_pure) ? 1 : 0;
+                        else
+                            verdict = target->lambda.inferred_pure ? 1 : 0;
+                    }
+                    /* Side-effect-evaluate the original arg so any call
+                       embedded in it still runs. */
+                    compile_expr(arg, code, locals, ctx);
                     buf_byte(code, OP_DROP);
+                    emit_bool_val(code, verdict);
+                } else {
+                    emit_bool_val(code, 0);
                 }
-                emit_bool_val(code, 0);
+                break;
+            }
+            if (strcmp(name, "__trigger_registry_size") == 0) {
+                emit_int_val(code, g_wasm_trig_count);
+                break;
+            }
+            if (strcmp(name, "__trigger_registry_name") == 0 && nargs >= 1) {
+                /* Compile-time-known registry: emit a small switch on
+                   the integer index. Out-of-range returns null. */
+                int idx_local = locals_add(locals, "__trigi");
+                compile_expr(node->call.args.items[0], code, locals, ctx);
+                emit_call(code, RT_VAL_I32);
+                emit_local_set(code, idx_local);
+                /* Build nested if-else chain that picks the matching
+                   string literal. */
+                if (g_wasm_trig_count == 0) {
+                    emit_null(code);
+                    break;
+                }
+                /* Generate: if (i == 0) "name0" else if (i == 1) "name1" ... else null */
+                for (int t = 0; t < g_wasm_trig_count; t++) {
+                    emit_local_get(code, idx_local);
+                    emit_i32(code, t);
+                    buf_byte(code, OP_I32_EQ);
+                    buf_byte(code, OP_IF);
+                    buf_byte(code, WASM_TYPE_I32);
+                    int kl = 0;
+                    int koff = strtab_add_with_len(ctx->strtab,
+                                                   g_wasm_trig[t].name, &kl);
+                    emit_str_val(code, koff, kl);
+                    buf_byte(code, OP_ELSE);
+                }
+                emit_null(code);
+                for (int t = 0; t < g_wasm_trig_count; t++) {
+                    buf_byte(code, OP_END);
+                }
+                break;
+            }
+            if (strcmp(name, "__trigger_registry_fn") == 0 && nargs >= 1) {
+                int idx_local = locals_add(locals, "__trigfi");
+                compile_expr(node->call.args.items[0], code, locals, ctx);
+                emit_call(code, RT_VAL_I32);
+                emit_local_set(code, idx_local);
+                if (g_wasm_trig_count == 0) {
+                    emit_null(code);
+                    break;
+                }
+                for (int t = 0; t < g_wasm_trig_count; t++) {
+                    emit_local_get(code, idx_local);
+                    emit_i32(code, t);
+                    buf_byte(code, OP_I32_EQ);
+                    buf_byte(code, OP_IF);
+                    buf_byte(code, WASM_TYPE_I32);
+                    int kl = 0;
+                    int koff = strtab_add_with_len(ctx->strtab,
+                                                   g_wasm_trig[t].fn, &kl);
+                    emit_str_val(code, koff, kl);
+                    buf_byte(code, OP_ELSE);
+                }
+                emit_null(code);
+                for (int t = 0; t < g_wasm_trig_count; t++) {
+                    buf_byte(code, OP_END);
+                }
                 break;
             }
 
@@ -1745,18 +2046,51 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                adds an implicit __env first arg and the call site here
                only passes nargs values, so the indirect dispatch path
                below has to do the work. Same story for capture lookups. */
-            int fidx = funcs_find(ctx->funcs, name);
+            /* Multi-arity overload: when the source declared multiple
+               `fn name(...)` at the top level, each was mangled to
+               `name_a<arity>` in FuncMap. Pick the variant matching
+               nargs exactly, so the wasm call-site type matches the
+               callee's signature; if no exact match exists fall back
+               to the smallest registered arity and pad with nulls,
+               which is what the interp / vm do for under-application. */
+            const char *lookup_name = name;
+            char ol_mangled[256];
+            int ol_pick_arity = -1;
+            if (!is_capture_call && wasm_ol_is_overloaded(name)) {
+                ol_pick_arity = wasm_ol_pick(name, nargs);
+                if (ol_pick_arity < 0) ol_pick_arity = nargs;
+                snprintf(ol_mangled, sizeof(ol_mangled), "%s_a%d",
+                         name, ol_pick_arity);
+                lookup_name = ol_mangled;
+            }
+            int fidx = funcs_find(ctx->funcs, lookup_name);
             if (fidx >= 0 && !is_capture_call) {
                 int callee_has_captures = 0;
+                int callee_arity = -1;
                 if (ctx->fn_infos) {
                     FuncInfo *cfi = &((FuncInfo*)ctx->fn_infos)[fidx];
                     if (cfi->n_captures > 0) callee_has_captures = 1;
+                    callee_arity = cfi->n_params;
                 }
                 if (!callee_has_captures) {
-                    for (int i = 0; i < nargs; i++)
+                    int emit_count = nargs;
+                    if (ol_pick_arity >= 0 && callee_arity >= 0) {
+                        emit_count = callee_arity;
+                    }
+                    /* Push as many real args as the callee accepts, in
+                       order. Evaluate any trailing args for side effects
+                       but drop them so the wasm stack shape matches the
+                       function signature. */
+                    int passed = nargs < emit_count ? nargs : emit_count;
+                    for (int i = 0; i < passed; i++)
                         compile_expr(node->call.args.items[i], code, locals, ctx);
-                    /* Pad missing args with null */
-                    /* (We do not know arity at this point, caller is responsible) */
+                    for (int i = passed; i < nargs; i++) {
+                        compile_expr(node->call.args.items[i], code, locals, ctx);
+                        buf_byte(code, OP_DROP);
+                    }
+                    /* Pad missing trailing args with null. */
+                    for (int i = passed; i < emit_count; i++)
+                        emit_null(code);
                     emit_call(code, USER_FUNC_BASE + fidx);
                     break;
                 }
@@ -1842,22 +2176,61 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                     emit_local_get(code, stmp);
                     break;
                 }
-                /* Check if it is a class constructor - look for init method */
+                /* Check if it is a class constructor. Methods are
+                   mangled as `<ClassName>__<method>` in FuncMap, so
+                   look for both `<Name>__init` and bare `init`. Classes
+                   without an init still need an instance; allocate a
+                   bare map and return it. */
                 {
                     char init_name[256];
-                    snprintf(init_name, sizeof(init_name), "init");
+                    snprintf(init_name, sizeof(init_name), "%s__init", name);
                     int init_fidx = funcs_find(ctx->funcs, init_name);
-                    if (init_fidx >= 0) {
-                        /* Create a map as the instance */
+                    if (init_fidx < 0) {
+                        init_fidx = funcs_find(ctx->funcs, "init");
+                    }
+                    /* Is `name` a known class? Check the method table; if
+                       any method has struct_name == name, this is a class
+                       constructor call. */
+                    int is_class_ctor = 0;
+                    if (ctx->methods) {
+                        for (int k = 0; k < ctx->methods->count; k++) {
+                            const char *sn = ctx->methods->items[k].struct_name;
+                            if (sn && strcmp(sn, name) == 0) {
+                                is_class_ctor = 1; break;
+                            }
+                        }
+                    }
+                    if (init_fidx >= 0 || is_class_ctor) {
+                        /* Create a map as the instance, store __class so
+                           runtime dispatch by class name works. */
                         emit_call(code, RT_MAP_NEW);
                         int ctmp = locals_add(locals, "__cinst");
                         emit_local_set(code, ctmp);
-                        /* Call init(self, args...) */
-                        emit_local_get(code, ctmp); /* self */
-                        for (int i = 0; i < nargs; i++)
-                            compile_expr(node->call.args.items[i], code, locals, ctx);
-                        emit_call(code, USER_FUNC_BASE + init_fidx);
-                        buf_byte(code, OP_DROP); /* drop init return value */
+                        emit_local_get(code, ctmp);
+                        {
+                            int kl = 0;
+                            int koff = strtab_add_with_len(ctx->strtab, "__class", &kl);
+                            emit_str_val(code, koff, kl);
+                            int nl = 0;
+                            int noff = strtab_add_with_len(ctx->strtab, name, &nl);
+                            emit_str_val(code, noff, nl);
+                        }
+                        emit_call(code, RT_MAP_SET);
+                        if (init_fidx >= 0) {
+                            /* Call init(self, args...) */
+                            emit_local_get(code, ctmp); /* self */
+                            for (int i = 0; i < nargs; i++)
+                                compile_expr(node->call.args.items[i], code, locals, ctx);
+                            emit_call(code, USER_FUNC_BASE + init_fidx);
+                            buf_byte(code, OP_DROP); /* drop init return value */
+                        } else {
+                            /* No init: drop any positional args so the
+                               stack stays balanced. */
+                            for (int i = 0; i < nargs; i++) {
+                                compile_expr(node->call.args.items[i], code, locals, ctx);
+                                buf_byte(code, OP_DROP);
+                            }
+                        }
                         emit_local_get(code, ctmp); /* return instance */
                         break;
                     }
@@ -2136,10 +2509,52 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             break;
         }
         if (strcmp(method, "pop") == 0) {
-            /* Pop last element: get len-1, decrement len. Simplified: return null */
+            /* Pop last element: read items[len-1], decrement len at the
+               payload header, return the element. Returns null on empty
+               arrays. Array payload layout: [cap, len, slot0, slot1, ...]
+               where each slot holds a Value*. RT_ARR_LEN already knows
+               to read dp + 4. */
+            int rv = locals_add(locals, "__popv");
+            int dp = locals_add(locals, "__popdp");
+            int len = locals_add(locals, "__poplen");
+            int res = locals_add(locals, "__popr");
             compile_expr(node->method_call.obj, code, locals, ctx);
-            buf_byte(code, OP_DROP);
+            emit_local_tee(code, rv);
+            emit_call(code, RT_VAL_I32);
+            emit_local_tee(code, dp);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_set(code, len);
+            /* if len <= 0 { return null } else { res = items[len-1]; len-- } */
+            emit_local_get(code, len);
+            emit_i32(code, 0);
+            buf_byte(code, OP_I32_LE_S);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
             emit_null(code);
+            buf_byte(code, OP_ELSE);
+            /* res = items[len-1] = *(dp + 8 + (len-1)*4) */
+            emit_local_get(code, dp);
+            emit_i32(code, 8);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, len);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_MUL);
+            buf_byte(code, OP_I32_ADD);
+            buf_byte(code, OP_I32_LOAD); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_set(code, res);
+            /* *(dp + 4) = len - 1 */
+            emit_local_get(code, dp);
+            emit_i32(code, 4);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_get(code, len);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            buf_byte(code, OP_I32_STORE); buf_leb128_u(code, 2); buf_leb128_u(code, 0);
+            emit_local_get(code, res);
+            buf_byte(code, OP_END);
             break;
         }
         if (strcmp(method, "upper") == 0) {
@@ -2482,6 +2897,100 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         if ((strcmp(method, "sort") == 0) && nargs == 0) {
             compile_expr(node->method_call.obj, code, locals, ctx);
             emit_call(code, RT_ARR_SORT);
+            break;
+        }
+        if ((strcmp(method, "sort") == 0) && nargs == 1) {
+            /* arr.sort(fn(a,b)) -> in-place insertion sort using the
+               user comparator. Returns the same array. The runtime
+               natives mutate-and-return; mirror that. */
+            int src = locals_add(locals, "__srt_src");
+            int fn  = locals_add(locals, "__srt_fn");
+            int len = locals_add(locals, "__srt_len");
+            int i   = locals_add(locals, "__srt_i");
+            int j   = locals_add(locals, "__srt_j");
+            int a   = locals_add(locals, "__srt_a");
+            int b   = locals_add(locals, "__srt_b");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_set(code, src);
+            compile_expr(node->method_call.args.items[0], code, locals, ctx);
+            emit_local_set(code, fn);
+            emit_local_get(code, src);
+            emit_call(code, RT_ARR_LEN);
+            emit_local_set(code, len);
+            /* for i in 1..len: */
+            emit_i32(code, 1);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, i);
+            emit_local_get(code, len);
+            buf_byte(code, OP_I32_GE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            /*   j = i */
+            emit_local_get(code, i);
+            emit_local_set(code, j);
+            /*   while j > 0 and fn(arr[j-1], arr[j]) > 0: swap; j-- */
+            buf_byte(code, OP_BLOCK); buf_byte(code, WASM_TYPE_VOID);
+            buf_byte(code, OP_LOOP);  buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, j);
+            emit_i32(code, 0);
+            buf_byte(code, OP_I32_LE_S);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            /* a = arr[j-1], b = arr[j] */
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, j);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_local_set(code, a);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, j);
+            emit_call(code, RT_VAL_NEW);
+            emit_call(code, RT_ARR_GET);
+            emit_local_set(code, b);
+            /* if fn(a,b) > 0 (i.e. a > b in the comparator's view): swap */
+            emit_local_get(code, fn);
+            emit_local_get(code, a);
+            emit_local_get(code, b);
+            emit_call(code, RT_CALL2);
+            emit_call(code, RT_VAL_I32);
+            emit_i32(code, 0);
+            buf_byte(code, OP_I32_GT_S);
+            buf_byte(code, OP_I32_EQZ);
+            buf_byte(code, OP_BR_IF); buf_leb128_u(code, 1);
+            /* arr[j-1] = b; arr[j] = a */
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, j);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            emit_call(code, RT_VAL_NEW);
+            emit_local_get(code, b);
+            emit_call(code, RT_VAL_INDEX_SET);
+            emit_local_get(code, src);
+            emit_i32(code, TAG_INT);
+            emit_local_get(code, j);
+            emit_call(code, RT_VAL_NEW);
+            emit_local_get(code, a);
+            emit_call(code, RT_VAL_INDEX_SET);
+            /* j-- */
+            emit_local_get(code, j);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_SUB);
+            emit_local_set(code, j);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            /* i++ */
+            emit_local_get(code, i);
+            emit_i32(code, 1);
+            buf_byte(code, OP_I32_ADD);
+            emit_local_set(code, i);
+            buf_byte(code, OP_BR); buf_leb128_u(code, 0);
+            buf_byte(code, OP_END); buf_byte(code, OP_END);
+            emit_local_get(code, src);
             break;
         }
         if ((strcmp(method, "flat") == 0 || strcmp(method, "flatten") == 0)
@@ -3027,12 +3536,48 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             emit_local_get(code, acc);
             break;
         }
-        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0) {
+        if (strcmp(method, "len") == 0 || strcmp(method, "length") == 0 ||
+            strcmp(method, "size") == 0) {
             /* Range: len = end - start (+1 if inclusive). Fall back to
-               RT_STR_LEN for strings, arrays, tuples, and maps. */
+               RT_STR_LEN for strings, arrays, tuples, and maps. For
+               collections.Deque/Stack/Set (a map with a __deque/
+               __stack/__set marker), delegate to the wrapped array. */
             int rv = locals_add(locals, "__lr");
             compile_expr(node->method_call.obj, code, locals, ctx);
-            emit_local_tee(code, rv);
+            emit_local_set(code, rv);
+            /* Marker check: if map has __deque/__stack/__set, len is
+               the wrapped array's len. */
+            emit_local_get(code, rv);
+            emit_call(code, RT_VAL_TAG);
+            emit_i32(code, TAG_MAP);
+            buf_byte(code, OP_I32_EQ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+            const char *markers[] = {"__deque", "__stack", "__set"};
+            for (int mi = 0; mi < 3; mi++) {
+                emit_local_get(code, rv);
+                int kl = 0;
+                int koff = strtab_add_with_len(ctx->strtab, markers[mi], &kl);
+                emit_str_val(code, koff, kl);
+                emit_call(code, RT_MAP_HAS);
+                emit_call(code, RT_VAL_TRUTHY);
+                buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+                /* len: wrap RT_ARR_LEN's raw i32 in TAG_INT */
+                emit_i32(code, TAG_INT);
+                emit_local_get(code, rv);
+                koff = strtab_add_with_len(ctx->strtab, markers[mi], &kl);
+                emit_str_val(code, koff, kl);
+                emit_call(code, RT_MAP_GET);
+                emit_call(code, RT_ARR_LEN);
+                emit_call(code, RT_VAL_NEW);
+                buf_byte(code, OP_ELSE);
+            }
+            /* Plain map (no marker): return entry count via RT_STR_LEN. */
+            emit_local_get(code, rv);
+            emit_call(code, RT_STR_LEN);
+            for (int mi = 0; mi < 3; mi++) buf_byte(code, OP_END);
+            buf_byte(code, OP_ELSE);
+            /* Original path: range / string / array. */
+            emit_local_get(code, rv);
             emit_call(code, RT_VAL_TAG);
             emit_i32(code, TAG_RANGE);
             buf_byte(code, OP_I32_EQ);
@@ -3069,6 +3614,8 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             buf_byte(code, OP_ELSE);
             emit_local_get(code, rv);
             emit_call(code, RT_STR_LEN);
+            buf_byte(code, OP_END);
+            /* Close the outer collections-marker if/else. */
             buf_byte(code, OP_END);
             break;
         }
@@ -3338,6 +3885,66 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             break;
         }
 
+        /* collections.Deque / Stack / Set accessor methods. The
+           constructor lowering puts the wrapped array under a marker
+           field (__deque / __stack / __set); these methods read it
+           back. front() / back() / peek() never appear elsewhere so
+           shadowing the generic map-field fallback is safe. */
+        if ((strcmp(method, "front") == 0 ||
+             strcmp(method, "back") == 0 ||
+             strcmp(method, "peek") == 0 ||
+             strcmp(method, "top") == 0) && nargs == 0) {
+            const char *markers[] = {"__deque", "__stack", "__set"};
+            int rv = locals_add(locals, "__cmrv");
+            compile_expr(node->method_call.obj, code, locals, ctx);
+            emit_local_tee(code, rv);
+            emit_call(code, RT_VAL_TAG);
+            emit_i32(code, TAG_MAP);
+            buf_byte(code, OP_I32_EQ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+            int found_any = 0;
+            for (int mi = 0; mi < 3; mi++) {
+                emit_local_get(code, rv);
+                int kl = 0;
+                int koff = strtab_add_with_len(ctx->strtab, markers[mi], &kl);
+                emit_str_val(code, koff, kl);
+                emit_call(code, RT_MAP_HAS);
+                emit_call(code, RT_VAL_TRUTHY);
+                buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+                int items_local = locals_add(locals, "__citems");
+                emit_local_get(code, rv);
+                koff = strtab_add_with_len(ctx->strtab, markers[mi], &kl);
+                emit_str_val(code, koff, kl);
+                emit_call(code, RT_MAP_GET);
+                emit_local_tee(code, items_local);
+                if (strcmp(method, "front") == 0) {
+                    /* items[0] */
+                    emit_i32(code, TAG_INT);
+                    emit_i32(code, 0);
+                    emit_call(code, RT_VAL_NEW);
+                    emit_call(code, RT_ARR_GET);
+                } else {
+                    /* back / peek / top: items[len - 1] */
+                    emit_i32(code, TAG_INT);
+                    emit_local_get(code, items_local);
+                    emit_call(code, RT_ARR_LEN);
+                    emit_i32(code, 1);
+                    buf_byte(code, OP_I32_SUB);
+                    emit_call(code, RT_VAL_NEW);
+                    emit_call(code, RT_ARR_GET);
+                }
+                buf_byte(code, OP_ELSE);
+                found_any = 1;
+            }
+            (void)found_any;
+            emit_null(code);
+            for (int mi = 0; mi < 3; mi++) buf_byte(code, OP_END);
+            buf_byte(code, OP_ELSE);
+            emit_null(code);
+            buf_byte(code, OP_END);
+            break;
+        }
+
         /* Unknown method - try the map-field-as-callable fallback so
            `obj.handle(x)` finds a stored `handle` function. Only one or
            two arity to keep it within RT_CALL1 / RT_CALL2's reach. */
@@ -3408,6 +4015,15 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
         if (strcmp(fname, "len") == 0) {
             compile_expr(node->field.obj, code, locals, ctx);
             emit_call(code, RT_STR_LEN);
+        } else if (fname && fname[0] >= '0' && fname[0] <= '9') {
+            /* Tuple positional access: `t.0`, `t.2` lower to array
+               indexing (tuples are stored as arrays under the hood). */
+            int idx = 0;
+            for (const char *p = fname; *p && *p >= '0' && *p <= '9'; p++)
+                idx = idx * 10 + (*p - '0');
+            compile_expr(node->field.obj, code, locals, ctx);
+            emit_int_val(code, idx);
+            emit_call(code, RT_VAL_INDEX);
         } else {
             /* Try compile-time struct field index first */
             int fidx = struct_field_index(ctx->structs, NULL, fname);
@@ -3420,12 +4036,42 @@ static void compile_expr(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
                 buf_leb128_u(code, 2);
                 buf_leb128_u(code, 0);
             } else {
-                /* Map-based field access for class instances and dynamic objects */
+                /* Map-based field access. If the field misses on a
+                   class instance but matches a method name in the
+                   method table, return a TAG_FUNC value referencing
+                   the bare fn. This is enough to make `type(c.method)`
+                   report "fn" the way the interp/vm do. */
+                int res_local = locals_add(locals, "__fldr");
                 compile_expr(node->field.obj, code, locals, ctx);
                 int slen = 0;
                 int foff = strtab_add_with_len(ctx->strtab, fname, &slen);
                 emit_str_val(code, foff, slen);
                 emit_call(code, RT_VAL_FIELD);
+                emit_local_set(code, res_local);
+                /* if result is null AND fname is a known method, use a
+                   bare TAG_FUNC value; otherwise return the result as-is. */
+                int fn_idx = -1;
+                if (ctx->methods) {
+                    for (int k = 0; k < ctx->methods->count; k++) {
+                        if (strcmp(ctx->methods->items[k].method_name, fname) == 0) {
+                            fn_idx = ctx->methods->items[k].fn_idx;
+                            break;
+                        }
+                    }
+                }
+                if (fn_idx >= 0) {
+                    emit_local_get(code, res_local);
+                    emit_call(code, RT_VAL_TAG);
+                    emit_i32(code, TAG_NULL);
+                    buf_byte(code, OP_I32_EQ);
+                    buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_I32);
+                    emit_val_new(code, TAG_FUNC, NUM_RT_FUNCS + fn_idx);
+                    buf_byte(code, OP_ELSE);
+                    emit_local_get(code, res_local);
+                    buf_byte(code, OP_END);
+                } else {
+                    emit_local_get(code, res_local);
+                }
             }
         }
         break;
@@ -4896,7 +5542,10 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
             buf_byte(code, OP_END); /* loop */
             buf_byte(code, OP_END); /* block */
         } else {
-            /* Array-based for loop */
+            /* Array-based for loop. If the iter is a string at runtime
+               we lower it to an array of char strings up front so the
+               body sees one code point per iteration; arrays / tuples
+               / maps pass through unchanged. */
             int elem_idx = locals_ensure(locals, var_name);
             int arr_idx = locals_add(locals, "__for_arr");
             int len_idx = locals_add(locals, "__for_len");
@@ -4904,6 +5553,16 @@ static void compile_stmt(Node *node, WasmBuf *code, LocalMap *locals, CompilerCt
 
             compile_expr(node->for_loop.iter, code, locals, ctx);
             emit_local_set(code, arr_idx);
+            /* if type(arr) == "str": arr = arr.chars() */
+            emit_local_get(code, arr_idx);
+            emit_call(code, RT_VAL_TAG);
+            emit_i32(code, TAG_STRING);
+            buf_byte(code, OP_I32_EQ);
+            buf_byte(code, OP_IF); buf_byte(code, WASM_TYPE_VOID);
+            emit_local_get(code, arr_idx);
+            emit_call(code, RT_STR_CHARS);
+            emit_local_set(code, arr_idx);
+            buf_byte(code, OP_END);
             emit_local_get(code, arr_idx);
             emit_call(code, RT_ARR_LEN);
             emit_local_set(code, len_idx);
@@ -11324,10 +11983,28 @@ static int collect_functions(Node *program, FuncInfo *out, int max,
     if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
     int count = 0;
     NodeList *stmts = &program->program.stmts;
+    /* Pre-scan top-level fn decls to seed the overload tracker. */
+    g_wasm_ol_count = 0;
+    for (int i = 0; i < stmts->len; i++) {
+        Node *s = stmts->items[i];
+        if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name) {
+            wasm_ol_record(s->fn_decl.name, s->fn_decl.params.len);
+        }
+    }
     for (int i = 0; i < stmts->len && count < max; i++) {
         Node *s = stmts->items[i];
         if (s && VAL_TAG(s) == NODE_FN_DECL && s->fn_decl.name) {
-            funcs_add(funcs, s->fn_decl.name);
+            const char *fname = s->fn_decl.name;
+            char mangled[256];
+            if (wasm_ol_is_overloaded(fname)) {
+                /* Each variant gets its own mangled slot so they don't
+                   collide in FuncMap. The bare name is left registered
+                   only via the dispatcher synthesised at module init. */
+                snprintf(mangled, sizeof(mangled), "%s_a%d",
+                         fname, s->fn_decl.params.len);
+                fname = mangled;
+            }
+            funcs_add(funcs, fname);
             out[count].node = s;
             out[count].n_params = s->fn_decl.params.len;
             count++;
@@ -12243,6 +12920,66 @@ static Node *wasm_build_stdlib_module(const char *name) {
         return mk_map_lit_entries(ents, 2);
     }
 
+    if (strcmp(name, "collections") == 0) {
+        /* Deque/Stack/Set constructors. The interp keeps a real
+           ring-buffer for Deque and a hash table for Set; here we
+           lower each to a tagged map `{__deque/__stack/__set: <items>}`
+           and let the per-method handlers below dispatch by the marker.
+           This avoids dragging the full container runtime into the
+           wasm output. The actual `collections.X(...)` call sites are
+           pre-lowered to inline map literals by wasm_pre_lower_collections
+           before this prelude is consulted, so the lambdas below only
+           serve as a binding target for stray references. */
+        const char *one[] = {"items"};
+        const char *none[] = {NULL};
+        (void)none;
+
+        /* Deque(items=null) -> {__deque: items ?? []} */
+        Node *deque_items = mk_ident("items");
+        Node *deque_default = node_new(NODE_LIT_ARRAY, span_zero());
+        deque_default->lit_array.elems = nodelist_new();
+        Node *deque_coal = node_new(NODE_BINOP, span_zero());
+        memcpy(deque_coal->binop.op, "??", 3);
+        deque_coal->binop.left = deque_items;
+        deque_coal->binop.right = deque_default;
+        MapEntry deque_ents[] = { {"__deque", deque_coal} };
+        Node *deque_body = mk_map_lit_entries(deque_ents, 1);
+        Node *deque_lambda = mk_lambda(1, one, deque_body);
+
+        /* Stack(items=null) -> {__stack: items ?? []} */
+        Node *stack_items = mk_ident("items");
+        Node *stack_default = node_new(NODE_LIT_ARRAY, span_zero());
+        stack_default->lit_array.elems = nodelist_new();
+        Node *stack_coal = node_new(NODE_BINOP, span_zero());
+        memcpy(stack_coal->binop.op, "??", 3);
+        stack_coal->binop.left = stack_items;
+        stack_coal->binop.right = stack_default;
+        MapEntry stack_ents[] = { {"__stack", stack_coal} };
+        Node *stack_body = mk_map_lit_entries(stack_ents, 1);
+        Node *stack_lambda = mk_lambda(1, one, stack_body);
+
+        /* Set(items=null) -> {__set: items ?? []}. The conformance suite
+           doesn't exercise Set, but include it so any program that
+           imports collections doesn't trip on the missing binding. */
+        Node *set_items = mk_ident("items");
+        Node *set_default = node_new(NODE_LIT_ARRAY, span_zero());
+        set_default->lit_array.elems = nodelist_new();
+        Node *set_coal = node_new(NODE_BINOP, span_zero());
+        memcpy(set_coal->binop.op, "??", 3);
+        set_coal->binop.left = set_items;
+        set_coal->binop.right = set_default;
+        MapEntry set_ents[] = { {"__set", set_coal} };
+        Node *set_body = mk_map_lit_entries(set_ents, 1);
+        Node *set_lambda = mk_lambda(1, one, set_body);
+
+        MapEntry ents[] = {
+            {"Deque", deque_lambda},
+            {"Stack", stack_lambda},
+            {"Set",   set_lambda},
+        };
+        return mk_map_lit_entries(ents, 3);
+    }
+
     /* Unknown stdlib module -> empty namespace. */
     return mk_map_lit_entries(NULL, 0);
 }
@@ -12258,13 +12995,11 @@ static Node *wasm_build_stdlib_module(const char *name) {
 static Node *wasm_build_json_helpers(void) {
     /* Build the source as xs code and parse it. Easier than hand-
        crafting the AST, and the parser is robust. */
-    /* xs source for JSON helpers. The wasm AOT path makes `type(v)`
-       return the numeric tag string (e.g. "2" for int), not the
-       human name, so we compare against tag numbers directly:
-         TAG_NULL=0, TAG_BOOL=1, TAG_INT=2, TAG_FLOAT=3, TAG_STRING=4,
-         TAG_ARRAY=5, TAG_MAP=6.
-       Literal `{` is escaped as `\{` to avoid being treated as the
-       start of a `${...}` interpolation expression. */
+    /* xs source for JSON helpers. The wasm `type(v)` builtin returns
+       the human name string ("int" / "float" / "str" / "array" / "map"
+       / etc) matching the interp / vm behaviour. Literal `{` is
+       escaped as `\{` to avoid being treated as the start of a
+       `${...}` interpolation expression. */
     static const char *json_src =
         "fn __xs_json_repr_str(s) {\n"
         "    var out = \"\\\"\"\n"
@@ -12285,9 +13020,9 @@ static Node *wasm_build_json_helpers(void) {
         "    if v == true { return \"true\" }\n"
         "    if v == false { return \"false\" }\n"
         "    let t = type(v)\n"
-        "    if t == \"2\" or t == \"3\" { return str(v) }\n"
-        "    if t == \"4\" { return __xs_json_repr_str(v) }\n"
-        "    if t == \"5\" {\n"
+        "    if t == \"int\" or t == \"float\" { return str(v) }\n"
+        "    if t == \"str\" { return __xs_json_repr_str(v) }\n"
+        "    if t == \"array\" {\n"
         "        var out = \"[\"\n"
         "        var i = 0\n"
         "        let n = v.len()\n"
@@ -12298,7 +13033,7 @@ static Node *wasm_build_json_helpers(void) {
         "        }\n"
         "        return out + \"]\"\n"
         "    }\n"
-        "    if t == \"6\" {\n"
+        "    if t == \"map\" {\n"
         "        var out = \"\\{\"\n"
         "        let ks = v.keys()\n"
         "        var i = 0\n"
@@ -13134,8 +13869,10 @@ static Node *wasm_build_handler_fn(EffectArm *arm, const char *fn_name) {
    Emits a trailing block whose value matches the handle semantics, plus
    a list of new top-level fn-decls (the per-arm handler functions) which
    the caller must splice into the program. Returns the rewritten
-   expression. */
-static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
+   expression. eff_name_hint is only used as a fallback when an arm
+   omits the effect prefix; each arm picks its own effect name otherwise
+   so multi-effect handle blocks route correctly. */
+static Node *wasm_build_handle_block(Node *handle, const char *eff_name_hint,
                                      Node ***out_extra_fns, int *out_n_extra) {
     *out_extra_fns = NULL;
     *out_n_extra = 0;
@@ -13144,22 +13881,28 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
     int narms = arms->len;
 
     /* For each arm: build a handler fn, register the global, and remember
-       its name so we can install it in the wrapper block. */
+       its name so we can install it in the wrapper block. Each arm has
+       its own (effect, op) pair so multi-arm `handle run() { Log.say(m)
+       => ...; Metric.count(n) => ... }` routes to distinct globals. */
     Node **extras = xs_malloc((size_t)narms * sizeof(Node *));
     char **handler_names = xs_malloc((size_t)narms * sizeof(char *));
     char **op_names      = xs_malloc((size_t)narms * sizeof(char *));
+    char **arm_effs      = xs_malloc((size_t)narms * sizeof(char *));
     for (int i = 0; i < narms; i++) {
         EffectArm *arm = &arms->items[i];
+        const char *arm_eff = arm->effect_name ? arm->effect_name : eff_name_hint;
         char fn_name[256];
         snprintf(fn_name, sizeof(fn_name), "__h_%s_%s_%d",
-                 eff_name, arm->op_name ? arm->op_name : "op",
+                 arm_eff ? arm_eff : "Eff",
+                 arm->op_name ? arm->op_name : "op",
                  g_eff_handler_seq++);
         Node *fn = wasm_build_handler_fn(arm, fn_name);
         extras[i] = fn;
         handler_names[i] = xs_strdup(fn_name);
         op_names[i] = xs_strdup(arm->op_name ? arm->op_name : "op");
+        arm_effs[i] = xs_strdup(arm_eff ? arm_eff : "Eff");
         /* Make sure the global var exists for this (eff, op). */
-        wasm_eff_global_name(eff_name, op_names[i]);
+        wasm_eff_global_name(arm_effs[i], op_names[i]);
     }
     *out_extra_fns = extras;
     *out_n_extra = narms;
@@ -13171,7 +13914,7 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
             __h_<E>_<op> = <handler_fn_name>
             ...
             let __r_N = try { X } catch __e_N {
-                if type(__e_N) == "6" and __e_N["__eff_abort"] == true {
+                if type(__e_N) == "map" and __e_N["__eff_abort"] == true {
                     __e_N["value"]
                 } else { throw __e_N }
             }
@@ -13183,16 +13926,16 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
     int seq = g_eff_handler_seq++;
     NodeList stmts = nodelist_new();
 
-    /* Save previous handler ptrs. */
+    /* Save previous handler ptrs (per arm, per (eff, op)). */
     char prev_names[16][128];
     for (int i = 0; i < narms && i < 16; i++) {
-        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        const char *gname = wasm_eff_global_name(arm_effs[i], op_names[i]);
         snprintf(prev_names[i], sizeof(prev_names[i]), "__h_prev_%d_%d", seq, i);
         nodelist_push(&stmts, mk_let(prev_names[i], mk_ident(gname), 0));
     }
     /* Install the new handlers. */
     for (int i = 0; i < narms && i < 16; i++) {
-        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        const char *gname = wasm_eff_global_name(arm_effs[i], op_names[i]);
         Node *a = node_new(NODE_ASSIGN, span_zero());
         memcpy(a->assign.op, "=", 2);
         a->assign.target = mk_ident(gname);
@@ -13204,7 +13947,7 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
     char e_var[64];  snprintf(e_var, sizeof(e_var), "__e_%d", seq);
     char r_var[64];  snprintf(r_var, sizeof(r_var), "__r_%d", seq);
 
-    /* if-cond: type(__e_N) == "6" and __e_N["__eff_abort"] == true */
+    /* if-cond: type(__e_N) == "map" and __e_N["__eff_abort"] == true */
     Node *type_call = node_new(NODE_CALL, span_zero());
     type_call->call.callee = mk_ident("type");
     type_call->call.args = nodelist_new();
@@ -13214,7 +13957,7 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
     Node *type_eq = node_new(NODE_BINOP, span_zero());
     memcpy(type_eq->binop.op, "==", 3);
     type_eq->binop.left = type_call;
-    type_eq->binop.right = mk_str_lit("6");
+    type_eq->binop.right = mk_str_lit("map");
 
     Node *idx = node_new(NODE_INDEX, span_zero());
     idx->index.obj = mk_ident(e_var);
@@ -13277,9 +14020,9 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
 
     nodelist_push(&stmts, mk_let(r_var, try_node, 0));
 
-    /* Restore previous handlers. */
+    /* Restore previous handlers (per arm, per (eff, op)). */
     for (int i = 0; i < narms && i < 16; i++) {
-        const char *gname = wasm_eff_global_name(eff_name, op_names[i]);
+        const char *gname = wasm_eff_global_name(arm_effs[i], op_names[i]);
         Node *a = node_new(NODE_ASSIGN, span_zero());
         memcpy(a->assign.op, "=", 2);
         a->assign.target = mk_ident(gname);
@@ -13293,8 +14036,9 @@ static Node *wasm_build_handle_block(Node *handle, const char *eff_name,
     for (int i = 0; i < narms; i++) {
         free(handler_names[i]);
         free(op_names[i]);
+        free(arm_effs[i]);
     }
-    free(handler_names); free(op_names);
+    free(handler_names); free(op_names); free(arm_effs);
     return outer;
 }
 
@@ -13852,7 +14596,11 @@ static int wasm_program_has_generators(Node *n) {
 static Node *wasm_build_generator_helpers(void) {
     static const char *gen_src =
         "fn __gen_iter(g) {\n"
-        "    if type(g) == \"6\" { return g[\"__items\"] }\n"
+        "    if type(g) == \"map\" {\n"
+        "        let items = g[\"__items\"]\n"
+        "        if items != null { return items }\n"
+        "    }\n"
+        "    if type(g) == \"str\" { return g.chars() }\n"
         "    return g\n"
         "}\n"
         "fn __gen_next(g) {\n"
@@ -13882,14 +14630,24 @@ static Node *wasm_build_generator_helpers(void) {
     return prog;
 }
 
-/* Wrap every for-in's iter expression with __gen_iter(...). The helper
-   returns the original value untouched if it isn't a generator map, so
-   the rewrite is safe to apply unconditionally. */
+/* Wrap every for-in's iter expression with __gen_iter(...) so generator
+   values (maps with __items) and strings get unwrapped into arrays the
+   array-based for-loop body can walk. Range literals are left alone so
+   the compile_stmt range fast path still recognises them. Wrapping a
+   range in a CALL would force the slower array-based fallback, which
+   reads dp+4 expecting a length but the range payload is [start, end,
+   inclusive] and offset 4 is the high half of `start`. */
+static int wasm_iter_should_wrap(Node *n) {
+    if (!n) return 0;
+    if (VAL_TAG(n) == NODE_RANGE) return 0;
+    return 1;
+}
+
 static void wasm_wrap_for_iters(Node *n) {
     if (!n) return;
     switch (VAL_TAG(n)) {
     case NODE_FOR:
-        if (n->for_loop.iter) {
+        if (n->for_loop.iter && wasm_iter_should_wrap(n->for_loop.iter)) {
             Node *call = node_new(NODE_CALL, span_zero());
             call->call.callee = mk_ident("__gen_iter");
             call->call.args = nodelist_new();
@@ -13942,6 +14700,167 @@ static void wasm_wrap_for_iters(Node *n) {
    NODE_USE / NODE_IMPORT / NODE_EFFECT_DECL into the equivalent
    regular-statement sequences. The output is still a NODE_PROGRAM. */
 static int g_wasm_json_helpers_added = 0;
+
+/* Pre-lower `collections.Deque(items)`, `collections.Stack(items)`,
+   `collections.Set(items)` into inline map literals tagged with a
+   marker field. Done before the stdlib lambdas are built so the call
+   never goes through indirect dispatch (which would require an exact
+   arity match between caller and lambda). The .len() / .front() /
+   .back() / .peek() handlers further down recognise the marker and
+   read the wrapped items array. */
+static void wasm_pre_lower_collections(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_CALL: {
+        Node *callee = n->call.callee;
+        const char *marker = NULL;
+        if (callee && VAL_TAG(callee) == NODE_FIELD &&
+            callee->field.obj && VAL_TAG(callee->field.obj) == NODE_IDENT &&
+            callee->field.obj->ident.name &&
+            strcmp(callee->field.obj->ident.name, "collections") == 0 &&
+            callee->field.name) {
+            if (strcmp(callee->field.name, "Deque") == 0)
+                marker = "__deque";
+            else if (strcmp(callee->field.name, "Stack") == 0)
+                marker = "__stack";
+            else if (strcmp(callee->field.name, "Set") == 0)
+                marker = "__set";
+        }
+        if (marker) {
+            /* Build the map literal { marker: arg0 ?? [] } */
+            Node *items_val;
+            if (n->call.args.len >= 1) {
+                items_val = n->call.args.items[0];
+            } else {
+                items_val = node_new(NODE_LIT_ARRAY, span_zero());
+                items_val->lit_array.elems = nodelist_new();
+            }
+            /* Recurse into items first so nested collections.X also
+               get unwrapped. */
+            wasm_pre_lower_collections(items_val);
+
+            Node *map = node_new(NODE_LIT_MAP, span_zero());
+            map->lit_map.keys = nodelist_new();
+            map->lit_map.vals = nodelist_new();
+            nodelist_push(&map->lit_map.keys, mk_str_lit(marker));
+            nodelist_push(&map->lit_map.vals, items_val);
+            /* Replace n in place by swapping payloads. */
+            Node tmp = *map;
+            *map = *n;
+            *n = tmp;
+            /* Detach the args list so node_free doesn't double-free
+               items_val. */
+            map->call.args.items = NULL;
+            map->call.args.len = 0;
+            map->call.args.cap = 0;
+            node_free(map);
+            return;
+        }
+        /* Default: recurse. */
+        wasm_pre_lower_collections(n->call.callee);
+        for (int i = 0; i < n->call.args.len; i++)
+            wasm_pre_lower_collections(n->call.args.items[i]);
+        return;
+    }
+    case NODE_METHOD_CALL: {
+        /* `collections.Deque(args)` parses as a NODE_METHOD_CALL with
+           obj=collections, method=Deque. Handle it the same way as
+           the CALL form. */
+        const char *marker = NULL;
+        Node *obj = n->method_call.obj;
+        if (obj && VAL_TAG(obj) == NODE_IDENT && obj->ident.name &&
+            strcmp(obj->ident.name, "collections") == 0 &&
+            n->method_call.method) {
+            if (strcmp(n->method_call.method, "Deque") == 0) marker = "__deque";
+            else if (strcmp(n->method_call.method, "Stack") == 0) marker = "__stack";
+            else if (strcmp(n->method_call.method, "Set") == 0)   marker = "__set";
+        }
+        if (marker) {
+            Node *items_val;
+            if (n->method_call.args.len >= 1) {
+                items_val = n->method_call.args.items[0];
+            } else {
+                items_val = node_new(NODE_LIT_ARRAY, span_zero());
+                items_val->lit_array.elems = nodelist_new();
+            }
+            wasm_pre_lower_collections(items_val);
+
+            Node *map = node_new(NODE_LIT_MAP, span_zero());
+            map->lit_map.keys = nodelist_new();
+            map->lit_map.vals = nodelist_new();
+            nodelist_push(&map->lit_map.keys, mk_str_lit(marker));
+            nodelist_push(&map->lit_map.vals, items_val);
+            Node tmp = *map;
+            *map = *n;
+            *n = tmp;
+            /* Detach the args list so node_free doesn't double-free
+               items_val. */
+            map->method_call.args.items = NULL;
+            map->method_call.args.len = 0;
+            map->method_call.args.cap = 0;
+            node_free(map);
+            return;
+        }
+        wasm_pre_lower_collections(n->method_call.obj);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            wasm_pre_lower_collections(n->method_call.args.items[i]);
+        return;
+    }
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            wasm_pre_lower_collections(n->program.stmts.items[i]);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            wasm_pre_lower_collections(n->block.stmts.items[i]);
+        wasm_pre_lower_collections(n->block.expr);
+        return;
+    case NODE_FN_DECL: wasm_pre_lower_collections(n->fn_decl.body); return;
+    case NODE_LAMBDA:  wasm_pre_lower_collections(n->lambda.body); return;
+    case NODE_IF:
+        wasm_pre_lower_collections(n->if_expr.cond);
+        wasm_pre_lower_collections(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            wasm_pre_lower_collections(n->if_expr.elif_conds.items[i]);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            wasm_pre_lower_collections(n->if_expr.elif_thens.items[i]);
+        wasm_pre_lower_collections(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE: wasm_pre_lower_collections(n->while_loop.cond); wasm_pre_lower_collections(n->while_loop.body); return;
+    case NODE_FOR:   wasm_pre_lower_collections(n->for_loop.iter); wasm_pre_lower_collections(n->for_loop.body); return;
+    case NODE_LOOP:  wasm_pre_lower_collections(n->loop.body); return;
+    case NODE_LET: case NODE_VAR: wasm_pre_lower_collections(n->let.value); return;
+    case NODE_CONST: wasm_pre_lower_collections(n->const_.value); return;
+    case NODE_EXPR_STMT: wasm_pre_lower_collections(n->expr_stmt.expr); return;
+    case NODE_RETURN: wasm_pre_lower_collections(n->ret.value); return;
+    case NODE_ASSIGN: wasm_pre_lower_collections(n->assign.target); wasm_pre_lower_collections(n->assign.value); return;
+    case NODE_BINOP: wasm_pre_lower_collections(n->binop.left); wasm_pre_lower_collections(n->binop.right); return;
+    case NODE_UNARY: wasm_pre_lower_collections(n->unary.expr); return;
+    case NODE_INDEX: wasm_pre_lower_collections(n->index.obj); wasm_pre_lower_collections(n->index.index); return;
+    case NODE_FIELD: wasm_pre_lower_collections(n->field.obj); return;
+    case NODE_TRY:
+        wasm_pre_lower_collections(n->try_.body);
+        wasm_pre_lower_collections(n->try_.finally_block);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            wasm_pre_lower_collections(n->try_.catch_arms.items[i].body);
+        return;
+    case NODE_THROW: wasm_pre_lower_collections(n->throw_.value); return;
+    case NODE_MATCH:
+        wasm_pre_lower_collections(n->match.subject);
+        for (int i = 0; i < n->match.arms.len; i++)
+            wasm_pre_lower_collections(n->match.arms.items[i].body);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            wasm_pre_lower_collections(n->lit_array.elems.items[i]);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            wasm_pre_lower_collections(n->lit_map.vals.items[i]);
+        return;
+    default: return;
+    }
+}
 
 static void wasm_lower_program(Node *program, const char *src_filename) {
     if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
@@ -14278,8 +15197,18 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
     /* AST lowering pass: rewrite use/import/await/spawn/nursery into
        constructs the back end natively understands. After this returns
        the program is free of those node types. */
+    wasm_pre_lower_collections(program);
     wasm_lower_program(program, filename);
     purity_analyze(program);
+
+    /* Walk top-level decorators once so __trigger_registry_* call sites
+       can emit the static lookup table inline. */
+    wasm_build_trigger_registry(program);
+
+    /* Index top-level `let x = fn(...) ...` so __pure?(x) can find the
+       backing lambda and read the purity analyzer's verdict. Runs after
+       purity_analyze so the lambda nodes already carry their stamps. */
+    wasm_build_pure_binds(program);
 
     const char *unsupported = find_unsupported_for_wasm(program);
     if (unsupported) {

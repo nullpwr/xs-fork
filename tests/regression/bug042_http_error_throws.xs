@@ -1,4 +1,4 @@
--- skip-emit: c, js, wasm (TODO: stdlib http module not lowered by --emit transpilers)
+-- skip-emit: c, wasm (TODO: stdlib http needs POSIX sockets + BearSSL bundled into the emit; ~300KB inline blob, deferred)
 -- bug042: http.get on a failed connect / TLS handshake / URL parse
 -- silently returned null (or worse, an object with null fields when
 -- the bytes-coming-back-after-half-failed-handshake parser produced

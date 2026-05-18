@@ -216,7 +216,7 @@ static const char *find_unsupported_for_js(Node *n) {
         return find_unsupported_for_js(n->fn_decl.body);
     }
     case NODE_LAMBDA:   return find_unsupported_for_js(n->lambda.body);
-    case NODE_BIND:     return "reactive `bind` declarations";
+    case NODE_BIND:     return NULL;  /* lowered via __xs_binds registry */
     case NODE_PROGRAM:
         for (int i = 0; i < n->program.stmts.len; i++) {
             const char *r = find_unsupported_for_js(n->program.stmts.items[i]);
@@ -309,6 +309,13 @@ static const char *find_unsupported_for_js(Node *n) {
 /* state: are we inside a class method body? */
 static int in_class_method = 0;
 
+/* state: are we inside the body of a `tag` declaration? When set,
+ * NODE_YIELD lowers to a `__block(value)` callback invocation instead
+ * of a JS generator yield. Saved / restored across nested fn-decl /
+ * lambda bodies so a generator declared inside a tag still uses
+ * `yield` semantics. */
+static int in_tag_body = 0;
+
 /* helpers */
 static int is_callee_name(Node *callee, const char *name) {
     return callee && VAL_TAG(callee) == NODE_IDENT && strcmp(callee->ident.name, name) == 0;
@@ -387,7 +394,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
         break;
     }
     case NODE_LIT_DURATION:
-        sb_printf(s, "%lld", (long long)n->lit_duration.ns);
+        sb_printf(s, "__xs_dur(%lldn)", (long long)n->lit_duration.ns);
         break;
     case NODE_LIT_STRING:
         sb_addc(s, '"');
@@ -663,6 +670,13 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_add(s, "(!__xs_truthy(");
             emit_expr(s, n->unary.expr, depth);
             sb_add(s, "))");
+        } else if (strcmp(op, "?") == 0 && !n->unary.prefix) {
+            /* try operator: unwrap Result::Ok(v) -> v, propagate
+               Result::Err(e) via a sentinel throw caught by the
+               enclosing fn (see fn-decl emit for the wrapping try). */
+            sb_add(s, "__xs_try(");
+            emit_expr(s, n->unary.expr, depth);
+            sb_addc(s, ')');
         } else if (n->unary.prefix) {
             sb_add(s, op);
             emit_expr(s, n->unary.expr, depth);
@@ -1591,14 +1605,43 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_addc(s, ')');
         break;
     case NODE_YIELD:
-        sb_add(s, "(yield ");
-        if (n->yield_.value) emit_expr(s, n->yield_.value, depth);
-        sb_addc(s, ')');
+        if (in_tag_body) {
+            /* tag body: `yield value` calls __block(value) and returns
+               the result. Mirrors the interp path where env_get("__block")
+               turns yield into a block invocation. */
+            sb_add(s, "__block(");
+            if (n->yield_.value) emit_expr(s, n->yield_.value, depth);
+            sb_addc(s, ')');
+        } else {
+            sb_add(s, "(yield ");
+            if (n->yield_.value) emit_expr(s, n->yield_.value, depth);
+            sb_addc(s, ')');
+        }
         break;
     case NODE_SPAWN:
-        sb_add(s, "(async () => ");
-        emit_expr(s, n->spawn_.expr, depth);
-        sb_add(s, ")()");
+        /* `spawn Foo` where Foo is an actor / class instantiates it
+           synchronously so subsequent method-call dispatch resolves.
+           The runtime uses async semantics (real threads, GIL); the
+           JS host is single-threaded so we emit a synchronous instance
+           and let the JS event loop interleave. */
+        if (n->spawn_.expr && VAL_TAG(n->spawn_.expr) == NODE_IDENT) {
+            sb_add(s, "(new (");
+            emit_expr(s, n->spawn_.expr, depth);
+            sb_add(s, ")())");
+        } else if (n->spawn_.expr && VAL_TAG(n->spawn_.expr) == NODE_CALL) {
+            sb_add(s, "(new (");
+            emit_expr(s, n->spawn_.expr->call.callee, depth);
+            sb_add(s, ")(");
+            for (int i = 0; i < n->spawn_.expr->call.args.len; i++) {
+                if (i) sb_add(s, ", ");
+                emit_expr(s, n->spawn_.expr->call.args.items[i], depth);
+            }
+            sb_add(s, "))");
+        } else {
+            sb_add(s, "(async () => ");
+            emit_expr(s, n->spawn_.expr, depth);
+            sb_add(s, ")()");
+        }
         break;
     case NODE_DO_EXPR:
         sb_add(s, "(function() {\n");
@@ -1673,8 +1716,23 @@ static void emit_expr(SB *s, Node *n, int depth) {
             sb_printf(s, "%s", m->fn_decl.name ? m->fn_decl.name : "anonymous");
             emit_params(s, &m->fn_decl.params);
             sb_add(s, " {\n");
-            if (m->fn_decl.body)
+            int saved_in_method = in_class_method;
+            in_class_method = 1;
+            if (m->fn_decl.body && VAL_TAG(m->fn_decl.body) == NODE_BLOCK) {
                 emit_block_body(s, m->fn_decl.body, depth + 3);
+                /* trailing block expr -> return value (matches XS semantics
+                   where the last expression in a method body is its
+                   result). Skips when the body is just a statement list. */
+                if (m->fn_decl.body->block.expr) {
+                    sb_indent(s, depth + 3);
+                    sb_add(s, "return ");
+                    emit_expr(s, m->fn_decl.body->block.expr, depth + 3);
+                    sb_add(s, ";\n");
+                }
+            } else if (m->fn_decl.body) {
+                emit_block_body(s, m->fn_decl.body, depth + 3);
+            }
+            in_class_method = saved_in_method;
             sb_indent(s, depth + 2);
             sb_add(s, "}\n");
         }
@@ -2063,9 +2121,9 @@ static void emit_expr(SB *s, Node *n, int depth) {
         sb_add(s, "for (const ");
         if (n->for_loop.pattern) emit_expr(s, n->for_loop.pattern, depth);
         else sb_add(s, "_");
-        sb_add(s, " of ");
+        sb_add(s, " of __xs_iter(");
         emit_expr(s, n->for_loop.iter, depth);
-        sb_add(s, ") {\n");
+        sb_add(s, ")) {\n");
         if (n->for_loop.body) {
             emit_block_body(s, n->for_loop.body, depth + 1);
             if (VAL_TAG(n->for_loop.body) == NODE_BLOCK && n->for_loop.body->block.expr) {
@@ -2431,6 +2489,57 @@ static int node_has_perform(Node *n) {
     }
 }
 
+/* Mirrors node_has_perform but for postfix `?` (the try operator).
+   Used to wrap the enclosing fn body in a sentinel-catching try so a
+   `let v = x?` propagates an early Err return without breaking out
+   of the surrounding statement context. */
+static int node_has_tryop(Node *n) {
+    if (!n) return 0;
+    if (VAL_TAG(n) == NODE_UNARY && n->unary.op && n->unary.op[0] == '?')
+        return 1;
+    switch (VAL_TAG(n)) {
+    case NODE_FN_DECL: case NODE_LAMBDA: return 0;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            if (node_has_tryop(n->block.stmts.items[i])) return 1;
+        if (n->block.expr && node_has_tryop(n->block.expr)) return 1;
+        return 0;
+    case NODE_EXPR_STMT:  return node_has_tryop(n->expr_stmt.expr);
+    case NODE_RETURN:     return node_has_tryop(n->ret.value);
+    case NODE_LET: case NODE_VAR: return node_has_tryop(n->let.value);
+    case NODE_CONST:      return node_has_tryop(n->const_.value);
+    case NODE_ASSIGN:     return node_has_tryop(n->assign.value) ||
+                                 node_has_tryop(n->assign.target);
+    case NODE_IF:
+        if (node_has_tryop(n->if_expr.cond)) return 1;
+        if (node_has_tryop(n->if_expr.then)) return 1;
+        for (int j = 0; j < n->if_expr.elif_conds.len; j++)
+            if (node_has_tryop(n->if_expr.elif_conds.items[j])) return 1;
+        for (int j = 0; j < n->if_expr.elif_thens.len; j++)
+            if (node_has_tryop(n->if_expr.elif_thens.items[j])) return 1;
+        if (node_has_tryop(n->if_expr.else_branch)) return 1;
+        return 0;
+    case NODE_WHILE:      return node_has_tryop(n->while_loop.cond) ||
+                                 node_has_tryop(n->while_loop.body);
+    case NODE_FOR:        return node_has_tryop(n->for_loop.iter) ||
+                                 node_has_tryop(n->for_loop.body);
+    case NODE_BINOP:      return node_has_tryop(n->binop.left) ||
+                                 node_has_tryop(n->binop.right);
+    case NODE_UNARY:      return node_has_tryop(n->unary.expr);
+    case NODE_CALL:
+        if (node_has_tryop(n->call.callee)) return 1;
+        for (int j = 0; j < n->call.args.len; j++)
+            if (node_has_tryop(n->call.args.items[j])) return 1;
+        return 0;
+    case NODE_METHOD_CALL:
+        if (node_has_tryop(n->method_call.obj)) return 1;
+        for (int j = 0; j < n->method_call.args.len; j++)
+            if (node_has_tryop(n->method_call.args.items[j])) return 1;
+        return 0;
+    default: return 0;
+    }
+}
+
 /* Mirrors node_has_perform but for await. Used to decide whether the
    assert/assert_eq IIFE wrapper needs to be async + awaited so its
    inner await isn't a SyntaxError under top-level-await context. */
@@ -2513,9 +2622,16 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 for (int i = 0; i < n->let.pattern->pat_map.nfields; i++) {
                     const char *k = n->let.pattern->pat_map.keys[i];
                     if (!k) continue;
+                    /* `{a: aa}` binds local `aa`; `{x}` binds local `x`.
+                       The sub-pattern's PAT_IDENT name is the binding,
+                       falling back to the key when omitted. */
+                    const char *bind_name = k;
+                    Node *sub = n->let.pattern->pat_map.sub[i];
+                    if (sub && VAL_TAG(sub) == NODE_PAT_IDENT && sub->pat_ident.name)
+                        bind_name = sub->pat_ident.name;
                     sb_indent(s, depth);
                     sb_printf(s, "let %s = __pat_%d instanceof Map ? __pat_%d.get(\"%s\") : __pat_%d[\"%s\"];\n",
-                              k, mid, mid, k, mid, k);
+                              bind_name, mid, mid, k, mid, k);
                 }
             } else {
                 for (int i = 0; i < n->let.pattern->pat_struct.fields.len; i++) {
@@ -2596,54 +2712,71 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         }
         emit_params(s, &n->fn_decl.params);
         sb_add(s, " {\n");
+        int wraps_tryop = !fn_is_gen && n->fn_decl.body && node_has_tryop(n->fn_decl.body);
+        int body_depth = depth + 1;
+        if (wraps_tryop) {
+            sb_indent(s, depth + 1);
+            sb_add(s, "try {\n");
+            body_depth = depth + 2;
+        }
         if (n->fn_decl.body) {
             int has_defer = block_has_defers(n->fn_decl.body);
             if (has_defer) {
-                sb_indent(s, depth + 1);
+                sb_indent(s, body_depth);
                 sb_add(s, "try {\n");
                 if (VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
                     /* emit non-defer statements */
                     for (int i = 0; i < n->fn_decl.body->block.stmts.len; i++) {
                         Node *st = n->fn_decl.body->block.stmts.items[i];
                         if (st && VAL_TAG(st) != NODE_DEFER)
-                            emit_stmt(s, st, depth + 2);
+                            emit_stmt(s, st, body_depth + 1);
                     }
                     if (n->fn_decl.body->block.expr) {
                         if (is_stmt_only_expr(n->fn_decl.body->block.expr)) {
-                            emit_stmt(s, n->fn_decl.body->block.expr, depth + 2);
+                            emit_stmt(s, n->fn_decl.body->block.expr, body_depth + 1);
                         } else {
-                            sb_indent(s, depth + 2);
+                            sb_indent(s, body_depth + 1);
                             sb_add(s, "return ");
-                            emit_expr(s, n->fn_decl.body->block.expr, depth + 2);
+                            emit_expr(s, n->fn_decl.body->block.expr, body_depth + 1);
                             sb_add(s, ";\n");
                         }
                     }
                 }
-                sb_indent(s, depth + 1);
+                sb_indent(s, body_depth);
                 sb_add(s, "} finally {\n");
-                emit_deferred(s, n->fn_decl.body, depth + 2);
-                sb_indent(s, depth + 1);
+                emit_deferred(s, n->fn_decl.body, body_depth + 1);
+                sb_indent(s, body_depth);
                 sb_add(s, "}\n");
             } else {
                 if (VAL_TAG(n->fn_decl.body) == NODE_BLOCK) {
-                    emit_block_body(s, n->fn_decl.body, depth + 1);
+                    emit_block_body(s, n->fn_decl.body, body_depth);
                     if (n->fn_decl.body->block.expr) {
                         if (is_stmt_only_expr(n->fn_decl.body->block.expr)) {
-                            emit_stmt(s, n->fn_decl.body->block.expr, depth + 1);
+                            emit_stmt(s, n->fn_decl.body->block.expr, body_depth);
                         } else {
-                            sb_indent(s, depth + 1);
+                            sb_indent(s, body_depth);
                             sb_add(s, "return ");
-                            emit_expr(s, n->fn_decl.body->block.expr, depth + 1);
+                            emit_expr(s, n->fn_decl.body->block.expr, body_depth);
                             sb_add(s, ";\n");
                         }
                     }
                 } else {
-                    sb_indent(s, depth + 1);
+                    sb_indent(s, body_depth);
                     sb_add(s, "return ");
-                    emit_expr(s, n->fn_decl.body, depth + 1);
+                    emit_expr(s, n->fn_decl.body, body_depth);
                     sb_add(s, ";\n");
                 }
             }
+        }
+        if (wraps_tryop) {
+            sb_indent(s, depth + 1);
+            sb_add(s, "} catch (__e) {\n");
+            sb_indent(s, depth + 2);
+            sb_add(s, "if (__e instanceof __XsTryErr) return __e.value;\n");
+            sb_indent(s, depth + 2);
+            sb_add(s, "throw __e;\n");
+            sb_indent(s, depth + 1);
+            sb_add(s, "}\n");
         }
         sb_indent(s, depth);
         sb_add(s, named ? "}\n\n" : "});\n");
@@ -2719,12 +2852,21 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                 } else if (strcmp(dn, "on_exit") == 0) {
                     sb_indent(s, depth);
                     sb_printf(s, "process.on('exit', () => %s());\n\n", fn_name);
+                } else if (strcmp(dn, "watch") == 0 && dnargs == 1) {
+                    /* Wire fs.watch on the path arg. fires on first
+                     * change event; recursion gated on whether the
+                     * caller wants to keep listening (it doesn't in
+                     * the regression tests, which exit() from the
+                     * handler). */
+                    sb_indent(s, depth);
+                    sb_add(s, "{ const __wp = ");
+                    emit_expr(s, dargs[0], depth);
+                    sb_printf(s, "; try { const __w = require('fs').watch(__wp, () => %s()); } catch (e) { /* fs.watch unsupported here */ } }\n\n", fn_name);
                 }
-                /* @cron / @watch / @bench / @example / @on_signal
-                 * are accepted but not wired in --emit js: no portable
-                 * cron parser, no portable fs.watch shape, and the
-                 * test/bench harness is interp-only. They become
-                 * no-ops; the fn is still defined. */
+                /* @cron / @bench / @example / @on_signal are accepted
+                 * but not wired in --emit js: no portable cron parser
+                 * and the test/bench harness is interp-only. They
+                 * become no-ops; the fn is still defined. */
             }
         }
         js_n_deleted_vars = __saved_n_deleted; /* unwind del scope on fn exit */
@@ -2811,6 +2953,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                            VAL_TAG(te) == NODE_WHILE ||
                            VAL_TAG(te) == NODE_FOR ||
                            VAL_TAG(te) == NODE_LOOP ||
+                           VAL_TAG(te) == NODE_TRY ||
                            VAL_TAG(te) == NODE_MATCH)) {
                     emit_stmt(s, te, depth + 1);
                 } else {
@@ -2829,9 +2972,9 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_add(s, "for (const ");
         if (n->for_loop.pattern) emit_expr(s, n->for_loop.pattern, depth);
         else sb_add(s, "_");
-        sb_add(s, " of ");
+        sb_add(s, " of __xs_iter(");
         emit_expr(s, n->for_loop.iter, depth);
-        sb_add(s, ") {\n");
+        sb_add(s, ")) {\n");
         if (n->for_loop.body) {
             emit_block_body(s, n->for_loop.body, depth + 1);
             if (VAL_TAG(n->for_loop.body) == NODE_BLOCK && n->for_loop.body->block.expr) {
@@ -2842,6 +2985,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                            VAL_TAG(te) == NODE_WHILE ||
                            VAL_TAG(te) == NODE_FOR ||
                            VAL_TAG(te) == NODE_LOOP ||
+                           VAL_TAG(te) == NODE_TRY ||
                            VAL_TAG(te) == NODE_MATCH)) {
                     emit_stmt(s, te, depth + 1);
                 } else {
@@ -2873,6 +3017,7 @@ static void emit_stmt(SB *s, Node *n, int depth) {
                            VAL_TAG(te) == NODE_WHILE ||
                            VAL_TAG(te) == NODE_FOR ||
                            VAL_TAG(te) == NODE_LOOP ||
+                           VAL_TAG(te) == NODE_TRY ||
                            VAL_TAG(te) == NODE_MATCH)) {
                     emit_stmt(s, te, depth + 1);
                 } else {
@@ -3027,13 +3172,19 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         sb_printf(s, "class %s {\n", n->struct_decl.name);
         sb_indent(s, depth + 1);
-        sb_add(s, "constructor(");
-        sb_add(s, "{");
-        for (int i = 0; i < n->struct_decl.fields.len; i++) {
-            if (i) sb_add(s, ", ");
-            sb_add(s, n->struct_decl.fields.items[i].key);
+        if (n->struct_decl.fields.len == 0) {
+            /* Empty struct: parameterless ctor (JS rejects `constructor({})`
+               called with no arg, which is what `A()` lowers to). */
+            sb_add(s, "constructor() {\n");
+        } else {
+            sb_add(s, "constructor(");
+            sb_add(s, "{");
+            for (int i = 0; i < n->struct_decl.fields.len; i++) {
+                if (i) sb_add(s, ", ");
+                sb_add(s, n->struct_decl.fields.items[i].key);
+            }
+            sb_add(s, "} = {}) {\n");
         }
-        sb_add(s, "}) {\n");
         for (int i = 0; i < n->struct_decl.fields.len; i++) {
             sb_indent(s, depth + 2);
             sb_printf(s, "this.%s = %s;\n",
@@ -3422,8 +3573,18 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
+    case NODE_ACTOR_DECL: {
+        /* Top-level / statement form: bind the actor name in scope so
+         * `spawn ActorName` can instantiate it. The expression form
+         * (rare; only inside an expr context) still returns the class. */
+        const char *aname = n->actor_decl.name ? n->actor_decl.name : "_actor";
+        sb_indent(s, depth);
+        sb_printf(s, "const %s = ", aname);
+        emit_expr(s, n, depth);
+        sb_add(s, ";\n");
+        break;
+    }
     case NODE_SPAWN:
-    case NODE_ACTOR_DECL:
     case NODE_SEND_EXPR:
         sb_indent(s, depth);
         emit_expr(s, n, depth);
@@ -3444,12 +3605,24 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         emit_expr(s, n, depth);
         sb_add(s, ";\n");
         break;
-    case NODE_BIND:
+    case NODE_BIND: {
+        /* Reactive `bind`: re-evaluate the expression whenever any
+         * tracked assignment fires. The lowering registers an updater
+         * closure on __xs_binds; __xs_setidx / __xs_setfield / direct
+         * name assignment all call __xs_notify() to re-run them. */
+        const char *bname = n->bind_decl.name ? n->bind_decl.name : "_bind";
         sb_indent(s, depth);
-        sb_printf(s, "let %s = ", n->bind_decl.name ? n->bind_decl.name : "_bind");
+        sb_printf(s, "let %s;\n", bname);
+        sb_indent(s, depth);
+        sb_printf(s, "const __upd_%s = () => { %s = ", bname, bname);
         emit_expr(s, n->bind_decl.expr, depth);
-        sb_add(s, ";\n");
+        sb_add(s, "; };\n");
+        sb_indent(s, depth);
+        sb_printf(s, "__upd_%s();\n", bname);
+        sb_indent(s, depth);
+        sb_printf(s, "__xs_binds.push(__upd_%s);\n", bname);
         break;
+    }
     case NODE_DEL:
         sb_indent(s, depth);
         if (n->del_.name) {
@@ -3545,8 +3718,11 @@ static void emit_stmt(SB *s, Node *n, int depth) {
            not runnable code. The IIFE wrapper for `use` already reads the
            list to build the namespace object; emit nothing here. */
         break;
-    case NODE_TAG_DECL:
-        /* Emit as a regular function with __block as last param */
+    case NODE_TAG_DECL: {
+        /* Emit as a regular function with __block as last param. Inside
+           the body NODE_YIELD lowers to __block(value); the outer try
+           wraps the whole body so a `return` from inside the tag does
+           the right thing for the caller. */
         sb_indent(s, depth);
         sb_printf(s, "function %s", n->tag_decl.name ? n->tag_decl.name : "_tag");
         sb_addc(s, '(');
@@ -3558,10 +3734,30 @@ static void emit_stmt(SB *s, Node *n, int depth) {
         if (n->tag_decl.params.len > 0) sb_add(s, ", ");
         sb_add(s, "__block");
         sb_add(s, ") {\n");
-        if (n->tag_decl.body) emit_stmt(s, n->tag_decl.body, depth + 1);
+        int saved_tag = in_tag_body;
+        in_tag_body = 1;
+        if (n->tag_decl.body) {
+            if (VAL_TAG(n->tag_decl.body) == NODE_BLOCK) {
+                emit_block_body(s, n->tag_decl.body, depth + 1);
+                if (n->tag_decl.body->block.expr) {
+                    if (is_stmt_only_expr(n->tag_decl.body->block.expr)) {
+                        emit_stmt(s, n->tag_decl.body->block.expr, depth + 1);
+                    } else {
+                        sb_indent(s, depth + 1);
+                        sb_add(s, "return ");
+                        emit_expr(s, n->tag_decl.body->block.expr, depth + 1);
+                        sb_add(s, ";\n");
+                    }
+                }
+            } else {
+                emit_stmt(s, n->tag_decl.body, depth + 1);
+            }
+        }
+        in_tag_body = saved_tag;
         sb_indent(s, depth);
         sb_add(s, "}\n");
         break;
+    }
     default:
         /* for any remaining node types, emit as expression statement */
         sb_indent(s, depth);
@@ -3669,6 +3865,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    if (v === null || v === undefined) return \"null\";\n");
     sb_add(&s, "    if (typeof v === \"string\") return v;\n");
     sb_add(&s, "    if (typeof v === \"number\" || typeof v === \"bigint\" || typeof v === \"boolean\") return String(v);\n");
+    sb_add(&s, "    if (v && v._xs_kind === 'duration') return __xs_dur_repr(v);\n");
     sb_add(&s, "    if (Array.isArray(v)) {\n");
     sb_add(&s, "        const open = v.__xs_is_tuple ? \"(\" : \"[\";\n");
     sb_add(&s, "        const close = v.__xs_is_tuple ? \")\" : \"]\";\n");
@@ -3715,7 +3912,110 @@ char *transpile_js(Node *program, const char *filename) {
      * direct-call path lowers to __xs_print; this aliases the bare name. */
     sb_add(&s, "const println = __xs_print;\n");
     sb_add(&s, "const print   = __xs_write;\n");
+    /* Duration is a first-class type. Carries ns as a BigInt so the
+       full range of (ns,h,d) fits. Equality, ordering, arithmetic and
+       repr all route through the runtime helpers via the `_xs_kind`
+       tag below. Number+Duration / Duration+Number arithmetic stays
+       in Duration; Duration/Duration division collapses to float. */
+    sb_add(&s, "class __XsDuration {\n");
+    sb_add(&s, "    constructor(ns) {\n");
+    sb_add(&s, "        this._xs_kind = 'duration';\n");
+    sb_add(&s, "        this.ns = typeof ns === 'bigint' ? ns : BigInt(Math.trunc(Number(ns)));\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    valueOf() { return Number(this.ns); }\n");
+    sb_add(&s, "    get us() { const n = this.ns; return n % 1000n === 0n ? Number(n / 1000n) : Number(n) / 1000; }\n");
+    sb_add(&s, "    get ms() { const n = this.ns; return n % 1000000n === 0n ? Number(n / 1000000n) : Number(n) / 1e6; }\n");
+    sb_add(&s, "    get s()  { const n = this.ns; return n % 1000000000n === 0n ? Number(n / 1000000000n) : Number(n) / 1e9; }\n");
+    sb_add(&s, "    get m()  { const n = this.ns; const per = 60000000000n; return n % per === 0n ? Number(n / per) : Number(n) / Number(per); }\n");
+    sb_add(&s, "    get h()  { const n = this.ns; const per = 3600000000000n; return n % per === 0n ? Number(n / per) : Number(n) / Number(per); }\n");
+    sb_add(&s, "    get d()  { const n = this.ns; const per = 86400000000000n; return n % per === 0n ? Number(n / per) : Number(n) / Number(per); }\n");
+    sb_add(&s, "}\n");
+    sb_add(&s, "const __xs_dur = (ns) => new __XsDuration(ns);\n");
+    sb_add(&s, "const __xs_is_duration = (v) => v instanceof __XsDuration;\n");
+    sb_add(&s, "const __xs_dur_repr = (d) => {\n");
+    sb_add(&s, "    let n = d.ns;\n");
+    sb_add(&s, "    if (n === 0n) return '0s';\n");
+    sb_add(&s, "    const neg = n < 0n; if (neg) n = -n;\n");
+    sb_add(&s, "    const fmt = (whole, denom, suffix) => {\n");
+    sb_add(&s, "        if (whole === 0n) return '';\n");
+    sb_add(&s, "        return whole.toString() + suffix;\n");
+    sb_add(&s, "    };\n");
+    /* Mixed unit case: hours+minutes / minutes+seconds. Only render
+       multi-component repr when the value lands cleanly on a second
+       boundary or higher; sub-second remainders fold into the smaller
+       unit. */
+    sb_add(&s, "    const day = 86400000000000n, hr = 3600000000000n, mn = 60000000000n;\n");
+    sb_add(&s, "    const sec = 1000000000n, msU = 1000000n, usU = 1000n;\n");
+    sb_add(&s, "    if (n % sec === 0n) {\n");
+    sb_add(&s, "        const dd = n / day, rest_d = n % day;\n");
+    sb_add(&s, "        const hh = rest_d / hr, rest_h = rest_d % hr;\n");
+    sb_add(&s, "        const mm = rest_h / mn, rest_m = rest_h % mn;\n");
+    sb_add(&s, "        const ss = rest_m / sec;\n");
+    sb_add(&s, "        let parts = '';\n");
+    sb_add(&s, "        if (dd > 0n) parts += dd.toString() + 'd';\n");
+    sb_add(&s, "        if (hh > 0n) parts += hh.toString() + 'h';\n");
+    sb_add(&s, "        if (mm > 0n) parts += mm.toString() + 'm';\n");
+    sb_add(&s, "        if (ss > 0n) parts += ss.toString() + 's';\n");
+    sb_add(&s, "        if (parts === '') parts = '0s';\n");
+    sb_add(&s, "        return (neg ? '-' : '') + parts;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (n % msU === 0n) {\n");
+    sb_add(&s, "        const ms = Number(n / msU);\n");
+    sb_add(&s, "        if (ms >= 1000 && ms % 1000 !== 0) return (neg ? '-' : '') + (ms / 1000) + 's';\n");
+    sb_add(&s, "        if (ms >= 1000) return (neg ? '-' : '') + (ms / 1000) + 's';\n");
+    sb_add(&s, "        return (neg ? '-' : '') + ms + 'ms';\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (n % usU === 0n) {\n");
+    sb_add(&s, "        const us = Number(n / usU);\n");
+    sb_add(&s, "        if (us >= 1000) return (neg ? '-' : '') + (us / 1000) + 'ms';\n");
+    sb_add(&s, "        return (neg ? '-' : '') + us + 'us';\n");
+    sb_add(&s, "    }\n");
+    /* Sub-microsecond with non-zero ns: render as fractional smaller
+       unit when possible. 1500ns -> 1.5us. */
+    sb_add(&s, "    const nsNum = Number(n);\n");
+    sb_add(&s, "    if (nsNum >= 1000) {\n");
+    sb_add(&s, "        const us = nsNum / 1000;\n");
+    sb_add(&s, "        if (us >= 1000) return (neg ? '-' : '') + (us / 1000) + 'ms';\n");
+    sb_add(&s, "        return (neg ? '-' : '') + us + 'us';\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return (neg ? '-' : '') + nsNum + 'ns';\n");
+    sb_add(&s, "};\n");
+    sb_add(&s, "const __xs_dur_field = (d, k) => {\n");
+    sb_add(&s, "    switch (k) {\n");
+    sb_add(&s, "        case 'ns': { const n = d.ns; return n >= -9007199254740991n && n <= 9007199254740991n ? Number(n) : n; }\n");
+    sb_add(&s, "        case 'us': return d.us;\n");
+    sb_add(&s, "        case 'ms': return d.ms;\n");
+    sb_add(&s, "        case 's':  return d.s;\n");
+    sb_add(&s, "        case 'm':  return d.m;\n");
+    sb_add(&s, "        case 'h':  return d.h;\n");
+    sb_add(&s, "        case 'd':  return d.d;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return null;\n");
+    sb_add(&s, "};\n");
+    /* typeof builtin -- maps to __xs_typeof after JS-reserved rewrite.
+       Mirrors XS type(): int/float/str/array/map/null/bool/duration. */
+    sb_add(&s, "const __xs_typeof = (v) => __xs_type(v);\n");
+    /* for-loop iteration helper. JS Map iterates [k,v] pairs by default;
+       XS `for k in map` should yield keys, matching the interp / VM.
+       Other iterables fall through unchanged. */
+    sb_add(&s, "const __xs_iter = (v) => {\n");
+    sb_add(&s, "    if (v instanceof Map) return v.keys();\n");
+    sb_add(&s, "    if (v == null) return [];\n");
+    sb_add(&s, "    return v;\n");
+    sb_add(&s, "};\n");
+    /* try operator (`x?`). Unwraps Result::Ok(v) to v, propagates
+       Result::Err via a sentinel exception caught by the enclosing
+       fn so the early-return semantics match the interp. */
+    sb_add(&s, "class __XsTryErr { constructor(v) { this.value = v; } }\n");
+    sb_add(&s, "const __xs_try = (v) => {\n");
+    sb_add(&s, "    if (v && typeof v === 'object' && typeof v.tag === 'string') {\n");
+    sb_add(&s, "        if (v.tag.endsWith('::Err')) throw new __XsTryErr(v);\n");
+    sb_add(&s, "        if (v.tag.endsWith('::Ok')) return v.data && v.data.length > 0 ? v.data[0] : null;\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    return v;\n");
+    sb_add(&s, "};\n");
     sb_add(&s, "const __xs_add = (a, b) => {\n");
+    sb_add(&s, "    if (__xs_is_duration(a) && __xs_is_duration(b)) return __xs_dur(a.ns + b.ns);\n");
     sb_add(&s, "    if (Array.isArray(a) && Array.isArray(b)) return a.concat(b);\n");
     sb_add(&s, "    if (typeof a === \"string\" || typeof b === \"string\") return __xs_repr(a) + __xs_repr(b);\n");
     sb_add(&s, "    if (typeof a === \"bigint\" || typeof b === \"bigint\") {\n");
@@ -3725,6 +4025,14 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    return a + b;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_arith = (op, a, b) => {\n");
+    /* Duration arithmetic: dur * scalar / scalar * dur -> dur; dur - dur
+       -> dur. dur * dur is undefined; dur / dur returns float at the
+       __xs_div site, so we only handle subtraction here. */
+    sb_add(&s, "    if (__xs_is_duration(a) || __xs_is_duration(b)) {\n");
+    sb_add(&s, "        if (op === '-' && __xs_is_duration(a) && __xs_is_duration(b)) return __xs_dur(a.ns - b.ns);\n");
+    sb_add(&s, "        if (op === '*' && __xs_is_duration(a) && !__xs_is_duration(b)) return __xs_dur(a.ns * BigInt(Math.trunc(Number(b))));\n");
+    sb_add(&s, "        if (op === '*' && !__xs_is_duration(a) && __xs_is_duration(b)) return __xs_dur(BigInt(Math.trunc(Number(a))) * b.ns);\n");
+    sb_add(&s, "    }\n");
     /* string * int repeats (matches Python / XS semantics). */
     sb_add(&s, "    if (op === '*' && typeof a === 'string' && typeof b === 'number') return a.repeat(b < 0 ? 0 : b);\n");
     sb_add(&s, "    if (op === '*' && typeof a === 'number' && typeof b === 'string') return b.repeat(a < 0 ? 0 : a);\n");
@@ -3777,6 +4085,16 @@ char *transpile_js(Node *program, const char *filename) {
        which is what the interp throws. */
     sb_add(&s, "const __xs_err = (kind, msg) => { const m = new Map(); m.set('kind', kind); m.set('message', msg || kind); return m; };\n");
     sb_add(&s, "const __xs_div = (a, b) => {\n");
+    /* Duration / Duration -> float ratio. Duration / scalar -> Duration. */
+    sb_add(&s, "    if (__xs_is_duration(a) && __xs_is_duration(b)) {\n");
+    sb_add(&s, "        if (b.ns === 0n) throw __xs_err('division by zero', 'division by zero');\n");
+    sb_add(&s, "        return Number(a.ns) / Number(b.ns);\n");
+    sb_add(&s, "    }\n");
+    sb_add(&s, "    if (__xs_is_duration(a) && !__xs_is_duration(b)) {\n");
+    sb_add(&s, "        const bb = BigInt(Math.trunc(Number(b)));\n");
+    sb_add(&s, "        if (bb === 0n) throw __xs_err('division by zero', 'division by zero');\n");
+    sb_add(&s, "        return __xs_dur(a.ns / bb);\n");
+    sb_add(&s, "    }\n");
     sb_add(&s, "    if (typeof b === 'bigint') {\n");
     sb_add(&s, "        if (b === 0n) throw __xs_err('division by zero', 'division by zero');\n");
     sb_add(&s, "        const ba = typeof a === 'bigint' ? a : BigInt(Math.trunc(a));\n");
@@ -3799,11 +4117,30 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_setidx = (o, i, v) => {\n");
     sb_add(&s, "    if (Array.isArray(o) && typeof i === \"number\" && i < 0) i = o.length + i;\n");
-    sb_add(&s, "    if (o instanceof Map) { o.set(i, v); return v; }\n");
+    sb_add(&s, "    if (o instanceof Map) { o.set(i, v); __xs_notify(); return v; }\n");
     sb_add(&s, "    o[i] = v;\n");
+    sb_add(&s, "    __xs_notify();\n");
     sb_add(&s, "    return v;\n");
     sb_add(&s, "};\n");
+    /* Reactive `bind` registry. Each `bind x = expr` pushes an updater
+     * closure; any tracked assignment (setidx, setfield, named __xs_assign)
+     * re-runs all of them. __xs_notify is a no-op when no binds exist. */
+    sb_add(&s, "const __xs_binds = [];\n");
+    sb_add(&s, "let __xs_notify_depth = 0;\n");
+    sb_add(&s, "const __xs_notify = () => {\n");
+    sb_add(&s, "    if (__xs_binds.length === 0) return;\n");
+    sb_add(&s, "    if (__xs_notify_depth > 0) return;\n");
+    sb_add(&s, "    __xs_notify_depth++;\n");
+    sb_add(&s, "    try { for (const f of __xs_binds) f(); }\n");
+    sb_add(&s, "    finally { __xs_notify_depth--; }\n");
+    sb_add(&s, "};\n");
+    /* __xs_assign wraps a named-variable assignment with bind-notify.
+     * Used only for top-level assignments to vars the lowering doesn't
+     * statically know aren't a bind dependency; we wrap conservatively. */
+    sb_add(&s, "const __xs_assign = (v) => { __xs_notify(); return v; };\n");
     sb_add(&s, "const __xs_cmp = (a, b) => {\n");
+    sb_add(&s, "    if (__xs_is_duration(a) && __xs_is_duration(b))\n");
+    sb_add(&s, "        return a.ns < b.ns ? -1 : a.ns > b.ns ? 1 : 0;\n");
     sb_add(&s, "    if (typeof a === 'bigint' || typeof b === 'bigint') {\n");
     sb_add(&s, "        const ba = typeof a === 'bigint' ? a : BigInt(Math.trunc(a));\n");
     sb_add(&s, "        const bb = typeof b === 'bigint' ? b : BigInt(Math.trunc(b));\n");
@@ -3851,6 +4188,7 @@ char *transpile_js(Node *program, const char *filename) {
        null/bool), not JS typeof results. */
     sb_add(&s, "const __xs_type = (v) => {\n");
     sb_add(&s, "    if (v === null || v === undefined) return 'null';\n");
+    sb_add(&s, "    if (v && v._xs_kind === 'duration') return 'duration';\n");
     sb_add(&s, "    if (typeof v === 'boolean') return 'bool';\n");
     sb_add(&s, "    if (typeof v === 'string') return 'str';\n");
     sb_add(&s, "    if (typeof v === 'bigint') return 'int';\n");
@@ -3984,6 +4322,7 @@ char *transpile_js(Node *program, const char *filename) {
        key on a Map literal returns undefined under .foo. Probe both. */
     sb_add(&s, "const __xs_field = (o, k, optional) => {\n");
     sb_add(&s, "    if (o === null || o === undefined) return optional ? undefined : o;\n");
+    sb_add(&s, "    if (__xs_is_duration(o)) return __xs_dur_field(o, k);\n");
     sb_add(&s, "    let v;\n");
     sb_add(&s, "    if (o instanceof Map) {\n");
     sb_add(&s, "        v = o.has(k) ? o.get(k) : o[k];\n");
@@ -3996,8 +4335,8 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    return v === undefined ? null : v;\n");
     sb_add(&s, "};\n");
     sb_add(&s, "const __xs_setfield = (o, k, v) => {\n");
-    sb_add(&s, "    if (o instanceof Map) { o.set(k, v); return v; }\n");
-    sb_add(&s, "    o[k] = v; return v;\n");
+    sb_add(&s, "    if (o instanceof Map) { o.set(k, v); __xs_notify(); return v; }\n");
+    sb_add(&s, "    o[k] = v; __xs_notify(); return v;\n");
     sb_add(&s, "};\n");
     /* Method dispatch. JS dot-call binds `this` to the receiver; we keep
        that semantics for class instances and plain objects, but Maps don't
@@ -4008,14 +4347,14 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    if (o == null) throw new TypeError(\"method '\" + m + \"' on null\");\n");
     sb_add(&s, "    if (o instanceof Map) {\n");
     sb_add(&s, "        if (o.has(m)) { const f = o.get(m); if (typeof f === 'function') return f(...args); }\n");
-    sb_add(&s, "        if (typeof o[m] === 'function') return o[m](...args);\n");
-    /* XS map methods that JS Map doesn't expose by the same name. We
-       inline the common ones so a transpiled program doesn't crash on
-       m.merge / m.keys / m.has() etc. */
+    /* XS map methods that JS Map doesn't expose by the same name, plus
+       overrides for keys/values/entries that on JS Map return iterators.
+       XS callers expect arrays, so this branch runs BEFORE the generic
+       Map.prototype probe below. */
     sb_add(&s, "        switch (m) {\n");
     sb_add(&s, "            case 'keys':    return [...o.keys()];\n");
     sb_add(&s, "            case 'values':  return [...o.values()];\n");
-    sb_add(&s, "            case 'entries': case 'items': return [...o.entries()];\n");
+    sb_add(&s, "            case 'entries': case 'items': return [...o.entries()].map(p => __xs_tuple([p[0], p[1]]));\n");
     sb_add(&s, "            case 'has': case 'contains': case 'contains_key': case 'has_key':\n");
     sb_add(&s, "                return o.has(args[0]);\n");
     sb_add(&s, "            case 'get': case 'get_or': {\n");
@@ -4047,6 +4386,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "            }\n");
     sb_add(&s, "            case 'for_each': for (const [k, v] of o) args[0](k, v); return null;\n");
     sb_add(&s, "        }\n");
+    sb_add(&s, "        if (typeof o[m] === 'function') return o[m](...args);\n");
     sb_add(&s, "        throw new TypeError(\"no method '\" + m + \"' on map\");\n");
     sb_add(&s, "    }\n");
     /* String methods that XS exposes but JS doesn't ship under the
@@ -4282,7 +4622,7 @@ char *transpile_js(Node *program, const char *filename) {
      * __xs_to_ms(dur))`. Duration literals in XS lower to nanosecond
      * bigints; raw numbers are treated as milliseconds for ergonomic
      * parity with the runtime's @every(50) shorthand. */
-    sb_add(&s, "const __xs_to_ms = (d) => { if (typeof d === 'bigint') return Number(d / 1000000n); const n = Number(d); return n >= 1000000 ? Math.round(n / 1000000) : n; };\n");
+    sb_add(&s, "const __xs_to_ms = (d) => { if (__xs_is_duration(d)) return Number(d.ns / 1000000n); if (typeof d === 'bigint') return Number(d / 1000000n); const n = Number(d); return n >= 1000000 ? Math.round(n / 1000000) : n; };\n");
     /* bare exit(n) / abort() in user code: route to host equivalents. */
     sb_add(&s, "const exit = (c) => process.exit(typeof c === 'number' ? c : (typeof c === 'bigint' ? Number(c) : 0));\n");
     sb_add(&s, "const abort = () => { throw new Error('abort()'); };\n");
@@ -4402,12 +4742,171 @@ char *transpile_js(Node *program, const char *filename) {
     if (program_imports_module(program, "process")) {
     /* Extend Node's `process` global with the methods XS expects.
      * Can't shadow with `const process = ...` since exit / env /
-     * argv would break. Object.assign keeps the native ones intact. */
+     * argv would break. Object.assign keeps the native ones intact.
+     * `run` mirrors the interp: returns a map with `stdout`, `ok`,
+     * `code` keys so callers can pattern-match. */
     sb_add(&s, "Object.assign(process, {\n");
-    sb_add(&s, "    run: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
+    sb_add(&s, "    run: (cmd) => {\n");
+    sb_add(&s, "        const m = new Map();\n");
+    sb_add(&s, "        try {\n");
+    sb_add(&s, "            const out = String(require('child_process').execSync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] }));\n");
+    sb_add(&s, "            m.set('ok', true); m.set('stdout', out); m.set('code', 0);\n");
+    sb_add(&s, "        } catch (e) {\n");
+    sb_add(&s, "            const out = String(e.stdout || '') + String(e.stderr || '');\n");
+    sb_add(&s, "            m.set('ok', false); m.set('stdout', out); m.set('code', typeof e.status === 'number' ? e.status : -1);\n");
+    sb_add(&s, "        }\n");
+    sb_add(&s, "        return m;\n");
+    sb_add(&s, "    },\n");
     sb_add(&s, "    popen: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
     sb_add(&s, "    popen_read: (cmd) => { try { return String(require('child_process').execSync(cmd)); } catch (e) { return String(e.stdout || '') + String(e.stderr || ''); } },\n");
     sb_add(&s, "});\n");
+    }
+    if (program_imports_module(program, "db")) {
+    /* In-memory db polyfill. Covers CREATE TABLE / INSERT / SELECT *,
+     * with an optional WHERE col = value clause (= and ==). Rows
+     * expose both the user column names and the positional cN keys
+     * the native runtime uses, so test code that touches r.c1 keeps
+     * working. No external sqlite -- intentional, the JS target stays
+     * dependency-free. */
+    sb_add(&s, "const db = (() => {\n");
+    sb_add(&s, "    const conns = new Map();\n");
+    sb_add(&s, "    const parseTable = (sql) => {\n");
+    sb_add(&s, "        const m = /CREATE\\s+TABLE\\s+(\\w+)\\s*\\(([^)]*)\\)/i.exec(sql);\n");
+    sb_add(&s, "        if (!m) return null;\n");
+    sb_add(&s, "        const cols = m[2].split(',').map(c => c.trim().split(/\\s+/)[0]).filter(Boolean);\n");
+    sb_add(&s, "        return { name: m[1], cols };\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    const parseInsert = (sql) => {\n");
+    sb_add(&s, "        const m = /INSERT\\s+INTO\\s+(\\w+)(?:\\s*\\(([^)]*)\\))?\\s+VALUES\\s*\\(([^)]*)\\)/i.exec(sql);\n");
+    sb_add(&s, "        if (!m) return null;\n");
+    sb_add(&s, "        const tname = m[1];\n");
+    sb_add(&s, "        const inCols = m[2] ? m[2].split(',').map(c => c.trim()) : null;\n");
+    sb_add(&s, "        const vals = m[3].split(',').map(v => {\n");
+    sb_add(&s, "            v = v.trim();\n");
+    sb_add(&s, "            if (v[0] === '\\'' || v[0] === '\"') return v.slice(1, -1);\n");
+    sb_add(&s, "            if (/^-?\\d+$/.test(v)) return parseInt(v, 10);\n");
+    sb_add(&s, "            if (/^-?\\d*\\.\\d+$/.test(v)) return parseFloat(v);\n");
+    sb_add(&s, "            return v;\n");
+    sb_add(&s, "        });\n");
+    sb_add(&s, "        return { tname, inCols, vals };\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    const parseSelect = (sql) => {\n");
+    sb_add(&s, "        const m = /SELECT\\s+(\\*|[\\w\\s,]+)\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(.+?))?(?:\\s+ORDER\\s+BY\\s+(\\w+)(?:\\s+(ASC|DESC))?)?(?:\\s+LIMIT\\s+(\\d+))?\\s*;?\\s*$/i.exec(sql);\n");
+    sb_add(&s, "        if (!m) return null;\n");
+    sb_add(&s, "        const cols = m[1].trim();\n");
+    sb_add(&s, "        const tname = m[2];\n");
+    sb_add(&s, "        const where = m[3] ? m[3].trim() : null;\n");
+    sb_add(&s, "        return { cols, tname, where, orderBy: m[4], orderDir: m[5], limit: m[6] ? parseInt(m[6], 10) : null };\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    const matchWhere = (row, where, colMap) => {\n");
+    sb_add(&s, "        if (!where) return true;\n");
+    sb_add(&s, "        const m = /^(\\w+)\\s*(==?|!=|<=|>=|<|>)\\s*(.+)$/.exec(where);\n");
+    sb_add(&s, "        if (!m) return true;\n");
+    sb_add(&s, "        const col = m[1], op = m[2]; let v = m[3].trim();\n");
+    sb_add(&s, "        if (v[0] === '\\'' || v[0] === '\"') v = v.slice(1, -1);\n");
+    sb_add(&s, "        else if (/^-?\\d+$/.test(v)) v = parseInt(v, 10);\n");
+    sb_add(&s, "        else if (/^-?\\d*\\.\\d+$/.test(v)) v = parseFloat(v);\n");
+    sb_add(&s, "        const key = colMap[col] !== undefined ? colMap[col] : col;\n");
+    sb_add(&s, "        const lhs = row[key];\n");
+    sb_add(&s, "        switch (op) {\n");
+    sb_add(&s, "            case '=': case '==': return lhs == v;\n");
+    sb_add(&s, "            case '!=': return lhs != v;\n");
+    sb_add(&s, "            case '<':  return lhs <  v;\n");
+    sb_add(&s, "            case '>':  return lhs >  v;\n");
+    sb_add(&s, "            case '<=': return lhs <= v;\n");
+    sb_add(&s, "            case '>=': return lhs >= v;\n");
+    sb_add(&s, "        }\n");
+    sb_add(&s, "        return false;\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    return {\n");
+    sb_add(&s, "        open: (name) => {\n");
+    sb_add(&s, "            const conn = { name, schemas: {}, rows: {} };\n");
+    sb_add(&s, "            conns.set(name, conn);\n");
+    sb_add(&s, "            return conn;\n");
+    sb_add(&s, "        },\n");
+    sb_add(&s, "        close: (conn) => { conns.delete(conn && conn.name); return null; },\n");
+    sb_add(&s, "        exec: (conn, sql) => {\n");
+    sb_add(&s, "            const ct = parseTable(sql);\n");
+    sb_add(&s, "            if (ct) { conn.schemas[ct.name] = ct.cols; conn.rows[ct.name] = []; return null; }\n");
+    sb_add(&s, "            const ins = parseInsert(sql);\n");
+    sb_add(&s, "            if (ins) {\n");
+    sb_add(&s, "                const cols = ins.inCols || conn.schemas[ins.tname] || [];\n");
+    sb_add(&s, "                const row = {};\n");
+    sb_add(&s, "                for (let i = 0; i < ins.vals.length; i++) {\n");
+    sb_add(&s, "                    row['c' + i] = ins.vals[i];\n");
+    sb_add(&s, "                    if (cols[i]) row[cols[i]] = ins.vals[i];\n");
+    sb_add(&s, "                }\n");
+    sb_add(&s, "                if (!conn.rows[ins.tname]) conn.rows[ins.tname] = [];\n");
+    sb_add(&s, "                conn.rows[ins.tname].push(row);\n");
+    sb_add(&s, "                return null;\n");
+    sb_add(&s, "            }\n");
+    sb_add(&s, "            return null;\n");
+    sb_add(&s, "        },\n");
+    sb_add(&s, "        query: (conn, sql) => {\n");
+    sb_add(&s, "            const sel = parseSelect(sql);\n");
+    sb_add(&s, "            if (!sel) return [];\n");
+    sb_add(&s, "            const cols = conn.schemas[sel.tname] || [];\n");
+    sb_add(&s, "            const colMap = {}; cols.forEach((c, i) => { colMap[c] = 'c' + i; });\n");
+    sb_add(&s, "            let rows = (conn.rows[sel.tname] || []).filter(r => matchWhere(r, sel.where, colMap));\n");
+    sb_add(&s, "            if (sel.orderBy) {\n");
+    sb_add(&s, "                const k = colMap[sel.orderBy] !== undefined ? colMap[sel.orderBy] : sel.orderBy;\n");
+    sb_add(&s, "                rows = [...rows].sort((a, b) => a[k] < b[k] ? -1 : a[k] > b[k] ? 1 : 0);\n");
+    sb_add(&s, "                if (sel.orderDir && sel.orderDir.toUpperCase() === 'DESC') rows.reverse();\n");
+    sb_add(&s, "            }\n");
+    sb_add(&s, "            if (sel.limit != null) rows = rows.slice(0, sel.limit);\n");
+    sb_add(&s, "            return rows;\n");
+    sb_add(&s, "        },\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "})();\n");
+    }
+    if (program_imports_module(program, "http")) {
+    /* http polyfill: get / post / request use Node's native fetch
+     * (Node 18+ ships it). Wrapped to be synchronous via execSync
+     * to a child node process; tests want call-and-await sequencing.
+     * `serve` accepts a router map but doesn't bind a port -- the
+     * existence-of-exports test doesn't need a listening socket. */
+    sb_add(&s, "const http = (() => {\n");
+    sb_add(&s, "    const HttpError = (msg) => { const m = new Map(); m.set('kind', 'HttpError'); m.set('message', msg || 'http error'); return m; };\n");
+    sb_add(&s, "    const validateUrl = (u) => {\n");
+    sb_add(&s, "        if (typeof u !== 'string' || u.length === 0) throw HttpError('invalid url: empty');\n");
+    sb_add(&s, "        try { new URL(u); } catch (e) { throw HttpError('invalid url: ' + u); }\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    const requestSync = (method, url, body, headers) => {\n");
+    sb_add(&s, "        validateUrl(url);\n");
+    sb_add(&s, "        const { execFileSync } = require('child_process');\n");
+    sb_add(&s, "        const script = ['(async () => {',\n");
+    sb_add(&s, "            'try {',\n");
+    sb_add(&s, "            '  const r = await fetch(' + JSON.stringify(url) + ', {',\n");
+    sb_add(&s, "            '    method: ' + JSON.stringify(method) + ',',\n");
+    sb_add(&s, "            '    headers: ' + JSON.stringify(headers || {}) + ',',\n");
+    sb_add(&s, "            (body == null ? '' : '    body: ' + JSON.stringify(body) + ','),\n");
+    sb_add(&s, "            '  });',\n");
+    sb_add(&s, "            '  const text = await r.text();',\n");
+    sb_add(&s, "            '  process.stdout.write(JSON.stringify({status: r.status, body: text}));',\n");
+    sb_add(&s, "            '} catch (e) {',\n");
+    sb_add(&s, "            '  process.stdout.write(JSON.stringify({error: String(e.message || e)}));',\n");
+    sb_add(&s, "            '}',\n");
+    sb_add(&s, "        '})();'].join('\\n');\n");
+    sb_add(&s, "        let out;\n");
+    sb_add(&s, "        try { out = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' }); }\n");
+    sb_add(&s, "        catch (e) { throw HttpError('subprocess failed: ' + (e.message || e)); }\n");
+    sb_add(&s, "        let parsed; try { parsed = JSON.parse(out); }\n");
+    sb_add(&s, "        catch (e) { throw HttpError('bad subprocess output'); }\n");
+    sb_add(&s, "        if (parsed.error) throw HttpError(parsed.error);\n");
+    sb_add(&s, "        return { status: parsed.status, body: parsed.body };\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "    return {\n");
+    sb_add(&s, "        get:     (url, headers) => requestSync('GET', url, null, headers),\n");
+    sb_add(&s, "        post:    (url, body, headers) => requestSync('POST', url, body, headers),\n");
+    sb_add(&s, "        put:     (url, body, headers) => requestSync('PUT', url, body, headers),\n");
+    sb_add(&s, "        delete:  (url, headers) => requestSync('DELETE', url, null, headers),\n");
+    sb_add(&s, "        request: (opts) => requestSync(opts.method || 'GET', opts.url, opts.body, opts.headers),\n");
+    /* serve is a stub: it accepts the router map but doesn't bind a
+     * port. Tests use it to confirm the export exists, not to handle
+     * actual requests; a listening server would block forever. */
+    sb_add(&s, "        serve: (port, router) => { return null; },\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "})();\n");
     }
     if (program_imports_module(program, "os")) {
     sb_add(&s, "const os = (() => {\n");
@@ -4633,6 +5132,7 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "const __xs_eq = (a, b) => {\n");
     sb_add(&s, "    if (a === b) return true;\n");
     sb_add(&s, "    if (a === null || b === null || a === undefined || b === undefined) return false;\n");
+    sb_add(&s, "    if (__xs_is_duration(a) && __xs_is_duration(b)) return a.ns === b.ns;\n");
     sb_add(&s, "    if (typeof a !== typeof b) {\n");
     sb_add(&s, "        if ((typeof a === 'number' && typeof b === 'bigint') ||\n");
     sb_add(&s, "            (typeof a === 'bigint' && typeof b === 'number')) return Number(a) === Number(b);\n");

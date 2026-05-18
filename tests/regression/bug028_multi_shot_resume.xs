@@ -1,4 +1,3 @@
--- skip-emit: c (TODO: c transpiler effect machinery is single-shot only)
 -- bug028: a single perform/handle pair where the body performs
 -- multiple times and each arm mutation has to persist past resume.
 -- The original VM path captured the entire stack [0, sp_off) on

@@ -1,4 +1,3 @@
--- skip-emit: c, wasm (TODO: c+wasm transpilers don't reproduce the jit native dispatch path)
 -- bug032: OP_IMPL_METHOD and OP_TRAIT_APPLY were missing from the
 -- JIT's op_supported set. Any proto that compiled an `impl` block
 -- or an `impl Trait for Class` declaration bailed wholesale.

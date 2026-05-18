@@ -1,4 +1,3 @@
--- skip-emit: c (TODO: wrapping decorators rejected by --emit c)
 -- bug054: wrapping decorators -- @memoize / @retry / @trace / @timed
 -- transform the bound fn into a dispatcher that intercepts the call.
 -- Trigger decorators only register side-effects; wrapping ones must

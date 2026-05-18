@@ -1,4 +1,4 @@
--- skip-emit: c, js, wasm (TODO: stdlib db module not lowered by --emit transpilers)
+-- skip-emit: c, wasm (TODO: stdlib db needs libsqlite3/libpq; --emit c/wasm refuse external links by design)
 -- bug003: SELECT ... WHERE col = v returned 0 rows when col was a real
 -- column name (CREATE TABLE dropped column names silently). Fix: wire
 -- column-name -> positional lookup via db.open._schemas.

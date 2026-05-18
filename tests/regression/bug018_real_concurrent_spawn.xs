@@ -1,4 +1,4 @@
--- skip-emit: c, wasm (TODO: c+wasm transpilers don't lower pthread spawn / channel)
+-- skip-emit: wasm (TODO: wasi-preview1 has no thread-spawn import; pthread + channel block on cross-thread synchronisation that the wasm output can't model)
 -- bug018: spawn used to run synchronously on the calling thread
 -- ("Execute immediately (no real threads yet)"). Channels also did
 -- not block. Fix: pthread-backed spawn with a recursive GIL, plus a

@@ -1,4 +1,3 @@
--- skip-emit: wasm (TODO: wasm transpiler null-callee path differs from runtime)
 -- bug039: when a script runs from a file, main routes through
 -- vm_run, and vm_dispatch calls native functions with NULL for the
 -- Interp* (vm.c OP_CALL / OP_METHOD_CALL pass NULL because the

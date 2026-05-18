@@ -1,4 +1,3 @@
--- skip-emit: c, wasm (TODO: c+wasm transpilers don't reproduce the jit native dispatch path)
 -- bug031: OP_MAKE_INST's closure-init branch pushes a new call frame
 -- mid-op (PUSH(inst); PUSH(inst); push args; call_frame_push). The
 -- previous JIT lowering treated MAKE_INST as unsupported -- protos
