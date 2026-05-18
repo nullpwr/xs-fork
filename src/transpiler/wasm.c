@@ -14850,18 +14850,75 @@ static Node *wasm_build_stdlib_module(const char *name) {
     }
 
     if (strcmp(name, "fs") == 0) {
-        /* Minimal; the conformance test doesn't exercise actual reads/
-           writes -- it only checks bindings exist. Provide stubs that
-           return null so callers don't crash. */
+        /* Minimal stubs. The conformance test only checks bindings
+           exist, and platform-skipped programs reach these calls only
+           in dead branches, so null returns are safe everywhere on
+           the wasi backend. */
         const char *one_p[] = {"p"};
         const char *two_pc[] = {"p", "c"};
-        Node *read_l  = mk_lambda(1, one_p,  mk_null_lit());
-        Node *write_l = mk_lambda(2, two_pc, mk_null_lit());
-        Node *exists_l= mk_lambda(1, one_p,  mk_null_lit());
+        Node *read_l   = mk_lambda(1, one_p,  mk_null_lit());
+        Node *write_l  = mk_lambda(2, two_pc, mk_null_lit());
+        Node *exists_l = mk_lambda(1, one_p,  mk_null_lit());
+        Node *temp_l   = mk_lambda(0, NULL,   mk_str_lit("/tmp"));
+        Node *cwd_l    = mk_lambda(0, NULL,   mk_str_lit("."));
         MapEntry ents[] = {
-            {"read",   read_l},
-            {"write",  write_l},
-            {"exists", exists_l},
+            {"read",     read_l},
+            {"write",    write_l},
+            {"exists",   exists_l},
+            {"temp_dir", temp_l},
+            {"cwd",      cwd_l},
+        };
+        return mk_map_lit_entries(ents, 5);
+    }
+
+    if (strcmp(name, "os") == 0) {
+        /* The wasi backend doesn't have a real environment or fork. We
+           expose `platform` as the literal "wasi" so the standard
+           skip-on-platform idiom (`if os.platform == "wasi" { ... }`)
+           takes the short branch, and stub the rest as null-returning
+           lambdas so the dead branch still compiles. The wasm map
+           runtime caps inline maps at 8 pairs, so we pick the entries
+           callers actually exercise instead of mirroring every key
+           the native runtime provides. */
+        const char *one_n[]  = {"n"};
+        const char *two_nv[] = {"n", "v"};
+        const char *one_c[]  = {"c"};
+        Node *getenv_l = mk_lambda(1, one_n,  mk_null_lit());
+        Node *setenv_l = mk_lambda(2, two_nv, mk_null_lit());
+        Node *env_l    = mk_lambda(0, NULL,   mk_null_lit());
+        Node *args_l   = mk_lambda(0, NULL,   mk_null_lit());
+        Node *exit_l   = mk_lambda(1, one_c,  mk_null_lit());
+        Node *host_l   = mk_lambda(0, NULL,   mk_str_lit("wasi"));
+        MapEntry ents[] = {
+            {"platform", mk_str_lit("wasi")},
+            {"sep",      mk_str_lit("/")},
+            {"getenv",   getenv_l},
+            {"env",      env_l},
+            {"setenv",   setenv_l},
+            {"args",     args_l},
+            {"exit",     exit_l},
+            {"hostname", host_l},
+        };
+        return mk_map_lit_entries(ents, (int)(sizeof(ents)/sizeof(ents[0])));
+    }
+
+    if (strcmp(name, "process") == 0) {
+        /* No subprocess on wasi. `run` returns a map shaped like the
+           native version (ok / stdout / code) so callers that pattern-
+           match on those keys still compile cleanly. */
+        const char *one_c[] = {"c"};
+        Node *ok_lit  = node_new(NODE_LIT_BOOL, span_zero());
+        ok_lit->lit_bool.bval = 0;
+        MapEntry run_ents[] = {
+            {"ok",     ok_lit},
+            {"stdout", mk_str_lit("")},
+            {"code",   mk_int_lit(-1)},
+        };
+        Node *run_body = mk_map_lit_entries(run_ents, 3);
+        MapEntry ents[] = {
+            {"run",        mk_lambda(1, one_c, run_body)},
+            {"popen",      mk_lambda(1, one_c, mk_str_lit(""))},
+            {"popen_read", mk_lambda(1, one_c, mk_str_lit(""))},
         };
         return mk_map_lit_entries(ents, 3);
     }
@@ -14936,6 +14993,31 @@ static Node *wasm_build_stdlib_module(const char *name) {
             {"Set",   set_lambda},
         };
         return mk_map_lit_entries(ents, 3);
+    }
+
+    if (strcmp(name, "db") == 0) {
+        /* In-memory polyfill, no external sqlite. CREATE TABLE / INSERT
+           INTO / SELECT * (+ optional WHERE col = val) cover the
+           regression-test workload; richer SQL falls through to a
+           no-op return. The xs source for the helpers gets spliced in
+           by wasm_build_db_helpers when an `import db` is present, the
+           same way the json helpers do. */
+        const char *one_n[]  = {"name"};
+        const char *two_cs[] = {"conn", "sql"};
+        Node *open_l  = mk_lambda(1, one_n,
+            mk_call_named("__xs_db_open",  (Node*[]){mk_ident("name")}, 1));
+        Node *exec_l  = mk_lambda(2, two_cs,
+            mk_call_named("__xs_db_exec",  (Node*[]){mk_ident("conn"), mk_ident("sql")}, 2));
+        Node *query_l = mk_lambda(2, two_cs,
+            mk_call_named("__xs_db_query", (Node*[]){mk_ident("conn"), mk_ident("sql")}, 2));
+        Node *close_l = mk_lambda(1, (const char*[]){"conn"}, mk_null_lit());
+        MapEntry ents[] = {
+            {"open",  open_l},
+            {"exec",  exec_l},
+            {"query", query_l},
+            {"close", close_l},
+        };
+        return mk_map_lit_entries(ents, 4);
     }
 
     /* Unknown stdlib module -> empty namespace. */
@@ -15097,6 +15179,171 @@ static Node *wasm_build_json_helpers(void) {
     Lexer lex; lexer_init(&lex, json_src, "<wasm-json-helpers>");
     TokenArray ta = lexer_tokenize(&lex);
     Parser p; parser_init(&p, &ta, "<wasm-json-helpers>");
+    Node *prog = parser_parse(&p);
+    token_array_free(&ta);
+    comment_list_free(&lex.comments);
+    if (!prog || p.had_error) {
+        if (prog) node_free(prog);
+        return NULL;
+    }
+    return prog;
+}
+
+/* Tiny in-memory db polyfill for the wasi backend (no sqlite at link
+   time). open returns a conn map holding `__schemas` (table -> col
+   names) and `__rows` (table -> array of row maps). exec recognises
+   CREATE TABLE / INSERT INTO, query handles SELECT * with an optional
+   `WHERE col = value` clause. Implemented in xs source so the parser
+   is robust and the wasm side stays one map of three lambdas. */
+static Node *wasm_build_db_helpers(void) {
+    static const char *db_src =
+        "fn __xs_db_strip_quotes(s) {\n"
+        "    let t = s.trim()\n"
+        "    let cs = t.chars()\n"
+        "    let n = cs.len()\n"
+        "    if n >= 2 {\n"
+        "        let c0 = cs[0]\n"
+        "        let cn = cs[n-1]\n"
+        "        if (c0 == \"'\" or c0 == \"\\\"\") and (cn == c0) {\n"
+        "            var out = \"\"\n"
+        "            var i = 1\n"
+        "            while i < n - 1 { out = out + cs[i]; i = i + 1 }\n"
+        "            return out\n"
+        "        }\n"
+        "    }\n"
+        "    return t\n"
+        "}\n"
+        "fn __xs_db_parse_int(s) {\n"
+        "    let cs = s.chars()\n"
+        "    let n = cs.len()\n"
+        "    if n == 0 { return s }\n"
+        "    var i = 0\n"
+        "    var neg = false\n"
+        "    if cs[0] == \"-\" { neg = true; i = 1 }\n"
+        "    var acc = 0\n"
+        "    var any = false\n"
+        "    while i < n {\n"
+        "        let c = cs[i]\n"
+        "        if c == \"0\" or c == \"1\" or c == \"2\" or c == \"3\" or c == \"4\"\n"
+        "           or c == \"5\" or c == \"6\" or c == \"7\" or c == \"8\" or c == \"9\" {\n"
+        "            var d = 0\n"
+        "            if c == \"1\" { d = 1 } else if c == \"2\" { d = 2 }\n"
+        "            else if c == \"3\" { d = 3 } else if c == \"4\" { d = 4 }\n"
+        "            else if c == \"5\" { d = 5 } else if c == \"6\" { d = 6 }\n"
+        "            else if c == \"7\" { d = 7 } else if c == \"8\" { d = 8 }\n"
+        "            else if c == \"9\" { d = 9 }\n"
+        "            acc = acc * 10 + d\n"
+        "            any = true\n"
+        "            i = i + 1\n"
+        "        } else {\n"
+        "            return s\n"
+        "        }\n"
+        "    }\n"
+        "    if !any { return s }\n"
+        "    if neg { return 0 - acc }\n"
+        "    return acc\n"
+        "}\n"
+        "fn __xs_db_coerce(s) {\n"
+        "    let stripped = __xs_db_strip_quotes(s)\n"
+        "    if stripped == s.trim() {\n"
+        "        return __xs_db_parse_int(stripped)\n"
+        "    }\n"
+        "    return stripped\n"
+        "}\n"
+        "fn __xs_db_open(name) {\n"
+        "    let m = #{}\n"
+        "    m[\"__name\"] = name\n"
+        "    m[\"__schemas\"] = #{}\n"
+        "    m[\"__rows\"] = #{}\n"
+        "    return m\n"
+        "}\n"
+        "fn __xs_db_last_word(s) {\n"
+        "    let p = s.trim().split(\" \")\n"
+        "    return p[p.len() - 1]\n"
+        "}\n"
+        "fn __xs_db_exec(conn, sql) {\n"
+        "    let up = sql.upper().trim()\n"
+        "    if up.starts_with(\"CREATE TABLE\") {\n"
+        "        let before = sql.split(\"(\")[0]\n"
+        "        let tname = __xs_db_last_word(before)\n"
+        "        let inside = sql.split(\"(\")[1].split(\")\")[0]\n"
+        "        let raw = inside.split(\",\")\n"
+        "        var cols = []\n"
+        "        var i = 0\n"
+        "        while i < raw.len() {\n"
+        "            cols = cols + [raw[i].trim().split(\" \")[0]]\n"
+        "            i = i + 1\n"
+        "        }\n"
+        "        conn.__schemas[tname] = cols\n"
+        "        conn.__rows[tname] = []\n"
+        "        return null\n"
+        "    }\n"
+        "    if up.starts_with(\"INSERT INTO\") {\n"
+        "        let pre_vals = sql.split(\"VALUES\")[0]\n"
+        "        let pre_paren = pre_vals.split(\"(\")[0]\n"
+        "        let tname = __xs_db_last_word(pre_paren)\n"
+        "        let inside = sql.split(\"VALUES\")[1].split(\"(\")[1].split(\")\")[0]\n"
+        "        let raw = inside.split(\",\")\n"
+        "        var vals = []\n"
+        "        var i = 0\n"
+        "        while i < raw.len() {\n"
+        "            vals = vals + [__xs_db_coerce(raw[i])]\n"
+        "            i = i + 1\n"
+        "        }\n"
+        "        let schema = conn.__schemas[tname]\n"
+        "        var row = #{}\n"
+        "        i = 0\n"
+        "        while i < vals.len() {\n"
+        "            row[\"c\" + str(i)] = vals[i]\n"
+        "            if schema != null and i < schema.len() {\n"
+        "                row[schema[i]] = vals[i]\n"
+        "            }\n"
+        "            i = i + 1\n"
+        "        }\n"
+        "        if conn.__rows[tname] == null { conn.__rows[tname] = [] }\n"
+        "        conn.__rows[tname] = conn.__rows[tname] + [row]\n"
+        "        return null\n"
+        "    }\n"
+        "    return null\n"
+        "}\n"
+        "fn __xs_db_match_where(row, where) {\n"
+        "    if where == null { return true }\n"
+        "    var parts = where.split(\"==\")\n"
+        "    if parts.len() != 2 { parts = where.split(\"=\") }\n"
+        "    if parts.len() != 2 { return true }\n"
+        "    let col = parts[0].trim()\n"
+        "    let want = __xs_db_coerce(parts[1])\n"
+        "    let got = row[col]\n"
+        "    if got == null { return false }\n"
+        "    return got == want\n"
+        "}\n"
+        "fn __xs_db_query(conn, sql) {\n"
+        "    let up = sql.upper()\n"
+        "    if !up.starts_with(\"SELECT\") { return [] }\n"
+        "    let after_from = sql.split(\" FROM \")\n"
+        "    if after_from.len() < 2 { return [] }\n"
+        "    let rest = after_from[1]\n"
+        "    let where_split = rest.split(\" WHERE \")\n"
+        "    let tname = where_split[0].trim().split(\" \")[0]\n"
+        "    var where = null\n"
+        "    if where_split.len() >= 2 { where = where_split[1].trim() }\n"
+        "    let rows = conn.__rows[tname]\n"
+        "    if rows == null { return [] }\n"
+        "    var out = []\n"
+        "    var i = 0\n"
+        "    while i < rows.len() {\n"
+        "        if __xs_db_match_where(rows[i], where) {\n"
+        "            out = out + [rows[i]]\n"
+        "        }\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    return out\n"
+        "}\n"
+        ;
+
+    Lexer lex; lexer_init(&lex, db_src, "<wasm-db-helpers>");
+    TokenArray ta = lexer_tokenize(&lex);
+    Parser p; parser_init(&p, &ta, "<wasm-db-helpers>");
     Node *prog = parser_parse(&p);
     token_array_free(&ta);
     comment_list_free(&lex.comments);
@@ -16658,6 +16905,7 @@ static void wasm_wrap_for_iters(Node *n) {
    NODE_USE / NODE_IMPORT / NODE_EFFECT_DECL into the equivalent
    regular-statement sequences. The output is still a NODE_PROGRAM. */
 static int g_wasm_json_helpers_added = 0;
+static int g_wasm_db_helpers_added = 0;
 
 /* Pre-lower `collections.Deque(items)`, `collections.Stack(items)`,
    `collections.Set(items)` into inline map literals tagged with a
@@ -16820,6 +17068,1076 @@ static void wasm_pre_lower_collections(Node *n) {
     }
 }
 
+/* ========================================================================
+   Nested actor lowering: convert `actor X { ... }` declared inside an
+   fn body into a top-level class plus a closure that boxes the
+   outer-scope upvalues the methods reference. spawn X becomes a map
+   literal carrying the boxes alongside __class so the existing
+   method-dispatch path on map values can route through.
+
+   The rest of the wasm pipeline never sees NODE_ACTOR_DECL when it
+   shows up inside an enclosing fn, only the synthesised classes.
+   ======================================================================== */
+
+#define WASM_ACTOR_MAX_UPVALS 32
+#define WASM_ACTOR_MAX_PER_FN 8
+
+typedef struct {
+    char *names[WASM_ACTOR_MAX_UPVALS];
+    int   n;
+} NameSet;
+
+static void nameset_init(NameSet *s) { s->n = 0; }
+static int nameset_has(NameSet *s, const char *name) {
+    for (int i = 0; i < s->n; i++) if (strcmp(s->names[i], name) == 0) return 1;
+    return 0;
+}
+static void nameset_add(NameSet *s, const char *name) {
+    if (nameset_has(s, name)) return;
+    if (s->n >= WASM_ACTOR_MAX_UPVALS) return;
+    s->names[s->n++] = xs_strdup(name);
+}
+static void nameset_free(NameSet *s) {
+    for (int i = 0; i < s->n; i++) free(s->names[i]);
+    s->n = 0;
+}
+
+/* Walk an expression collecting NODE_IDENT names that aren't bound
+   locally inside it (params or let/var/const introduced along the
+   way). Used per actor method to find upvalues. */
+static void actor_collect_locals(Node *n, NameSet *locals) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_LET: case NODE_VAR: case NODE_CONST:
+        if (n->let.name) nameset_add(locals, n->let.name);
+        return;
+    default: return;
+    }
+}
+
+static void actor_collect_upvals(Node *n, NameSet *params_and_locals,
+                                 NameSet *out_upvals,
+                                 NameSet *enclosing_decls)
+{
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_IDENT:
+        if (n->ident.name &&
+            !nameset_has(params_and_locals, n->ident.name) &&
+            nameset_has(enclosing_decls, n->ident.name))
+        {
+            nameset_add(out_upvals, n->ident.name);
+        }
+        return;
+    case NODE_PROGRAM:
+        for (int i = 0; i < n->program.stmts.len; i++)
+            actor_collect_upvals(n->program.stmts.items[i], params_and_locals,
+                                 out_upvals, enclosing_decls);
+        return;
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++) {
+            Node *s = n->block.stmts.items[i];
+            actor_collect_locals(s, params_and_locals);
+            actor_collect_upvals(s, params_and_locals, out_upvals, enclosing_decls);
+        }
+        actor_collect_upvals(n->block.expr, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_FN_DECL:
+    case NODE_LAMBDA:
+        /* Nested fn defines its own scope; don't recurse into upvalues
+           from here -- the param list shadows ours. */
+        return;
+    case NODE_LET: case NODE_VAR:
+        actor_collect_upvals(n->let.value, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_CONST:
+        actor_collect_upvals(n->const_.value, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_EXPR_STMT:
+        actor_collect_upvals(n->expr_stmt.expr, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_RETURN:
+        actor_collect_upvals(n->ret.value, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_ASSIGN:
+        actor_collect_upvals(n->assign.target, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->assign.value, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_BINOP:
+        actor_collect_upvals(n->binop.left, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->binop.right, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_UNARY:
+        actor_collect_upvals(n->unary.expr, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_CALL:
+        actor_collect_upvals(n->call.callee, params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->call.args.len; i++)
+            actor_collect_upvals(n->call.args.items[i], params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_METHOD_CALL:
+        actor_collect_upvals(n->method_call.obj, params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            actor_collect_upvals(n->method_call.args.items[i], params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_INDEX:
+        actor_collect_upvals(n->index.obj, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->index.index, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_FIELD:
+        actor_collect_upvals(n->field.obj, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_IF:
+        actor_collect_upvals(n->if_expr.cond, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->if_expr.then, params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            actor_collect_upvals(n->if_expr.elif_conds.items[i], params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            actor_collect_upvals(n->if_expr.elif_thens.items[i], params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->if_expr.else_branch, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_WHILE:
+        actor_collect_upvals(n->while_loop.cond, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->while_loop.body, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_FOR:
+        actor_collect_upvals(n->for_loop.iter, params_and_locals, out_upvals, enclosing_decls);
+        /* The loop var is bound by the pattern; if it's a simple ident
+           we mask it from upvalue detection. */
+        if (n->for_loop.pattern && VAL_TAG(n->for_loop.pattern) == NODE_PAT_IDENT &&
+            n->for_loop.pattern->pat_ident.name)
+            nameset_add(params_and_locals, n->for_loop.pattern->pat_ident.name);
+        actor_collect_upvals(n->for_loop.body, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_LOOP:
+        actor_collect_upvals(n->loop.body, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            actor_collect_upvals(n->lit_array.elems.items[i], params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++) {
+            actor_collect_upvals(n->lit_map.keys.items[i], params_and_locals, out_upvals, enclosing_decls);
+            actor_collect_upvals(n->lit_map.vals.items[i], params_and_locals, out_upvals, enclosing_decls);
+        }
+        return;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            actor_collect_upvals(n->lit_string.parts.items[i], params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_SPAWN:
+        actor_collect_upvals(n->spawn_.expr, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_AWAIT:
+        actor_collect_upvals(n->await_.expr, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_RANGE:
+        actor_collect_upvals(n->range.start, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->range.end, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_TRY:
+        actor_collect_upvals(n->try_.body, params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            actor_collect_upvals(n->try_.catch_arms.items[i].body, params_and_locals, out_upvals, enclosing_decls);
+        actor_collect_upvals(n->try_.finally_block, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_THROW:
+        actor_collect_upvals(n->throw_.value, params_and_locals, out_upvals, enclosing_decls);
+        return;
+    case NODE_MATCH:
+        actor_collect_upvals(n->match.subject, params_and_locals, out_upvals, enclosing_decls);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            actor_collect_upvals(n->match.arms.items[i].body, params_and_locals, out_upvals, enclosing_decls);
+            actor_collect_upvals(n->match.arms.items[i].guard, params_and_locals, out_upvals, enclosing_decls);
+        }
+        return;
+    default: return;
+    }
+}
+
+/* Rewrite NODE_IDENT(x) -> self.__box_x[0] (read), and an assignment
+   `x = v` -> `self.__box_x[0] = v`, for each x in upvals. Walks the
+   actor method body. Does NOT descend into nested fns/lambdas
+   (they'd shadow with their own params anyway and would need their
+   own pass). */
+static Node *actor_rewrite_method_body(Node *n, NameSet *upvals);
+
+static void actor_rewrite_method_list(NodeList *l, NameSet *upvals) {
+    if (!l) return;
+    for (int i = 0; i < l->len; i++) l->items[i] = actor_rewrite_method_body(l->items[i], upvals);
+}
+
+static Node *actor_box_read(const char *upvname) {
+    /* self.__box_<name>[0] */
+    char box_name[128];
+    snprintf(box_name, sizeof(box_name), "__box_%s", upvname);
+    Node *self_id = mk_ident("self");
+    Node *fld = node_new(NODE_FIELD, span_zero());
+    fld->field.obj = self_id;
+    fld->field.name = xs_strdup(box_name);
+    fld->field.optional = 0;
+    Node *idx = node_new(NODE_INDEX, span_zero());
+    idx->index.obj = fld;
+    idx->index.index = mk_int_lit(0);
+    return idx;
+}
+
+static Node *actor_rewrite_method_body(Node *n, NameSet *upvals) {
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_IDENT:
+        if (n->ident.name && nameset_has(upvals, n->ident.name)) {
+            Node *r = actor_box_read(n->ident.name);
+            /* leak the old ident node, harmless one-shot */
+            return r;
+        }
+        return n;
+    case NODE_ASSIGN: {
+        /* If LHS is an upvalue ident, rewrite to box index assignment. */
+        Node *tgt = n->assign.target;
+        if (tgt && VAL_TAG(tgt) == NODE_IDENT &&
+            tgt->ident.name && nameset_has(upvals, tgt->ident.name))
+        {
+            n->assign.target = actor_box_read(tgt->ident.name);
+        } else {
+            n->assign.target = actor_rewrite_method_body(tgt, upvals);
+        }
+        n->assign.value = actor_rewrite_method_body(n->assign.value, upvals);
+        return n;
+    }
+    case NODE_BLOCK:
+        actor_rewrite_method_list(&n->block.stmts, upvals);
+        n->block.expr = actor_rewrite_method_body(n->block.expr, upvals);
+        return n;
+    case NODE_LET: case NODE_VAR:
+        n->let.value = actor_rewrite_method_body(n->let.value, upvals);
+        return n;
+    case NODE_CONST:
+        n->const_.value = actor_rewrite_method_body(n->const_.value, upvals);
+        return n;
+    case NODE_EXPR_STMT:
+        n->expr_stmt.expr = actor_rewrite_method_body(n->expr_stmt.expr, upvals);
+        return n;
+    case NODE_RETURN:
+        n->ret.value = actor_rewrite_method_body(n->ret.value, upvals);
+        return n;
+    case NODE_BINOP:
+        n->binop.left  = actor_rewrite_method_body(n->binop.left, upvals);
+        n->binop.right = actor_rewrite_method_body(n->binop.right, upvals);
+        return n;
+    case NODE_UNARY:
+        n->unary.expr = actor_rewrite_method_body(n->unary.expr, upvals);
+        return n;
+    case NODE_CALL:
+        n->call.callee = actor_rewrite_method_body(n->call.callee, upvals);
+        actor_rewrite_method_list(&n->call.args, upvals);
+        return n;
+    case NODE_METHOD_CALL:
+        n->method_call.obj = actor_rewrite_method_body(n->method_call.obj, upvals);
+        actor_rewrite_method_list(&n->method_call.args, upvals);
+        return n;
+    case NODE_INDEX:
+        n->index.obj   = actor_rewrite_method_body(n->index.obj, upvals);
+        n->index.index = actor_rewrite_method_body(n->index.index, upvals);
+        return n;
+    case NODE_FIELD:
+        n->field.obj = actor_rewrite_method_body(n->field.obj, upvals);
+        return n;
+    case NODE_IF:
+        n->if_expr.cond = actor_rewrite_method_body(n->if_expr.cond, upvals);
+        n->if_expr.then = actor_rewrite_method_body(n->if_expr.then, upvals);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            n->if_expr.elif_conds.items[i] = actor_rewrite_method_body(n->if_expr.elif_conds.items[i], upvals);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            n->if_expr.elif_thens.items[i] = actor_rewrite_method_body(n->if_expr.elif_thens.items[i], upvals);
+        n->if_expr.else_branch = actor_rewrite_method_body(n->if_expr.else_branch, upvals);
+        return n;
+    case NODE_WHILE:
+        n->while_loop.cond = actor_rewrite_method_body(n->while_loop.cond, upvals);
+        n->while_loop.body = actor_rewrite_method_body(n->while_loop.body, upvals);
+        return n;
+    case NODE_FOR:
+        n->for_loop.iter = actor_rewrite_method_body(n->for_loop.iter, upvals);
+        n->for_loop.body = actor_rewrite_method_body(n->for_loop.body, upvals);
+        return n;
+    case NODE_LOOP:
+        n->loop.body = actor_rewrite_method_body(n->loop.body, upvals);
+        return n;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        actor_rewrite_method_list(&n->lit_array.elems, upvals);
+        return n;
+    case NODE_LIT_MAP:
+        actor_rewrite_method_list(&n->lit_map.keys, upvals);
+        actor_rewrite_method_list(&n->lit_map.vals, upvals);
+        return n;
+    case NODE_INTERP_STRING:
+        actor_rewrite_method_list(&n->lit_string.parts, upvals);
+        return n;
+    case NODE_RANGE:
+        n->range.start = actor_rewrite_method_body(n->range.start, upvals);
+        n->range.end   = actor_rewrite_method_body(n->range.end, upvals);
+        return n;
+    case NODE_TRY:
+        n->try_.body = actor_rewrite_method_body(n->try_.body, upvals);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            n->try_.catch_arms.items[i].body =
+                actor_rewrite_method_body(n->try_.catch_arms.items[i].body, upvals);
+        n->try_.finally_block = actor_rewrite_method_body(n->try_.finally_block, upvals);
+        return n;
+    case NODE_THROW:
+        n->throw_.value = actor_rewrite_method_body(n->throw_.value, upvals);
+        return n;
+    case NODE_MATCH:
+        n->match.subject = actor_rewrite_method_body(n->match.subject, upvals);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            n->match.arms.items[i].body = actor_rewrite_method_body(n->match.arms.items[i].body, upvals);
+            if (n->match.arms.items[i].guard)
+                n->match.arms.items[i].guard = actor_rewrite_method_body(n->match.arms.items[i].guard, upvals);
+        }
+        return n;
+    case NODE_SPAWN:
+        n->spawn_.expr = actor_rewrite_method_body(n->spawn_.expr, upvals);
+        return n;
+    case NODE_AWAIT:
+        n->await_.expr = actor_rewrite_method_body(n->await_.expr, upvals);
+        return n;
+    case NODE_FN_DECL:
+    case NODE_LAMBDA:
+        /* Don't recurse into nested fns: they introduce their own scope. */
+        return n;
+    default:
+        return n;
+    }
+}
+
+/* Rewrite the enclosing fn body so each upvalue use becomes <name>[0]
+   instead of <name> (the original var was wrapped to be an array).
+   Skips nested fn/lambda bodies. Skips actor decl method bodies (those
+   were already rewritten via actor_rewrite_method_body). Also skips
+   spawn-instance map literals we synthesise (no upvalue refs there).
+
+   Replacing `x` -> `x[0]` is implemented via a small wrapper: returns
+   the new node (caller stores it back via parent's slot). */
+static Node *actor_rewrite_fn_body(Node *n, NameSet *boxed,
+                                   const char **skip_decl_names, int n_skip);
+
+static void actor_rewrite_fn_body_list(NodeList *l, NameSet *boxed,
+                                       const char **skip, int n_skip)
+{
+    if (!l) return;
+    for (int i = 0; i < l->len; i++)
+        l->items[i] = actor_rewrite_fn_body(l->items[i], boxed, skip, n_skip);
+}
+
+static Node *actor_idx_read(const char *name) {
+    /* <name>[0] */
+    Node *idx = node_new(NODE_INDEX, span_zero());
+    idx->index.obj = mk_ident(name);
+    idx->index.index = mk_int_lit(0);
+    return idx;
+}
+
+static Node *actor_rewrite_fn_body(Node *n, NameSet *boxed,
+                                   const char **skip_decl_names, int n_skip)
+{
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_IDENT:
+        if (n->ident.name && nameset_has(boxed, n->ident.name)) {
+            return actor_idx_read(n->ident.name);
+        }
+        return n;
+    case NODE_ASSIGN: {
+        Node *tgt = n->assign.target;
+        if (tgt && VAL_TAG(tgt) == NODE_IDENT && tgt->ident.name &&
+            nameset_has(boxed, tgt->ident.name))
+        {
+            n->assign.target = actor_idx_read(tgt->ident.name);
+        } else {
+            n->assign.target = actor_rewrite_fn_body(tgt, boxed, skip_decl_names, n_skip);
+        }
+        n->assign.value = actor_rewrite_fn_body(n->assign.value, boxed, skip_decl_names, n_skip);
+        return n;
+    }
+    case NODE_LET: case NODE_VAR:
+        /* If this is the boxed var's own declaration, skip the rewrite
+           on the value initialiser -- we handle that separately. */
+        if (n->let.name && nameset_has(boxed, n->let.name)) return n;
+        n->let.value = actor_rewrite_fn_body(n->let.value, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_CONST:
+        if (n->const_.name && nameset_has(boxed, n->const_.name)) return n;
+        n->const_.value = actor_rewrite_fn_body(n->const_.value, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_BLOCK:
+        actor_rewrite_fn_body_list(&n->block.stmts, boxed, skip_decl_names, n_skip);
+        n->block.expr = actor_rewrite_fn_body(n->block.expr, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_EXPR_STMT:
+        n->expr_stmt.expr = actor_rewrite_fn_body(n->expr_stmt.expr, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_RETURN:
+        n->ret.value = actor_rewrite_fn_body(n->ret.value, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_BINOP:
+        n->binop.left  = actor_rewrite_fn_body(n->binop.left, boxed, skip_decl_names, n_skip);
+        n->binop.right = actor_rewrite_fn_body(n->binop.right, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_UNARY:
+        n->unary.expr = actor_rewrite_fn_body(n->unary.expr, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_CALL:
+        n->call.callee = actor_rewrite_fn_body(n->call.callee, boxed, skip_decl_names, n_skip);
+        actor_rewrite_fn_body_list(&n->call.args, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_METHOD_CALL:
+        n->method_call.obj = actor_rewrite_fn_body(n->method_call.obj, boxed, skip_decl_names, n_skip);
+        actor_rewrite_fn_body_list(&n->method_call.args, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_INDEX:
+        n->index.obj   = actor_rewrite_fn_body(n->index.obj, boxed, skip_decl_names, n_skip);
+        n->index.index = actor_rewrite_fn_body(n->index.index, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_FIELD:
+        n->field.obj = actor_rewrite_fn_body(n->field.obj, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_IF:
+        n->if_expr.cond = actor_rewrite_fn_body(n->if_expr.cond, boxed, skip_decl_names, n_skip);
+        n->if_expr.then = actor_rewrite_fn_body(n->if_expr.then, boxed, skip_decl_names, n_skip);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            n->if_expr.elif_conds.items[i] = actor_rewrite_fn_body(n->if_expr.elif_conds.items[i], boxed, skip_decl_names, n_skip);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            n->if_expr.elif_thens.items[i] = actor_rewrite_fn_body(n->if_expr.elif_thens.items[i], boxed, skip_decl_names, n_skip);
+        n->if_expr.else_branch = actor_rewrite_fn_body(n->if_expr.else_branch, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_WHILE:
+        n->while_loop.cond = actor_rewrite_fn_body(n->while_loop.cond, boxed, skip_decl_names, n_skip);
+        n->while_loop.body = actor_rewrite_fn_body(n->while_loop.body, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_FOR:
+        n->for_loop.iter = actor_rewrite_fn_body(n->for_loop.iter, boxed, skip_decl_names, n_skip);
+        n->for_loop.body = actor_rewrite_fn_body(n->for_loop.body, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_LOOP:
+        n->loop.body = actor_rewrite_fn_body(n->loop.body, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        actor_rewrite_fn_body_list(&n->lit_array.elems, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_LIT_MAP:
+        actor_rewrite_fn_body_list(&n->lit_map.keys, boxed, skip_decl_names, n_skip);
+        actor_rewrite_fn_body_list(&n->lit_map.vals, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_INTERP_STRING:
+        actor_rewrite_fn_body_list(&n->lit_string.parts, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_RANGE:
+        n->range.start = actor_rewrite_fn_body(n->range.start, boxed, skip_decl_names, n_skip);
+        n->range.end   = actor_rewrite_fn_body(n->range.end, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_TRY:
+        n->try_.body = actor_rewrite_fn_body(n->try_.body, boxed, skip_decl_names, n_skip);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            n->try_.catch_arms.items[i].body =
+                actor_rewrite_fn_body(n->try_.catch_arms.items[i].body, boxed, skip_decl_names, n_skip);
+        n->try_.finally_block = actor_rewrite_fn_body(n->try_.finally_block, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_THROW:
+        n->throw_.value = actor_rewrite_fn_body(n->throw_.value, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_MATCH:
+        n->match.subject = actor_rewrite_fn_body(n->match.subject, boxed, skip_decl_names, n_skip);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            n->match.arms.items[i].body = actor_rewrite_fn_body(n->match.arms.items[i].body, boxed, skip_decl_names, n_skip);
+            if (n->match.arms.items[i].guard)
+                n->match.arms.items[i].guard = actor_rewrite_fn_body(n->match.arms.items[i].guard, boxed, skip_decl_names, n_skip);
+        }
+        return n;
+    case NODE_SPAWN:
+        n->spawn_.expr = actor_rewrite_fn_body(n->spawn_.expr, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_AWAIT:
+        n->await_.expr = actor_rewrite_fn_body(n->await_.expr, boxed, skip_decl_names, n_skip);
+        return n;
+    case NODE_FN_DECL:
+    case NODE_LAMBDA:
+        /* Don't recurse -- nested fn has its own scope. */
+        return n;
+    default:
+        return n;
+    }
+    (void)skip_decl_names; (void)n_skip;
+}
+
+/* Build a class decl whose methods are the actor's methods rewritten
+   to access upvalues via self.__box_<name>[0]. Each method gets `self`
+   prepended to its param list. */
+static Node *build_actor_class(const char *cls_name, Node *actor, NameSet *upvals) {
+    Node *cls = node_new(NODE_CLASS_DECL, span_zero());
+    cls->class_decl.name = xs_strdup(cls_name);
+    cls->class_decl.bases = NULL;
+    cls->class_decl.nbases = 0;
+    cls->class_decl.members = nodelist_new();
+    for (int i = 0; i < actor->actor_decl.methods.len; i++) {
+        Node *m = actor->actor_decl.methods.items[i];
+        if (!m || VAL_TAG(m) != NODE_FN_DECL) continue;
+        /* Prepend self to the param list */
+        ParamList new_params = paramlist_new();
+        Param self_p = {0};
+        self_p.name = xs_strdup("self");
+        self_p.span = span_zero();
+        paramlist_push(&new_params, self_p);
+        for (int j = 0; j < m->fn_decl.params.len; j++)
+            paramlist_push(&new_params, m->fn_decl.params.items[j]);
+        /* steal the old params array; we copied the entries */
+        free(m->fn_decl.params.items);
+        m->fn_decl.params = new_params;
+        /* Rewrite body to reach upvalues via self.__box. */
+        m->fn_decl.body = actor_rewrite_method_body(m->fn_decl.body, upvals);
+        nodelist_push(&cls->class_decl.members, m);
+    }
+    /* Detach methods from the original actor node so the eventual free
+       doesn't take them down. */
+    actor->actor_decl.methods.items = NULL;
+    actor->actor_decl.methods.len = 0;
+    actor->actor_decl.methods.cap = 0;
+    return cls;
+}
+
+/* Build the spawn-instance map literal:
+       #{__class: "<cls_name>", __box_<u1>: <u1>, __box_<u2>: <u2>, ...}
+   The upvalue refs are raw NODE_IDENT and point to the boxed var (an
+   array) in the enclosing fn. */
+static Node *build_spawn_instance(const char *cls_name, NameSet *upvals) {
+    Node *map = node_new(NODE_LIT_MAP, span_zero());
+    map->lit_map.keys = nodelist_new();
+    map->lit_map.vals = nodelist_new();
+    nodelist_push(&map->lit_map.keys, mk_str_lit("__class"));
+    nodelist_push(&map->lit_map.vals, mk_str_lit(cls_name));
+    for (int i = 0; i < upvals->n; i++) {
+        char k[128];
+        snprintf(k, sizeof(k), "__box_%s", upvals->names[i]);
+        nodelist_push(&map->lit_map.keys, mk_str_lit(k));
+        nodelist_push(&map->lit_map.vals, mk_ident(upvals->names[i]));
+    }
+    return map;
+}
+
+/* Walk fn body replacing `spawn ActorName` with the synthesised
+   instance map. Skip nested fn bodies. */
+typedef struct {
+    char     *name;          /* actor name */
+    char     *cls_name;      /* synthesised class name */
+    NameSet  *upvals;
+} ActorSpawnMap;
+
+static Node *replace_spawn_for(Node *n, ActorSpawnMap *maps, int n_maps) {
+    if (!n) return NULL;
+    switch (VAL_TAG(n)) {
+    case NODE_SPAWN: {
+        Node *e = n->spawn_.expr;
+        if (e && VAL_TAG(e) == NODE_IDENT && e->ident.name) {
+            for (int k = 0; k < n_maps; k++) {
+                if (strcmp(maps[k].name, e->ident.name) == 0) {
+                    return build_spawn_instance(maps[k].cls_name, maps[k].upvals);
+                }
+            }
+        }
+        n->spawn_.expr = replace_spawn_for(n->spawn_.expr, maps, n_maps);
+        return n;
+    }
+    case NODE_BLOCK:
+        for (int i = 0; i < n->block.stmts.len; i++)
+            n->block.stmts.items[i] = replace_spawn_for(n->block.stmts.items[i], maps, n_maps);
+        n->block.expr = replace_spawn_for(n->block.expr, maps, n_maps);
+        return n;
+    case NODE_LET: case NODE_VAR:
+        n->let.value = replace_spawn_for(n->let.value, maps, n_maps);
+        return n;
+    case NODE_CONST:
+        n->const_.value = replace_spawn_for(n->const_.value, maps, n_maps);
+        return n;
+    case NODE_EXPR_STMT:
+        n->expr_stmt.expr = replace_spawn_for(n->expr_stmt.expr, maps, n_maps);
+        return n;
+    case NODE_RETURN:
+        n->ret.value = replace_spawn_for(n->ret.value, maps, n_maps);
+        return n;
+    case NODE_ASSIGN:
+        n->assign.target = replace_spawn_for(n->assign.target, maps, n_maps);
+        n->assign.value  = replace_spawn_for(n->assign.value, maps, n_maps);
+        return n;
+    case NODE_BINOP:
+        n->binop.left  = replace_spawn_for(n->binop.left, maps, n_maps);
+        n->binop.right = replace_spawn_for(n->binop.right, maps, n_maps);
+        return n;
+    case NODE_UNARY:
+        n->unary.expr = replace_spawn_for(n->unary.expr, maps, n_maps);
+        return n;
+    case NODE_CALL:
+        n->call.callee = replace_spawn_for(n->call.callee, maps, n_maps);
+        for (int i = 0; i < n->call.args.len; i++)
+            n->call.args.items[i] = replace_spawn_for(n->call.args.items[i], maps, n_maps);
+        return n;
+    case NODE_METHOD_CALL:
+        n->method_call.obj = replace_spawn_for(n->method_call.obj, maps, n_maps);
+        for (int i = 0; i < n->method_call.args.len; i++)
+            n->method_call.args.items[i] = replace_spawn_for(n->method_call.args.items[i], maps, n_maps);
+        return n;
+    case NODE_INDEX:
+        n->index.obj   = replace_spawn_for(n->index.obj, maps, n_maps);
+        n->index.index = replace_spawn_for(n->index.index, maps, n_maps);
+        return n;
+    case NODE_FIELD:
+        n->field.obj = replace_spawn_for(n->field.obj, maps, n_maps);
+        return n;
+    case NODE_IF:
+        n->if_expr.cond = replace_spawn_for(n->if_expr.cond, maps, n_maps);
+        n->if_expr.then = replace_spawn_for(n->if_expr.then, maps, n_maps);
+        for (int i = 0; i < n->if_expr.elif_conds.len; i++)
+            n->if_expr.elif_conds.items[i] = replace_spawn_for(n->if_expr.elif_conds.items[i], maps, n_maps);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            n->if_expr.elif_thens.items[i] = replace_spawn_for(n->if_expr.elif_thens.items[i], maps, n_maps);
+        n->if_expr.else_branch = replace_spawn_for(n->if_expr.else_branch, maps, n_maps);
+        return n;
+    case NODE_WHILE:
+        n->while_loop.cond = replace_spawn_for(n->while_loop.cond, maps, n_maps);
+        n->while_loop.body = replace_spawn_for(n->while_loop.body, maps, n_maps);
+        return n;
+    case NODE_FOR:
+        n->for_loop.iter = replace_spawn_for(n->for_loop.iter, maps, n_maps);
+        n->for_loop.body = replace_spawn_for(n->for_loop.body, maps, n_maps);
+        return n;
+    case NODE_LOOP:
+        n->loop.body = replace_spawn_for(n->loop.body, maps, n_maps);
+        return n;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            n->lit_array.elems.items[i] = replace_spawn_for(n->lit_array.elems.items[i], maps, n_maps);
+        return n;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.keys.len; i++) {
+            n->lit_map.keys.items[i] = replace_spawn_for(n->lit_map.keys.items[i], maps, n_maps);
+            n->lit_map.vals.items[i] = replace_spawn_for(n->lit_map.vals.items[i], maps, n_maps);
+        }
+        return n;
+    case NODE_INTERP_STRING:
+        for (int i = 0; i < n->lit_string.parts.len; i++)
+            n->lit_string.parts.items[i] = replace_spawn_for(n->lit_string.parts.items[i], maps, n_maps);
+        return n;
+    case NODE_RANGE:
+        n->range.start = replace_spawn_for(n->range.start, maps, n_maps);
+        n->range.end   = replace_spawn_for(n->range.end, maps, n_maps);
+        return n;
+    case NODE_TRY:
+        n->try_.body = replace_spawn_for(n->try_.body, maps, n_maps);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            n->try_.catch_arms.items[i].body =
+                replace_spawn_for(n->try_.catch_arms.items[i].body, maps, n_maps);
+        n->try_.finally_block = replace_spawn_for(n->try_.finally_block, maps, n_maps);
+        return n;
+    case NODE_THROW:
+        n->throw_.value = replace_spawn_for(n->throw_.value, maps, n_maps);
+        return n;
+    case NODE_MATCH:
+        n->match.subject = replace_spawn_for(n->match.subject, maps, n_maps);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            n->match.arms.items[i].body = replace_spawn_for(n->match.arms.items[i].body, maps, n_maps);
+            if (n->match.arms.items[i].guard)
+                n->match.arms.items[i].guard = replace_spawn_for(n->match.arms.items[i].guard, maps, n_maps);
+        }
+        return n;
+    case NODE_AWAIT:
+        n->await_.expr = replace_spawn_for(n->await_.expr, maps, n_maps);
+        return n;
+    case NODE_FN_DECL:
+    case NODE_LAMBDA:
+        return n;
+    default: return n;
+    }
+}
+
+/* Process a single fn body: find actor decls, lift them out, rewrite
+   accesses to upvalues. New top-level class decls go into out_classes
+   (caller splices them into the program). */
+static int g_wasm_nested_actor_seq = 0;
+
+static void process_fn_body_for_actors(Node *body_node, NodeList *out_classes,
+                                       NameSet *enclosing_decls)
+{
+    if (!body_node) return;
+    /* Find actor decls at the top level of the body. The body may be a
+       NODE_BLOCK. Recurse into nested blocks (if/while/for) too so
+       actors declared inside an if-branch still get hoisted. */
+    Node *stmts_owner = body_node;
+    /* Helper: walk every block-level stmt in body_node, but skip
+       nested fn/lambda bodies. Build an array of pointers-to-stmt
+       slots so we can mutate in place. */
+    Node *actors[WASM_ACTOR_MAX_PER_FN];
+    int  n_actors = 0;
+
+    /* Inline traversal: gather actor decl pointers */
+    /* We'll do BFS over the body. */
+    /* For simplicity, we recurse via a small visitor. */
+    /* Local lambda-like function via macro: not portable, so write it
+       out explicitly with an explicit stack. */
+
+    /* Use a 64-slot worklist; covers nested blocks plenty. */
+    Node *work[64];
+    int work_n = 0;
+    work[work_n++] = stmts_owner;
+    while (work_n > 0 && n_actors < WASM_ACTOR_MAX_PER_FN) {
+        Node *cur = work[--work_n];
+        if (!cur) continue;
+        switch (VAL_TAG(cur)) {
+        case NODE_ACTOR_DECL:
+            actors[n_actors++] = cur;
+            break;
+        case NODE_BLOCK:
+            for (int i = 0; i < cur->block.stmts.len && work_n < 64; i++)
+                work[work_n++] = cur->block.stmts.items[i];
+            if (work_n < 64) work[work_n++] = cur->block.expr;
+            break;
+        case NODE_IF:
+            if (work_n < 64) work[work_n++] = cur->if_expr.then;
+            for (int i = 0; i < cur->if_expr.elif_thens.len && work_n < 64; i++)
+                work[work_n++] = cur->if_expr.elif_thens.items[i];
+            if (work_n < 64) work[work_n++] = cur->if_expr.else_branch;
+            break;
+        case NODE_WHILE:
+            if (work_n < 64) work[work_n++] = cur->while_loop.body;
+            break;
+        case NODE_FOR:
+            if (work_n < 64) work[work_n++] = cur->for_loop.body;
+            break;
+        case NODE_LOOP:
+            if (work_n < 64) work[work_n++] = cur->loop.body;
+            break;
+        default: break;
+        }
+    }
+
+    if (n_actors == 0) return;
+
+    /* Per-actor upvalue collection. */
+    NameSet upvals[WASM_ACTOR_MAX_PER_FN];
+    for (int k = 0; k < n_actors; k++) nameset_init(&upvals[k]);
+
+    /* Union of all upvalues -> what to box in enclosing fn. */
+    NameSet boxed;
+    nameset_init(&boxed);
+
+    /* Names of actors in this fn; used to skip ident-as-actor when
+       collecting upvalues. */
+    NameSet actor_names;
+    nameset_init(&actor_names);
+    for (int k = 0; k < n_actors; k++) {
+        if (actors[k]->actor_decl.name)
+            nameset_add(&actor_names, actors[k]->actor_decl.name);
+    }
+
+    for (int k = 0; k < n_actors; k++) {
+        Node *a = actors[k];
+        for (int j = 0; j < a->actor_decl.methods.len; j++) {
+            Node *m = a->actor_decl.methods.items[j];
+            if (!m || VAL_TAG(m) != NODE_FN_DECL) continue;
+            NameSet pls;
+            nameset_init(&pls);
+            for (int p = 0; p < m->fn_decl.params.len; p++) {
+                if (m->fn_decl.params.items[p].name)
+                    nameset_add(&pls, m->fn_decl.params.items[p].name);
+            }
+            /* `self` is the implicit first param of every actor method
+               under our rewrite; mask it so user-level refs don't
+               accidentally become upvalues. */
+            nameset_add(&pls, "self");
+            /* Also mask sibling actor names so we don't try to box one
+               actor as another's upvalue. */
+            for (int n = 0; n < actor_names.n; n++)
+                nameset_add(&pls, actor_names.names[n]);
+            actor_collect_upvals(m->fn_decl.body, &pls, &upvals[k], enclosing_decls);
+            nameset_free(&pls);
+        }
+        for (int u = 0; u < upvals[k].n; u++) nameset_add(&boxed, upvals[k].names[u]);
+    }
+    nameset_free(&actor_names);
+
+    /* Build the class decls + spawn replacement table. */
+    ActorSpawnMap maps[WASM_ACTOR_MAX_PER_FN];
+    for (int k = 0; k < n_actors; k++) {
+        char cls_name[128];
+        snprintf(cls_name, sizeof(cls_name), "__actor_%s_%d",
+                 actors[k]->actor_decl.name ? actors[k]->actor_decl.name : "anon",
+                 ++g_wasm_nested_actor_seq);
+        Node *cls = build_actor_class(cls_name, actors[k], &upvals[k]);
+        nodelist_push(out_classes, cls);
+        maps[k].name = xs_strdup(actors[k]->actor_decl.name ?
+                                 actors[k]->actor_decl.name : "anon");
+        maps[k].cls_name = xs_strdup(cls_name);
+        maps[k].upvals = &upvals[k];
+    }
+
+    /* Box the upvalue var/let declarations and rewrite later refs. */
+    /* Walk body_node's block stmts, wrap declarations of names in
+       `boxed` so their value becomes `[expr]`. */
+    /* Then walk again to convert all reads/writes to `name[0]`. */
+    /* We use actor_rewrite_fn_body to do the second walk; it knows to
+       skip nested fns and the var decl itself. */
+
+    /* Wrap declarations: walk body recursively, but only top-level
+       stmts of fn body / nested blocks (no nested fns). */
+    {
+        Node *w[64];
+        int w_n = 0;
+        w[w_n++] = body_node;
+        while (w_n > 0) {
+            Node *cur = w[--w_n];
+            if (!cur) continue;
+            int tag = VAL_TAG(cur);
+            if (tag == NODE_BLOCK) {
+                for (int i = 0; i < cur->block.stmts.len; i++) {
+                    Node *s = cur->block.stmts.items[i];
+                    if (!s) continue;
+                    int stag = VAL_TAG(s);
+                    if ((stag == NODE_LET || stag == NODE_VAR) &&
+                        s->let.name && nameset_has(&boxed, s->let.name))
+                    {
+                        /* Wrap the value: var x = expr -> var x = [expr] */
+                        Node *arr = node_new(NODE_LIT_ARRAY, span_zero());
+                        arr->lit_array.elems = nodelist_new();
+                        Node *expr = s->let.value;
+                        if (!expr) expr = mk_null_lit();
+                        nodelist_push(&arr->lit_array.elems, expr);
+                        s->let.value = arr;
+                    }
+                    if (w_n < 64) w[w_n++] = s;
+                }
+                if (w_n < 64) w[w_n++] = cur->block.expr;
+            } else if (tag == NODE_IF) {
+                if (w_n < 64) w[w_n++] = cur->if_expr.then;
+                for (int i = 0; i < cur->if_expr.elif_thens.len && w_n < 64; i++)
+                    w[w_n++] = cur->if_expr.elif_thens.items[i];
+                if (w_n < 64) w[w_n++] = cur->if_expr.else_branch;
+            } else if (tag == NODE_WHILE) {
+                if (w_n < 64) w[w_n++] = cur->while_loop.body;
+            } else if (tag == NODE_FOR) {
+                if (w_n < 64) w[w_n++] = cur->for_loop.body;
+            } else if (tag == NODE_LOOP) {
+                if (w_n < 64) w[w_n++] = cur->loop.body;
+            }
+        }
+    }
+
+    /* Replace each NODE_ACTOR_DECL stmt in the body with an empty
+       expr-stmt (null). We do this before the ident-rewrite so the
+       actor's body doesn't pick up double rewriting. */
+    {
+        Node *w[64];
+        int w_n = 0;
+        w[w_n++] = body_node;
+        while (w_n > 0) {
+            Node *cur = w[--w_n];
+            if (!cur) continue;
+            int tag = VAL_TAG(cur);
+            if (tag == NODE_BLOCK) {
+                for (int i = 0; i < cur->block.stmts.len; i++) {
+                    Node *s = cur->block.stmts.items[i];
+                    if (!s) continue;
+                    if (VAL_TAG(s) == NODE_ACTOR_DECL) {
+                        cur->block.stmts.items[i] = mk_expr_stmt(mk_null_lit());
+                    } else if (w_n < 64) {
+                        w[w_n++] = s;
+                    }
+                }
+                if (w_n < 64) w[w_n++] = cur->block.expr;
+            } else if (tag == NODE_IF) {
+                if (w_n < 64) w[w_n++] = cur->if_expr.then;
+                for (int i = 0; i < cur->if_expr.elif_thens.len && w_n < 64; i++)
+                    w[w_n++] = cur->if_expr.elif_thens.items[i];
+                if (w_n < 64) w[w_n++] = cur->if_expr.else_branch;
+            } else if (tag == NODE_WHILE) {
+                if (w_n < 64) w[w_n++] = cur->while_loop.body;
+            } else if (tag == NODE_FOR) {
+                if (w_n < 64) w[w_n++] = cur->for_loop.body;
+            } else if (tag == NODE_LOOP) {
+                if (w_n < 64) w[w_n++] = cur->loop.body;
+            }
+        }
+    }
+
+    /* Now do the ident -> ident[0] rewrite across the body. The
+       skip_decl_names list is unused but kept in the signature for
+       future-proofing. */
+    Node *new_body = actor_rewrite_fn_body(body_node, &boxed, NULL, 0);
+    (void)new_body; /* body is rewritten in place by the visitor */
+
+    /* Replace `spawn ActorName` with the instance map literal. */
+    replace_spawn_for(body_node, maps, n_actors);
+
+    /* Cleanup */
+    for (int k = 0; k < n_actors; k++) {
+        free(maps[k].name);
+        free(maps[k].cls_name);
+    }
+    for (int k = 0; k < n_actors; k++) nameset_free(&upvals[k]);
+    nameset_free(&boxed);
+}
+
+/* Build a NameSet of names declared at the body level (let/var/const).
+   This is the set of candidate upvalues for any nested actor. */
+static void collect_body_decls(Node *body, NameSet *out) {
+    if (!body) return;
+    Node *w[64];
+    int w_n = 0;
+    w[w_n++] = body;
+    while (w_n > 0) {
+        Node *cur = w[--w_n];
+        if (!cur) continue;
+        int tag = VAL_TAG(cur);
+        if (tag == NODE_BLOCK) {
+            for (int i = 0; i < cur->block.stmts.len; i++) {
+                Node *s = cur->block.stmts.items[i];
+                if (!s) continue;
+                int stag = VAL_TAG(s);
+                if ((stag == NODE_LET || stag == NODE_VAR || stag == NODE_CONST) &&
+                    s->let.name) {
+                    nameset_add(out, s->let.name);
+                }
+                if (w_n < 64) w[w_n++] = s;
+            }
+            if (w_n < 64) w[w_n++] = cur->block.expr;
+        } else if (tag == NODE_IF) {
+            if (w_n < 64) w[w_n++] = cur->if_expr.then;
+            for (int i = 0; i < cur->if_expr.elif_thens.len && w_n < 64; i++)
+                w[w_n++] = cur->if_expr.elif_thens.items[i];
+            if (w_n < 64) w[w_n++] = cur->if_expr.else_branch;
+        } else if (tag == NODE_WHILE) {
+            if (w_n < 64) w[w_n++] = cur->while_loop.body;
+        } else if (tag == NODE_FOR) {
+            if (w_n < 64) w[w_n++] = cur->for_loop.body;
+        } else if (tag == NODE_LOOP) {
+            if (w_n < 64) w[w_n++] = cur->loop.body;
+        }
+    }
+}
+
+/* Top-level driver: scan the program for fn/lambda decls that contain
+   nested actor decls, lift each actor out into a top-level class plus
+   boxed-upvalue closure. Splices the new classes at the front of the
+   program so collect_functions / class_method registration picks them
+   up like any other top-level class. */
+static void wasm_lower_nested_actors(Node *program) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    NodeList new_classes = nodelist_new();
+    /* Walk all top-level stmts, recurse into fn decls (and their
+       potentially-nested fns). */
+    NodeList *stmts = &program->program.stmts;
+    /* Use a stack to descend into nested fn/lambda bodies as well. */
+    Node *stack[256];
+    int sp = 0;
+    for (int i = 0; i < stmts->len; i++) {
+        if (stmts->items[i]) stack[sp++] = stmts->items[i];
+    }
+    while (sp > 0) {
+        Node *n = stack[--sp];
+        if (!n) continue;
+        switch (VAL_TAG(n)) {
+        case NODE_FN_DECL: {
+            NameSet decls;
+            nameset_init(&decls);
+            collect_body_decls(n->fn_decl.body, &decls);
+            /* Include the fn's own params as candidate declarations too,
+               so an actor method capturing a param boxes it. */
+            for (int p = 0; p < n->fn_decl.params.len; p++)
+                if (n->fn_decl.params.items[p].name)
+                    nameset_add(&decls, n->fn_decl.params.items[p].name);
+            process_fn_body_for_actors(n->fn_decl.body, &new_classes, &decls);
+            nameset_free(&decls);
+            if (n->fn_decl.body && sp < 256) stack[sp++] = n->fn_decl.body;
+            break;
+        }
+        case NODE_LAMBDA: {
+            NameSet decls;
+            nameset_init(&decls);
+            collect_body_decls(n->lambda.body, &decls);
+            for (int p = 0; p < n->lambda.params.len; p++)
+                if (n->lambda.params.items[p].name)
+                    nameset_add(&decls, n->lambda.params.items[p].name);
+            process_fn_body_for_actors(n->lambda.body, &new_classes, &decls);
+            nameset_free(&decls);
+            if (n->lambda.body && sp < 256) stack[sp++] = n->lambda.body;
+            break;
+        }
+        case NODE_BLOCK:
+            for (int i = 0; i < n->block.stmts.len && sp < 256; i++)
+                if (n->block.stmts.items[i]) stack[sp++] = n->block.stmts.items[i];
+            if (n->block.expr && sp < 256) stack[sp++] = n->block.expr;
+            break;
+        case NODE_IF:
+            if (n->if_expr.then && sp < 256) stack[sp++] = n->if_expr.then;
+            for (int i = 0; i < n->if_expr.elif_thens.len && sp < 256; i++)
+                if (n->if_expr.elif_thens.items[i]) stack[sp++] = n->if_expr.elif_thens.items[i];
+            if (n->if_expr.else_branch && sp < 256) stack[sp++] = n->if_expr.else_branch;
+            break;
+        case NODE_WHILE:
+            if (n->while_loop.body && sp < 256) stack[sp++] = n->while_loop.body;
+            break;
+        case NODE_FOR:
+            if (n->for_loop.body && sp < 256) stack[sp++] = n->for_loop.body;
+            break;
+        case NODE_LOOP:
+            if (n->loop.body && sp < 256) stack[sp++] = n->loop.body;
+            break;
+        case NODE_LET: case NODE_VAR:
+            if (n->let.value && sp < 256) stack[sp++] = n->let.value;
+            break;
+        case NODE_CONST:
+            if (n->const_.value && sp < 256) stack[sp++] = n->const_.value;
+            break;
+        case NODE_EXPR_STMT:
+            if (n->expr_stmt.expr && sp < 256) stack[sp++] = n->expr_stmt.expr;
+            break;
+        case NODE_RETURN:
+            if (n->ret.value && sp < 256) stack[sp++] = n->ret.value;
+            break;
+        case NODE_CALL:
+            if (n->call.callee && sp < 256) stack[sp++] = n->call.callee;
+            for (int i = 0; i < n->call.args.len && sp < 256; i++)
+                if (n->call.args.items[i]) stack[sp++] = n->call.args.items[i];
+            break;
+        case NODE_METHOD_CALL:
+            if (n->method_call.obj && sp < 256) stack[sp++] = n->method_call.obj;
+            for (int i = 0; i < n->method_call.args.len && sp < 256; i++)
+                if (n->method_call.args.items[i]) stack[sp++] = n->method_call.args.items[i];
+            break;
+        case NODE_CLASS_DECL:
+            for (int i = 0; i < n->class_decl.members.len && sp < 256; i++)
+                if (n->class_decl.members.items[i]) stack[sp++] = n->class_decl.members.items[i];
+            break;
+        case NODE_IMPL_DECL:
+            for (int i = 0; i < n->impl_decl.members.len && sp < 256; i++)
+                if (n->impl_decl.members.items[i]) stack[sp++] = n->impl_decl.members.items[i];
+            break;
+        default: break;
+        }
+    }
+
+    /* Prepend the new class decls to the program's top-level stmts. */
+    if (new_classes.len > 0) {
+        NodeList combined = nodelist_new();
+        for (int i = 0; i < new_classes.len; i++) {
+            if (new_classes.items[i]) nodelist_push(&combined, new_classes.items[i]);
+        }
+        for (int i = 0; i < stmts->len; i++) {
+            if (stmts->items[i]) nodelist_push(&combined, stmts->items[i]);
+        }
+        free(stmts->items);
+        *stmts = combined;
+    }
+    free(new_classes.items);
+}
+
 static void wasm_lower_program(Node *program, const char *src_filename) {
     if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
 
@@ -16836,6 +18154,7 @@ static void wasm_lower_program(Node *program, const char *src_filename) {
     g_n_wasm_use_mods = 0;
     g_wasm_unique_ctr = 0;
     g_wasm_json_helpers_added = 0;
+    g_wasm_db_helpers_added = 0;
     for (int i = 0; i < g_n_wasm_ns_names; i++) free(g_wasm_ns_names[i]);
     g_n_wasm_ns_names = 0;
     for (int i = 0; i < g_n_eff_ops; i++) {
@@ -16884,11 +18203,13 @@ static void wasm_lower_program(Node *program, const char *src_filename) {
        references inside other fns still find the renamed function. */
     if (rename_main) wasm_rename_main_refs(program);
 
-    /* First detect json import to decide on splicing helper fns. */
+    /* First detect json / db import to decide on splicing helper fns. */
+    int needs_db_helpers = 0;
     for (int i = 0; i < stmts->len; i++) {
         Node *s = stmts->items[i];
         if (s && VAL_TAG(s) == NODE_IMPORT && s->import.path && s->import.nparts > 0) {
             if (strcmp(s->import.path[0], "json") == 0) needs_json_helpers = 1;
+            if (strcmp(s->import.path[0], "db")   == 0) needs_db_helpers   = 1;
         }
     }
     if (needs_json_helpers && !g_wasm_json_helpers_added) {
@@ -16907,6 +18228,22 @@ static void wasm_lower_program(Node *program, const char *src_filename) {
             node_free(helpers);
         }
         g_wasm_json_helpers_added = 1;
+    }
+    if (needs_db_helpers && !g_wasm_db_helpers_added) {
+        Node *helpers = wasm_build_db_helpers();
+        if (helpers && VAL_TAG(helpers) == NODE_PROGRAM) {
+            for (int i = 0; i < helpers->program.stmts.len; i++) {
+                Node *st = helpers->program.stmts.items[i];
+                if (!st) continue;
+                nodelist_push(&new_stmts, st);
+            }
+            free(helpers->program.stmts.items);
+            helpers->program.stmts.items = NULL;
+            helpers->program.stmts.len = 0;
+            helpers->program.stmts.cap = 0;
+            node_free(helpers);
+        }
+        g_wasm_db_helpers_added = 1;
     }
 
     Node *extra_buf[512];
@@ -17156,6 +18493,12 @@ int transpile_wasm(Node *program, const char *filename, const char *out_path) {
        constructs the back end natively understands. After this returns
        the program is free of those node types. */
     wasm_pre_lower_collections(program);
+    /* Hoist nested actor decls out into top-level classes, boxing the
+       upvalues each method references so both directions of the
+       outer-scope binding survive the lift. Must run before
+       wasm_lower_program because that pass strips the `spawn` wrappers
+       we depend on to find the actor instantiation sites. */
+    wasm_lower_nested_actors(program);
     wasm_lower_program(program, filename);
     purity_analyze(program);
 
