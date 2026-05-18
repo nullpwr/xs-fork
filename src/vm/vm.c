@@ -2010,8 +2010,33 @@ int vm_run(VM *vm, XSProto *proto) {
     return vm_dispatch(vm, 0);
 }
 
+/* Cache `frame->closure_val->cl->proto` and its constants/code pointers
+ * in locals so the hot opcodes (PUSH_CONST, LOAD_GLOBAL, LOAD_FIELD,
+ * METHOD_CALL) skip a four-pointer chase per dispatch. Refreshed
+ * whenever `frame` is reassigned (CALL push, RETURN pop, throw unwind).
+ * NULL slots are safe -- only the opcodes that read them hold a valid
+ * frame, and they re-read after frame mutations. */
+#define VM_REFRESH_PROTO_LOCALS() do {                              \
+    if (vm->frame_count > 0 && frame->closure_val                   \
+        && frame->closure_val->cl                                   \
+        && frame->closure_val->cl->proto) {                         \
+        XSProto *_p   = frame->closure_val->cl->proto;              \
+        cur_proto     = _p;                                         \
+        cur_chunk     = &_p->chunk;                                 \
+        cur_consts    = _p->chunk.consts;                           \
+    } else {                                                        \
+        cur_proto     = NULL;                                       \
+        cur_chunk     = NULL;                                       \
+        cur_consts    = NULL;                                       \
+    }                                                               \
+} while (0)
+
 static int vm_dispatch(VM *vm, int stop_frame) {
-    CallFrame *frame = FRAME;
+    CallFrame   *frame      = FRAME;
+    XSProto     *cur_proto  = NULL;
+    XSChunk     *cur_chunk  = NULL;
+    Value      **cur_consts = NULL;
+    VM_REFRESH_PROTO_LOCALS();
     for (;;) {
         /* Per-opcode resource-limit tick. Bails out through the same
            pending-throw path so try/catch can catch it. */
@@ -2034,7 +2059,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     if (g_xs_in_try > 0) g_xs_in_try--;
                     while (vm->sp > te->stack_top) value_decref(POP());
                     PUSH(exc);
-                    frame = cf;
+                    frame = cf; VM_REFRESH_PROTO_LOCALS();
                     frame->ip = te->catch_ip;
                     g_xs_throw_from_runtime = 0;
                     handled = 1;
@@ -2091,7 +2116,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         case OP_NOP: break;
 
         case OP_PUSH_CONST:
-            PUSH(value_incref(PROTO->chunk.consts[INSTR_Bx(instr)]));
+            PUSH(value_incref(cur_consts[INSTR_Bx(instr)]));
             break;
         case OP_PUSH_NULL:  PUSH(value_incref(XS_NULL_VAL));  break;
         case OP_PUSH_TRUE:  PUSH(value_incref(XS_TRUE_VAL));  break;
@@ -2135,17 +2160,17 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             break;
         }
         case OP_LOAD_GLOBAL: {
-            XSChunk *chk = &PROTO->chunk;
+            XSChunk *chk = cur_chunk;
             int ip_idx = (int)(frame->ip - chk->code) - 1;
-            if (ip_idx < 0 || ip_idx >= chk->len) {
+            if (__builtin_expect(ip_idx < 0 || ip_idx >= chk->len, 0)) {
                 /* ip out of range (e.g., proto executing via cached
                    closure after reload) -- take the non-cached path. */
-                const char *name = chk->consts[INSTR_Bx(instr)]->s;
+                const char *name = cur_consts[INSTR_Bx(instr)]->s;
                 Value *v = map_get(vm->globals, name);
                 PUSH(v ? value_incref(v) : value_incref(XS_NULL_VAL));
                 break;
             }
-            if (!chk->ic) {
+            if (__builtin_expect(chk->ic == NULL, 0)) {
                 chk->ic = xs_calloc((size_t)chk->len, sizeof(Value *));
                 if (!chk->ic_version)
                     chk->ic_version = xs_calloc((size_t)chk->len,
@@ -2157,11 +2182,12 @@ static int vm_dispatch(VM *vm, int stop_frame) {
              * for LOAD_GLOBAL means "global_version snapshot"; for
              * LOAD_FIELD it means "(cap << 32) | bucket". */
             Value *cached = chk->ic[ip_idx];
-            if (cached && chk->ic_version[ip_idx] == vm->global_version) {
+            if (__builtin_expect(cached != NULL
+                && chk->ic_version[ip_idx] == vm->global_version, 1)) {
                 PUSH(value_incref(cached));
                 break;
             }
-            const char *name = chk->consts[INSTR_Bx(instr)]->s;
+            const char *name = cur_consts[INSTR_Bx(instr)]->s;
             Value *v = map_get(vm->globals, name);
             if (!v) v = XS_NULL_VAL;
             if (chk->ic[ip_idx]) value_decref(chk->ic[ip_idx]);
@@ -2172,7 +2198,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
         case OP_STORE_GLOBAL: {
             vm->global_version++;
-            const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
+            const char *name = cur_consts[INSTR_Bx(instr)]->s;
             Value *v = POP();
             /* Overload accumulation: if a user function with the same
                name is already bound and the new value is also a user
@@ -2675,7 +2701,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             value_decref(val); value_decref(idx); value_decref(col); break;
         }
         case OP_LOAD_FIELD: {
-            const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
+            const char *name = cur_consts[INSTR_Bx(instr)]->s;
             Value *obj = POP(); Value *r = NULL;
             /* Inline cache for the dominant case: instance-of-class
              * field reads. Cache shape = (XSClass*, fields->cap) and
@@ -2685,7 +2711,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
              * skipping hash+probe + collision walking is a big win for
              * both --vm and --jit (the JIT routes IR_LOAD_FIELD through
              * vm_step_jit, so this case is shared). */
-            XSChunk *chk = &PROTO->chunk;
+            XSChunk *chk = cur_chunk;
             int ip_idx = (int)(frame->ip - chk->code) - 1;
             if (VAL_TAG(obj) == XS_INST && obj->inst && obj->inst->fields
                 && ip_idx >= 0 && ip_idx < chk->len) {
@@ -2784,7 +2810,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
             value_decref(obj); PUSH(r); break;
         }
         case OP_STORE_FIELD: {
-            const char *name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
+            const char *name = cur_consts[INSTR_Bx(instr)]->s;
             Value *val = POP(), *obj = POP();
             if (VAL_TAG(obj) == XS_MAP || VAL_TAG(obj) == XS_MODULE) {
                 map_set(obj->map, name, val);
@@ -2824,8 +2850,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         }
 
         case OP_MAKE_CLOSURE: {
-            int inner_idx = (int)VAL_INT(PROTO->chunk.consts[INSTR_Bx(instr)]);
-            XSProto *inner = PROTO->inner[inner_idx];
+            int inner_idx = (int)VAL_INT(cur_consts[INSTR_Bx(instr)]);
+            XSProto *inner = cur_proto->inner[inner_idx];
             int nuv = inner->n_upvalues;
             Upvalue **uvs = nuv ? xs_malloc((size_t)nuv * sizeof(Upvalue*)) : NULL;
             for (int i = 0; i < nuv; i++) {
@@ -2912,7 +2938,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     return 1;
                 }
                 value_decref(saved);
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
             } else if (VAL_TAG(callee) == XS_MAP || VAL_TAG(callee) == XS_MODULE) {
                 Value *fields = map_get(callee->map, "__fields");
                 if (fields && VAL_TAG(fields) == XS_MAP) {
@@ -3031,7 +3057,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         value_incref(init_fn);
                         if (call_frame_push(vm, init_fn, argc + 1) == 0) {
                             value_decref(init_fn);
-                            frame = FRAME;
+                            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             vm->init_inst = value_incref(inst);
                             frame->owns_init_inst = 1;
                             break;
@@ -3103,7 +3129,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     return 1;
                 }
                 value_decref(saved);
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
             } else {
                 /* callee has no known param names (native, non-closure, or
                    unknown): drop kwargs and call with positional only. */
@@ -3126,7 +3152,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         return 1;
                     }
                     value_decref(saved);
-                    frame = FRAME;
+                    frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 } else {
                     fprintf(stderr, "call_kw on non-callable (tag=%d)\n", VAL_TAG(callee));
                     return 1;
@@ -3148,7 +3174,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 value_decref(frame->closure_val);
                 vm->frame_count--;
                 if (vm->frame_count == 0) { value_decref(result); return 0; }
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 PUSH(result ? result : value_incref(XS_NULL_VAL));
                 break;
             }
@@ -3208,7 +3234,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             if (g_xs_in_try > 0) g_xs_in_try--;
                             while (vm->sp > te->stack_top) value_decref(POP());
                             PUSH(exc);
-                            frame = cf;
+                            frame = cf; VM_REFRESH_PROTO_LOCALS();
                             frame->ip = te->catch_ip;
                             handled = 1;
                             break;
@@ -3219,7 +3245,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             cf->defer_return_ip = cf->ip;
                             cf->defer_depth--;
                             cf->ip = cf->defer_stack[cf->defer_depth].defer_ip;
-                            frame = cf;
+                            frame = cf; VM_REFRESH_PROTO_LOCALS();
                             handled = 1;
                             break;
                         }
@@ -3292,7 +3318,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         value_incref(main_fn);
                         if (call_frame_push(vm, main_fn, 0) == 0) {
                             value_decref(main_fn);
-                            frame = FRAME;
+                            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             break;
                         }
                         value_decref(main_fn);
@@ -3300,7 +3326,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 }
                 return 0;
             }
-            frame = FRAME;
+            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
             PUSH(result);
             /* Only the constructor's own init frame consumes init_inst.
                Without this guard, a nested super.init(...) returning
@@ -3439,7 +3465,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
         /* method call */
         case OP_METHOD_CALL: {
             int mc_argc   = (int)INSTR_A(instr);
-            const char *mc_name = PROTO->chunk.consts[INSTR_Bx(instr)]->s;
+            const char *mc_name = cur_consts[INSTR_Bx(instr)]->s;
             Value *mc_obj = vm->sp[-mc_argc - 1];
             Value **mc_args = vm->sp - mc_argc;
             Value *mc_result = NULL;
@@ -3451,8 +3477,8 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                it survives across vm_invoke reentry without aliasing between
                protos. */
             int mc_site_id = ic_site_id(
-                (int)((uintptr_t)PROTO ^
-                      (uintptr_t)(frame->ip - PROTO->chunk.code)));
+                (int)((uintptr_t)cur_proto ^
+                      (uintptr_t)(frame->ip - cur_chunk->code)));
             Value *mc_cached_fn = NULL;
             uint8_t mc_cached_is_module = 0;
             uint8_t mc_cached_needs_self = 0;
@@ -3963,7 +3989,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *v = mc_obj->map->vals[j];
                         Value *a[2] = { k, v ? v : XS_NULL_VAL };
                         Value *r = vm_invoke(vm, mc_args[0], a, 2);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         if (r) { map_set(out->map, mc_obj->map->keys[j], r); value_decref(r); }
                         value_decref(k);
                     }
@@ -3976,7 +4002,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *v = mc_obj->map->vals[j];
                         Value *a[2] = { k, v ? v : XS_NULL_VAL };
                         Value *r = vm_invoke(vm, mc_args[0], a, 2);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         int keep = r && value_truthy(r);
                         if (r) value_decref(r);
                         if (keep && v) map_set(out->map, mc_obj->map->keys[j], value_incref(v));
@@ -4227,7 +4253,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *val_v = map_get(mc_obj->map, "_val");
                         Value *arg = val_v ? val_v : XS_NULL_VAL;
                         mc_result = vm_invoke(vm, mc_args[0], &arg, 1);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         if (!mc_result) mc_result = value_incref(XS_NULL_VAL);
                     } else mc_result = value_incref(mc_obj);
                 } else if (strcmp(mc_name,"map_err")==0&&mc_argc>=1) {
@@ -4236,7 +4262,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *val_v = map_get(mc_obj->map, "_val");
                         Value *arg = val_v ? val_v : XS_NULL_VAL;
                         Value *new_err = vm_invoke(vm, mc_args[0], &arg, 1);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         Value *m = xs_map_new();
                         Value *etag = xs_str("Err");
                         map_set(m->map, "_tag", etag); value_decref(etag);
@@ -4344,7 +4370,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             if (call_frame_push(vm, fn_val, mc_argc + 1)) {
                                 value_decref(fn_val); return 1;
                             }
-                            value_decref(fn_val); frame = FRAME;
+                            value_decref(fn_val); frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             mc_called = 1;
                         } else if (VAL_TAG(fn) == XS_NATIVE) {
                             if (is_module_call) {
@@ -4372,7 +4398,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             for (int j = -mc_argc-1; j < -1; j++) vm->sp[j] = vm->sp[j+1];
                             vm->sp--; value_decref(sv);
                             if (call_frame_push(vm, sv, mc_argc)) { value_decref(sv); return 1; }
-                            value_decref(sv); frame = FRAME;
+                            value_decref(sv); frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             mc_called = 1;
                         }
                         break;
@@ -4432,7 +4458,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                                  vm->sp - mc_argc - 1, mc_argc + 1);
                             if (r) value_decref(r);
                             for (int j = 0; j < mc_argc + 1; j++) value_decref(POP());
-                            frame = FRAME;
+                            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         }
                         break;
                     }
@@ -4464,7 +4490,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 if (strcmp(mc_name,"get")==0 || strcmp(mc_name,"value")==0) {
                     if (sig->compute) {
                         mc_result = vm_invoke(vm, sig->compute, NULL, 0);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         if (!mc_result) mc_result = value_incref(XS_NULL_VAL);
                     } else {
                         mc_result = sig->value ? value_incref(sig->value) : value_incref(XS_NULL_VAL);
@@ -4476,7 +4502,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         sig->notifying = 1;
                         for (int j = 0; j < sig->nsubs; j++) {
                             Value *r = vm_invoke(vm, sig->subscribers[j], mc_args, 1);
-                            frame = FRAME;
+                            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             if (r) value_decref(r);
                         }
                         sig->notifying = 0;
@@ -4493,7 +4519,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 } else if (strcmp(mc_name,"update")==0 && mc_argc>=1) {
                     Value *cur = sig->value ? sig->value : XS_NULL_VAL;
                     Value *nv = vm_invoke(vm, mc_args[0], &cur, 1);
-                    frame = FRAME;
+                    frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                     if (nv) {
                         if (sig->value) value_decref(sig->value);
                         sig->value = nv;
@@ -5061,7 +5087,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 value_decref(r);
                                 if(t){value_decref(mc_result);mc_result=value_incref(XS_TRUE_VAL);break;}
                             }
-                            frame=FRAME;
+                            frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                         } else {
                             for(int j=0;j<mc_obj->arr->len;j++){
                                 if(value_equal(mc_obj->arr->items[j],arg)){
@@ -5157,7 +5183,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                     if (cmp_fn) {
                                         Value *pair[2] = { sa->items[p], sa->items[q] };
                                         Value *r = vm_invoke(vm, cmp_fn, pair, 2);
-                                        frame = FRAME;
+                                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                                         cmp = (r && VAL_TAG(r) == XS_INT) ? (int)VAL_INT(r) : 0;
                                         if (r) value_decref(r);
                                     } else {
@@ -5183,7 +5209,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if(value_truthy(r)) array_push(arr->arr,value_incref(elem));
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"map")==0&&mc_argc>=1) {
                     Value *arr=xs_array_new();
@@ -5193,7 +5219,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *r=vm_invoke(vm,fn,&elem,1);
                         array_push(arr->arr,r?r:value_incref(XS_NULL_VAL));
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"find")==0&&mc_argc>=1) {
                     mc_result=value_incref(XS_NULL_VAL);
@@ -5204,7 +5230,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if(value_truthy(r)){value_decref(mc_result);mc_result=value_incref(elem);value_decref(r);break;}
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                 } else if (strcmp(mc_name,"reduce")==0||strcmp(mc_name,"fold")==0) {
                     /* Accept either (fn, init) or (init, fn); fold is
                        always (init, fn). Pick whichever arg is callable. */
@@ -5233,7 +5259,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             Value *r=vm_invoke(vm,fn,pair,2);
                             value_decref(acc); acc=r?r:value_incref(XS_NULL_VAL);
                         }
-                        frame=FRAME;
+                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     }
                     mc_result=acc;
                 } else if (strcmp(mc_name,"index_of")==0||strcmp(mc_name,"find_index")==0) {
@@ -5256,7 +5282,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 value_decref(r);
                                 if(t){value_decref(mc_result);mc_result=xs_int(j);break;}
                             }
-                            frame=FRAME;
+                            frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                         } else {
                             for(int j=0;j<mc_obj->arr->len;j++){
                                 if(value_equal(mc_obj->arr->items[j],arg)){value_decref(mc_result);mc_result=xs_int(j);break;}
@@ -5270,7 +5296,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if(value_truthy(r)){value_decref(mc_result);mc_result=value_incref(XS_TRUE_VAL);value_decref(r);break;}
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                 } else if (strcmp(mc_name,"all")==0&&mc_argc>=1) {
                     mc_result=value_incref(XS_TRUE_VAL);
                     for(int j=0;j<mc_obj->arr->len;j++){
@@ -5278,7 +5304,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if(!value_truthy(r)){value_decref(mc_result);mc_result=value_incref(XS_FALSE_VAL);value_decref(r);break;}
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                 } else if (strcmp(mc_name,"count")==0) {
                     /* count(): length. count(value): equal-count.
                        count(fn): predicate-count. The plain-length form
@@ -5291,7 +5317,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         for (int j = 0; j < mc_obj->arr->len; j++) {
                             Value *e = mc_obj->arr->items[j];
                             Value *r = vm_invoke(vm, mc_args[0], &e, 1);
-                            frame = FRAME;
+                            frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                             if (r && value_truthy(r)) c++;
                             if (r) value_decref(r);
                         }
@@ -5367,7 +5393,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     for (int j = 0; j < mc_obj->arr->len; j++) {
                         Value *elem = mc_obj->arr->items[j];
                         Value *k = vm_invoke(vm, mc_args[0], &elem, 1);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         if (!k) k = value_incref(XS_NULL_VAL);
                         char *ks = value_str(k);
                         Value *cur = map_get(res->map, ks);
@@ -5449,7 +5475,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             Value *r=vm_invoke(vm,mc_args[0],&mc_obj->arr->items[j],1);
                             value_decref(r);
                         }
-                        frame=FRAME;
+                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     }
                     mc_result=value_incref(XS_NULL_VAL);
                 } else if (strcmp(mc_name,"take")==0&&mc_argc>=1&&VAL_TAG(mc_args[0])==XS_INT) {
@@ -5472,7 +5498,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         if(!ok) break;
                         array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"drop_while")==0&&mc_argc>=1) {
                     Value *arr=xs_array_new();
@@ -5484,7 +5510,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         }
                         if(!dropping) array_push(arr->arr,value_incref(mc_obj->arr->items[j]));
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"flat_map")==0&&mc_argc>=1) {
                     Value *arr=xs_array_new();
@@ -5496,7 +5522,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         } else if(r) { array_push(arr->arr,r); }
                         else { array_push(arr->arr,value_incref(XS_NULL_VAL)); }
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"zip")==0&&mc_argc>=1&&(VAL_TAG(mc_args[0])==XS_ARRAY||VAL_TAG(mc_args[0])==XS_TUPLE)) {
                     Value *arr=xs_array_new();
@@ -5516,7 +5542,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *r=vm_invoke(vm,mc_args[1],pair,2);
                         array_push(arr->arr,r?r:value_incref(XS_NULL_VAL));
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"partition")==0&&mc_argc>=1) {
                     Value *yes=xs_array_new(), *no=xs_array_new();
@@ -5526,7 +5552,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         else array_push(no->arr,value_incref(mc_obj->arr->items[j]));
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     Value *parr=xs_array_new();
                     array_push(parr->arr,yes); array_push(parr->arr,no);
                     mc_result=parr;
@@ -5541,7 +5567,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         array_push(bucket->arr,value_incref(mc_obj->arr->items[j]));
                         free(ks);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=m;
                 } else if (strcmp(mc_name,"sort_by")==0&&mc_argc>=1) {
                     Value *arr=xs_array_new();
@@ -5550,7 +5576,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         int slen2=arr->arr->len;
                         Value **skeys=(Value**)xs_malloc(sizeof(Value*)*(size_t)(slen2>0?slen2:1));
                         for(int j=0;j<slen2;j++){skeys[j]=vm_invoke(vm,mc_args[0],&arr->arr->items[j],1);if(!skeys[j])skeys[j]=value_incref(XS_NULL_VAL);}
-                        frame=FRAME;
+                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                         for(int j=0;j<slen2-1;j++) for(int k=0;k<slen2-1-j;k++){
                             if(value_cmp(skeys[k],skeys[k+1])>0){
                                 Value *tv=arr->arr->items[k]; arr->arr->items[k]=arr->arr->items[k+1]; arr->arr->items[k+1]=tv;
@@ -5572,7 +5598,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             else value_decref(k);
                         }
                         value_decref(bkey);
-                        frame=FRAME;
+                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                         mc_result=value_incref(best);
                     }
                 } else if (strcmp(mc_name,"max_by")==0&&mc_argc>=1) {
@@ -5586,7 +5612,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             else value_decref(k);
                         }
                         value_decref(bkey);
-                        frame=FRAME;
+                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                         mc_result=value_incref(best);
                     }
                 } else if (strcmp(mc_name,"dedup")==0) {
@@ -5679,7 +5705,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                     if(cmp_fn){
                                         Value *pair[2]={arr->arr->items[p],arr->arr->items[q]};
                                         Value *r=vm_invoke(vm,cmp_fn,pair,2);
-                                        frame=FRAME;
+                                        frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                                         cmp=(r&&VAL_TAG(r)==XS_INT)?(int)VAL_INT(r):0;
                                         if(r) value_decref(r);
                                     } else { cmp=value_cmp(arr->arr->items[p],arr->arr->items[q]); }
@@ -5706,7 +5732,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         array_push(arr->arr,value_incref(acc));
                     }
                     value_decref(acc);
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=arr;
                 } else if (strcmp(mc_name,"prepend")==0&&mc_argc>=1) {
                     array_push(mc_obj->arr,value_incref(XS_NULL_VAL));
@@ -5772,7 +5798,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         else if(r&&VAL_TAG(r)==XS_FLOAT){sf+=r->f;is_float=1;}
                         value_decref(r);
                     }
-                    frame=FRAME;
+                    frame=FRAME; VM_REFRESH_PROTO_LOCALS();
                     mc_result=is_float?xs_float(sf+(double)si):xs_int(si);
                 } else if (strcmp(mc_name,"from_chars")==0) {
                     /* join array of chars into a string */
@@ -6036,7 +6062,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 if (total > 17) total = 17;
                                 for (int pj = 0; pj < mc_argc && pj < 16; pj++) pargs[pj+1] = mc_args[pj];
                                 mc_result = vm_invoke(vm, pfn, pargs, total);
-                                frame = FRAME;
+                                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                                 if (!mc_result) mc_result = value_incref(XS_NULL_VAL);
                                 generic_matched = 1;
                                 mc_plugin_matched = 1;
@@ -6070,7 +6096,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 for (int pj = 0; pj < mc_argc && pj < 16; pj++) pargs[pj+1] = mc_args[pj];
                                 value_decref(mc_result);
                                 mc_result = vm_invoke(vm, pfn, pargs, ptotal);
-                                frame = FRAME;
+                                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                                 if (!mc_result) mc_result = value_incref(XS_NULL_VAL);
                                 mc_plugin_matched = 1;
                             }
@@ -6191,7 +6217,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     if (g_xs_in_try > 0) g_xs_in_try--;
                     while (vm->sp > te->stack_top) value_decref(POP());
                     PUSH(exc);
-                    frame = cf;
+                    frame = cf; VM_REFRESH_PROTO_LOCALS();
                     frame->ip = te->catch_ip;
                     handled = 1;
                     break;
@@ -6206,7 +6232,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     cf->defer_return_ip = cf->ip;
                     cf->defer_depth--;
                     cf->ip = cf->defer_stack[cf->defer_depth].defer_ip;
-                    frame = cf;
+                    frame = cf; VM_REFRESH_PROTO_LOCALS();
                     handled = 1;
                     break;
                 }
@@ -6447,7 +6473,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     Value *eff_name_v = PROTO->chunk.consts[INSTR_Bx(instr)];
                     PUSH(value_incref(eff_name_v));
                     vm->frame_count = fi + 1;
-                    frame = cf;
+                    frame = cf; VM_REFRESH_PROTO_LOCALS();
                     frame->ip = te->catch_ip;
                     eff_handled = 1;
                     break;
@@ -6547,7 +6573,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 }
                 vm->sp = vm->stack + hi;
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
 
                 PUSH(resume_val);
             } else {
@@ -6598,7 +6624,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 }
                 vm->sp = vm->stack + cur->arm_sp_off;
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 cur->in_resume = 0;
                 PUSH(body_val);
             }
@@ -6657,7 +6683,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     }
                 }
                 vm->sp = vm->stack + outer->arm_sp_off;
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 outer->in_resume = 0;
                 PUSH(trailing);
                 restored = 1;
@@ -6756,7 +6782,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                                 value_incref(task_fn);
                                 if (call_frame_push(vm, task_fn, 0) == 0) {
                                     value_decref(task_fn);
-                                    frame = FRAME;
+                                    frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                                     vm->spawn_task = value_incref(task);
                                     value_decref(task);
                                     break;
@@ -6826,7 +6852,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 value_decref(frame->closure_val);
                 vm->frame_count--;
                 if (vm->frame_count == 0) { value_decref(result); return 0; }
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 PUSH(result);
             }
             break;
@@ -7113,7 +7139,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                         Value *args2[2] = { actor_val, msg };
                         value_decref(result);
                         result = vm_invoke(vm, handle_fn, args2, 2);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         if (!result) result = value_incref(XS_NULL_VAL);
                     }
                 }
@@ -7133,7 +7159,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                             PUSH(value_incref(msg));
                             if (call_frame_push(vm, hfn, 1) == 0) {
                                 value_decref(hfn);
-                                frame = FRAME;
+                                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                                 value_decref(msg);
                                 value_decref(actor_val);
                                 break;
@@ -7244,7 +7270,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     value_incref(mi_init);
                     if (call_frame_push(vm, mi_init, nargs + 1) == 0) {
                         value_decref(mi_init);
-                        frame = FRAME;
+                        frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                         vm->init_inst = value_incref(inst);
                         frame->owns_init_inst = 1;
                         break;
@@ -7434,7 +7460,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                 value_decref(frame->closure_val);
                 vm->frame_count--;
                 if (vm->frame_count == 0) { value_decref(val); return 0; }
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
                 PUSH(val);
                 break;
             }
@@ -7464,7 +7490,7 @@ static int vm_dispatch(VM *vm, int stop_frame) {
                     return 1;
                 }
                 value_decref(fn);
-                frame = FRAME;
+                frame = FRAME; VM_REFRESH_PROTO_LOCALS();
             } else {
                 fprintf(stderr, "pipe to non-callable\n");
                 value_decref(fn);
