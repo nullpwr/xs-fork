@@ -1038,7 +1038,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
             if (rn && (strcmp(rn, "async") == 0 || strcmp(rn, "math") == 0 ||
                        strcmp(rn, "json") == 0 || strcmp(rn, "time") == 0 ||
                        strcmp(rn, "random") == 0 || strcmp(rn, "re") == 0 ||
-                       strcmp(rn, "collections") == 0 || strcmp(rn, "string") == 0))
+                       strcmp(rn, "collections") == 0 || strcmp(rn, "string") == 0 ||
+                       strcmp(rn, "fs") == 0 || strcmp(rn, "os") == 0))
                 receiver_is_module = 1;
         }
         if (!receiver_is_module && m && strcmp(m, "any") == 0 && nargs == 1) {
@@ -3488,6 +3489,22 @@ static void emit_node(SB *s, Node *n, int depth) {
 }
 
 /* public entry point */
+/* Walk the program looking for `import <name>` so we only emit the
+ * matching polyfill. Some module names (fs, os) collide with common
+ * user identifiers; emitting a top-level `const fs = ...` would
+ * shadow a user `let fs = ...`. Math / json / time are common enough
+ * that we ship them unconditionally and accept the shadow risk. */
+static int program_imports_module(Node *program, const char *name) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *s = program->program.stmts.items[i];
+        if (s && VAL_TAG(s) == NODE_IMPORT && s->import.nparts > 0
+            && s->import.path[0] && strcmp(s->import.path[0], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 char *transpile_js(Node *program, const char *filename) {
     const char *unsupported = find_unsupported_for_js(program);
     if (unsupported) {
@@ -4117,9 +4134,9 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    }\n");
     sb_add(&s, "    throw __xs_err('TypeError', 'int(): cannot convert from this type');\n");
     sb_add(&s, "};\n");
-    /* Stdlib polyfills. Only the modules that map cleanly onto the
-       host runtime are emitted; less-common modules (fs, os, ...)
-       still need a Node shim and aren't covered here. */
+    /* Stdlib polyfills. Each module is a plain object whose methods
+       map onto host primitives (JSON, Math, Node builtins). Sync APIs
+       are preferred so the calling code doesn't have to be async. */
     sb_add(&s, "const json = {\n");
     sb_add(&s, "    parse: (s) => JSON.parse(s),\n");
     sb_add(&s, "    stringify: (v) => JSON.stringify(v, (k, val) => val instanceof Map ? Object.fromEntries(val) : val),\n");
@@ -4169,6 +4186,55 @@ char *transpile_js(Node *program, const char *filename) {
     sb_add(&s, "    },\n");
     sb_add(&s, "    parse: (s, fmt) => Math.floor(Date.parse(s) / 1000),\n");
     sb_add(&s, "};\n");
+    /* fs / os: Node-host polyfills. Sync APIs so the calling code
+       doesn't have to be async. Gated on `import fs` / `import os`
+       because the bare names collide with common user identifiers
+       (e.g. `let fs = make_adders()`). */
+    if (program_imports_module(program, "fs")) {
+    sb_add(&s, "const fs = (() => {\n");
+    sb_add(&s, "    let _fs = null, _path = null;\n");
+    sb_add(&s, "    const load = () => { if (!_fs) { _fs = require('fs'); _path = require('path'); } return _fs; };\n");
+    sb_add(&s, "    return {\n");
+    sb_add(&s, "        read: (p) => load().readFileSync(p, 'utf8'),\n");
+    sb_add(&s, "        read_file: (p) => load().readFileSync(p, 'utf8'),\n");
+    sb_add(&s, "        write: (p, c) => { load().writeFileSync(p, c); return null; },\n");
+    sb_add(&s, "        write_file: (p, c) => { load().writeFileSync(p, c); return null; },\n");
+    sb_add(&s, "        append: (p, c) => { load().appendFileSync(p, c); return null; },\n");
+    sb_add(&s, "        exists: (p) => load().existsSync(p),\n");
+    sb_add(&s, "        is_file: (p) => { try { return load().statSync(p).isFile(); } catch { return false; } },\n");
+    sb_add(&s, "        is_dir: (p) => { try { return load().statSync(p).isDirectory(); } catch { return false; } },\n");
+    sb_add(&s, "        list_dir: (p) => load().readdirSync(p),\n");
+    sb_add(&s, "        list: (p) => load().readdirSync(p),\n");
+    sb_add(&s, "        remove: (p) => { load().unlinkSync(p); return null; },\n");
+    sb_add(&s, "        delete: (p) => { load().unlinkSync(p); return null; },\n");
+    sb_add(&s, "        mkdir: (p) => { load().mkdirSync(p, { recursive: true }); return null; },\n");
+    sb_add(&s, "        rmdir: (p) => { load().rmdirSync(p); return null; },\n");
+    sb_add(&s, "        rename: (a, b) => { load().renameSync(a, b); return null; },\n");
+    sb_add(&s, "        move: (a, b) => { load().renameSync(a, b); return null; },\n");
+    sb_add(&s, "        cwd: () => process.cwd(),\n");
+    sb_add(&s, "        size: (p) => load().statSync(p).size,\n");
+    sb_add(&s, "        temp_dir: () => require('os').tmpdir(),\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "})();\n");
+    }
+    if (program_imports_module(program, "os")) {
+    sb_add(&s, "const os = (() => {\n");
+    sb_add(&s, "    let _os = null;\n");
+    sb_add(&s, "    const load = () => { if (!_os) _os = require('os'); return _os; };\n");
+    sb_add(&s, "    return {\n");
+    sb_add(&s, "        getenv: (n) => process.env[n] ?? null,\n");
+    sb_add(&s, "        env: () => ({ ...process.env }),\n");
+    sb_add(&s, "        setenv: (n, v) => { process.env[n] = String(v); return null; },\n");
+    sb_add(&s, "        args: () => process.argv.slice(2),\n");
+    sb_add(&s, "        argv: () => process.argv,\n");
+    sb_add(&s, "        exit: (c) => process.exit(typeof c === 'number' ? c : 0),\n");
+    sb_add(&s, "        hostname: () => load().hostname(),\n");
+    sb_add(&s, "        platform: () => process.platform,\n");
+    sb_add(&s, "        sep: process.platform === 'win32' ? '\\\\' : '/',\n");
+    sb_add(&s, "        cwd: () => process.cwd(),\n");
+    sb_add(&s, "    };\n");
+    sb_add(&s, "})();\n");
+    }
     /* collections module: typed wrappers built on Map / Array. The VM
        represents these as plain maps tagged with _type, but the JS
        host is more comfortable with class-like objects that expose
