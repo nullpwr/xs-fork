@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.20
+
+WASM AOT (`--emit wasm`) catches up most of the surface area that
+the v1.2.18 corpus matrix surfaced as trap-on-runtime. value_add
+/ value_cmp / value_equal dispatch on tag so arrays, strings,
+tuples, maps all work end-to-end (including lex compare).
+Array-method tail (`.flat`, `.flatten`, `.find_index`,
+`.flat_map`, `.chunks`, `.windows`, `.zip_with`) lands.
+Range method dispatch (`.each`, `.to_a`, `.map`, `.filter`,
+`.fold`) lands. Runtime errors throw catchable `RuntimeError`
+instead of trapping (divide-by-zero, index-out-of-bounds,
+typed-arith, `.is_a()`). Dynamic `obj.method()` on a map field
+routes through `xs_call`. Bigint via decimal-string add / mul /
+pow so `10 ** 20` no longer overflows.
+
+Twenty regression files lift the `-- skip-emit: wasm` marker;
+four narrow to a smaller list; five keep it for genuinely deeper
+gaps (structured concurrency, full stdlib http/db, full reactive
+bind).
+
 ## 1.2.19
 
 VM dispatch loop caches the proto / chunk / consts pointer chain
