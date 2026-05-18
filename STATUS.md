@@ -38,6 +38,7 @@ AST-level runtime hooks. Pass `--interp` to force it.
 | Higher-rank `forall<T>` types | works |
 | `@scoped` annotations + escape analysis | works |
 | `@[macro]` procedural-macro markers | works |
+| Static purity inference + `__pure?(f)` introspection | works |
 | Decorators (`@on_start`/`@every`/`@cron`/`@watch`/`@once`/`@bench`/...) | works |
 | Algebraic effects: effect/perform/handle/resume (single-shot) | works |
 | Multi-shot effects (resume called more than once) | partial: VM and JIT replay correctly; the tree-walker still returns the resume's first value. Use `--vm` or `--jit` for cartesian-product effect arms. |
@@ -338,3 +339,9 @@ regression layers under wasmtime.
 - HTTPS client throws `HttpError` on connect / TLS / parse failure
   rather than returning a sentinel. Wrap in `try/catch` if you want
   to recover.
+- Purity inference reaches every backend that owns a closure value
+  (interp, VM, JIT, `--emit c`, `--emit js`). The `--emit wasm`
+  closure cell carries `(tag, func_idx, env_ptr)` with no slot left
+  for a per-fn purity bit, so `__pure?` always returns `false` on
+  the WASM AOT path. The runtime build (`make wasm` / `xs.wasm`)
+  is unaffected.

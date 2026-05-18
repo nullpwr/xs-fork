@@ -1142,6 +1142,38 @@ fn show_for(name) {
 
 `@pure` is enforced by the semantic analyzer: calling impure functions (I/O, sleep, exit) inside a `@pure` function is an error.
 
+### Purity inference
+
+Independent of the `@pure` annotation, every function and lambda
+also gets a static purity bit inferred during sema. A function is
+"pure" when, given the same arguments and immutable free vars, it
+always produces the same value with no observable side effects.
+
+```xs
+__pure?(fn(x) { x + 1 })            -- true
+__pure?(fn() { print("x") })        -- false
+__pure?(fn() {                      -- true: local-only mutation
+    let arr = []
+    arr.push(1); arr.push(2)
+    arr
+})
+__pure?(fn(arr) { arr.push(1) })    -- false: mutates a parameter
+__pure?(fn() { time.now() })        -- false: nondeterministic stdlib
+```
+
+The analyzer is conservative. It knows the standard library (math,
+json, string ops, ... are pure; fs / net / time / random / io are
+impure). It tracks transitive calls through a fixpoint, so a fn
+that calls only pure fns stays pure, mutual recursion converges,
+and a single impure call anywhere in the call tree flips the whole
+chain. Anything it can't prove pure is treated as impure.
+
+The bit is exposed at runtime via the `__pure?(f)` builtin. It also
+gates the wrapping decorators that depend on referential
+transparency: `@memoize` would silently skip side effects on cache
+hits, and `@retry` would replay them per attempt, so both refuse an
+impure body at decoration time with a `PurityError`.
+
 ### `@scoped` bindings
 
 `@scoped` annotates a `let` or `var` whose value must not outlive
@@ -3331,88 +3363,6 @@ The transpilers carry durations as raw nanosecond counts (numbers in the JS back
 
 ---
 
-## Temporal Primitives
-
-Temporal primitives are scheduling constructs that take a `Duration`. They also accept plain numbers, which are interpreted as milliseconds for compatibility.
-
-### every
-
-Runs a block repeatedly at a fixed interval. In the interpreter, the body runs once (for deterministic script execution). When transpiled to JavaScript, it maps to `setInterval`.
-
-```xs
-every 1s {
-    println("tick")
-}
-```
-
-### after
-
-Runs a block once after a delay:
-
-```xs
-after 500ms {
-    println("delayed hello")
-}
-```
-
-### timeout
-
-Runs a block with a time limit. If the block doesn't finish in time, the `else` fallback runs instead:
-
-```xs
-timeout 2s {
-    let result = slow_computation()
-    println(result)
-} else {
-    println("timed out")
-}
-```
-
-### debounce
-
-Debounces execution - if called repeatedly, only the last call within the window actually runs:
-
-```xs
-debounce 300ms {
-    println("search: {query}")
-}
-```
-
-### Practical examples
-
-```xs
--- polling with every
-var health = "unknown"
-every 30s {
-    health = check_server()
-}
-
--- delayed initialization
-after 2s {
-    connect_to_database()
-}
-
--- request with timeout
-timeout 5s {
-    let data = fetch_api("/users")
-    process(data)
-} else {
-    println("API request timed out, using cache")
-    process(cached_data)
-}
-
--- debounced input handling
-var query = ""
-fn on_input(text) {
-    query = text
-    debounce 200ms {
-        search(query)
-    }
-}
-```
-
----
-
 ## Decorators
 
 A function declaration can carry one or more decorators. They split
@@ -3476,19 +3426,27 @@ handlers.
 `@memoize` caches results by a string-key derived from the call's
 argument values; subsequent calls with equal arguments return the
 cached value without re-running the body. Recursive calls hit the
-same cache, so `fib(10)` only invokes the body 11 times.
+same cache, so `fib(10)` only invokes the body 11 times. The body
+must be statically pure (the analyzer described under "Purity
+inference" decides), since a memoized impure body would silently
+skip its side effects on cache hits. Decorating an impure function
+throws `PurityError` at decoration time.
 
 `@retry(n)` runs the body up to `n` attempts, swallowing each thrown
 exception and retrying. The first attempt that returns normally
 becomes the call's result. If every attempt throws, the final
 exception is re-raised so the caller's surrounding `try` (or the
 top-level handler) can see it. The default is 3 attempts when the
-argument is omitted.
+argument is omitted. The body must also be pure, for the same
+replay reason: a non-deterministic body would fire its side effects
+once per attempt.
 
 `@trace` prints the call name and arguments before the body runs and
 the return value after, both to stderr. `@timed` measures monotonic
 wall-clock around the call and prints the elapsed milliseconds.
 Both pass arguments through unchanged and return the body's result.
+Neither requires purity, since both delegate the call exactly once
+and never repeat the body or skip it.
 
 Wrapping decorators compose with each other in declaration order
 (outermost first):
@@ -3499,7 +3457,9 @@ Wrapping decorators compose with each other in declaration order
 
 Here `@memoize` wraps the original fn first, then `@timed` wraps the
 memoized dispatcher; the timer measures the cache hit when one
-exists.
+exists. The purity gate applies to the underlying function, not the
+intermediate wrapper, so `@trace @memoize fn ...` works as long as
+the wrapped fn itself is pure.
 
 ---
 
