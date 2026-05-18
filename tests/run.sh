@@ -241,6 +241,22 @@ if [ -f tests/test_limits.sh ]; then
     fi
 fi
 
+# 5. Cross-backend transpiler diff tests (interp vs vm vs c -O0/-O2 vs js
+#    vs wasm). Catches cases where one backend emits something that
+#    "compiles" but computes the wrong result, and the variant where a
+#    test passes at -O0 but the optimiser exposes signed-overflow UB at
+#    -O2.
+if [ -f tests/test_transpiler_diff.sh ]; then
+    td_output=$(bash tests/test_transpiler_diff.sh 2>&1)
+    td_rc=$?
+    td_pass=$(echo "$td_output" | grep -oE 'transpiler diff: [0-9]+ passed' | grep -oE '[0-9]+')
+    if [ "$td_rc" -eq 0 ]; then
+        pass=$((pass + 1)); echo "  ok    test_transpiler_diff (${td_pass:-0} checks)"
+    else
+        report_fail "FAIL" "test_transpiler_diff" "$(echo "$td_output" | grep FAIL)"
+    fi
+fi
+
 echo
 echo "results: $pass passed, $fail failed, $diverge diverged"
 if [ -n "$fails" ]; then

@@ -40,4 +40,31 @@ let (ev, od) = make_pair()
 assert_eq(ev(10), true)
 assert_eq(od(7), true)
 
+-- Transitive capture through more than one nested function: the middle
+-- frame must forward the outer binding to the inner closure even
+-- though the middle body never reads it itself. This shape used to
+-- trip the C and WASM AOT paths, where capture analysis only walked
+-- one level of the lexical chain.
+fn outer_decl() {
+    var x = 100
+    fn middle() {
+        var y = 10
+        fn inner() { x + y }
+        inner
+    }
+    middle
+}
+assert_eq(outer_decl()()(), 110)
+
+fn outer_lambda() {
+    let x = 100
+    let middle = fn() {
+        let y = 10
+        let inner = fn() { x + y }
+        inner
+    }
+    middle
+}
+assert_eq(outer_lambda()()(), 110)
+
 println("CONFORMANCE OK")

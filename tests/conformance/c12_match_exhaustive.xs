@@ -48,4 +48,19 @@ let tail_len = match nums {
 }
 assert_eq(tail_len, 4)
 
+-- Enum constructors and matches: the with-arg form (`Some(42)`) and
+-- the zero-arg form (`None`) need to lower the same way at every
+-- backend so the match arms can dispatch on them. The WASM path used
+-- to take different lowerings for the two forms and the with-arg
+-- branch silently produced no output.
+enum Maybe { None, Some(int) }
+fn unwrap(m) {
+    match m {
+        Maybe::Some(x) => x
+        Maybe::None    => -1
+    }
+}
+assert_eq(unwrap(Maybe::Some(42)), 42)
+assert_eq(unwrap(Maybe::None), -1)
+
 println("CONFORMANCE OK")

@@ -23,4 +23,10 @@ assert_eq(prod.to_str().len(), 61)
 let nan = 0.0 / 0.0
 assert_eq(nan == nan, false)
 
+-- A literal that doesn't fit in i64 must come through as a bigint, not
+-- silently wrap. The C transpiler used to lower NODE_LIT_BIGINT to
+-- XS_INT(...) which truncated; the WASM path always handled it.
+let lit = 99999999999999999999
+assert_eq(lit.to_str(), "99999999999999999999")
+
 println("CONFORMANCE OK")
