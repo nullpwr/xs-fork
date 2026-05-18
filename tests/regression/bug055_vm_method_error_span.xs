@@ -1,4 +1,4 @@
--- skip-emit: c, wasm (TODO: process.run / os.setenv stdlib calls not lowered by --emit c/wasm; test forks ./xs to inspect runtime error span)
+-- skip-emit: wasm (test forks ./xs to inspect runtime spans; wasi sandbox has no fork, the os.platform=="wasi" branch produces a different stdout than the interp baseline)
 -- bug055: the VM and JIT used to report runtime method-not-found
 -- errors at "<unknown>:0:0" because the bytecode chunk carried no
 -- per-instruction line info. The compiler now stamps a (line, col)

@@ -665,6 +665,20 @@ static void scan_top_level_vars(Node *program) {
     }
 }
 
+/* Does the program contain `import <name>` at top level? Used to gate
+ * prelude helpers so files that never touch the db / process / http
+ * polyfills don't pay the size cost. */
+static int program_imports_module(Node *program, const char *name) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return 0;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *s = program->program.stmts.items[i];
+        if (s && VAL_TAG(s) == NODE_IMPORT && s->import.nparts > 0
+            && s->import.path[0] && strcmp(s->import.path[0], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 /* actor field rewriting: when emitting actor method bodies, identifiers
    that match state fields get rewritten to self->field */
 static const char **actor_fields = NULL;
@@ -746,6 +760,32 @@ static void collect_idents(Node *n, const char **out, int *nout, int max) {
     }
     case NODE_EXPR_STMT: collect_idents(n->expr_stmt.expr, out, nout, max); break;
     case NODE_LET: case NODE_VAR: collect_idents(n->let.value, out, nout, max); break;
+    case NODE_LIT_ARRAY: case NODE_LIT_TUPLE:
+        for (int i = 0; i < n->lit_array.elems.len; i++)
+            collect_idents(n->lit_array.elems.items[i], out, nout, max);
+        break;
+    case NODE_LIT_MAP:
+        for (int i = 0; i < n->lit_map.vals.len; i++)
+            collect_idents(n->lit_map.vals.items[i], out, nout, max);
+        break;
+    case NODE_WHILE: collect_idents(n->while_loop.cond, out, nout, max);
+                     collect_idents(n->while_loop.body, out, nout, max); break;
+    case NODE_FOR:   collect_idents(n->for_loop.iter, out, nout, max);
+                     collect_idents(n->for_loop.body, out, nout, max); break;
+    case NODE_RANGE: collect_idents(n->range.start, out, nout, max);
+                     collect_idents(n->range.end, out, nout, max); break;
+    case NODE_THROW: collect_idents(n->throw_.value, out, nout, max); break;
+    case NODE_MATCH: collect_idents(n->match.subject, out, nout, max);
+        for (int i = 0; i < n->match.arms.len; i++) {
+            collect_idents(n->match.arms.items[i].guard, out, nout, max);
+            collect_idents(n->match.arms.items[i].body, out, nout, max);
+        } break;
+    case NODE_TRY: collect_idents(n->try_.body, out, nout, max);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            collect_idents(n->try_.catch_arms.items[i].body, out, nout, max);
+        collect_idents(n->try_.finally_block, out, nout, max); break;
+    case NODE_SPAWN: collect_idents(n->spawn_.expr, out, nout, max); break;
+    case NODE_AWAIT: collect_idents(n->await_.expr, out, nout, max); break;
     case NODE_LAMBDA: {
         /* A nested lambda's free vars are also free vars of the outer,
          * so the outer can box and forward them. Subtract the inner
@@ -1845,7 +1885,8 @@ static void emit_expr(SB *s, Node *n, int depth) {
                 strcmp(on, "json") == 0 || strcmp(on, "time") == 0 ||
                 strcmp(on, "random") == 0 || strcmp(on, "os") == 0 ||
                 strcmp(on, "fmt") == 0 || strcmp(on, "fs") == 0 ||
-                strcmp(on, "collections") == 0)
+                strcmp(on, "collections") == 0 ||
+                strcmp(on, "process") == 0 || strcmp(on, "db") == 0)
                 mod_name = on;
         }
         /* check if receiver is a known struct/class instance whose impl
@@ -1932,6 +1973,7 @@ static void emit_expr(SB *s, Node *n, int depth) {
                      strcmp(meth, "ls") == 0)       fn = "xs_fs_list_dir";
             else if (strcmp(meth, "remove") == 0)   fn = "xs_fs_remove";
             else if (strcmp(meth, "mkdir") == 0)    fn = "xs_fs_mkdir";
+            else if (strcmp(meth, "temp_dir") == 0) fn = "xs_fs_temp_dir";
             if (fn) {
                 sb_printf(s, "%s(", fn);
                 for (int i = 0; i < n->method_call.args.len; i++) {
@@ -1942,10 +1984,45 @@ static void emit_expr(SB *s, Node *n, int depth) {
             } else {
                 sb_printf(s, "XS_NULL /* fs.%s unsupported on --emit c */", meth);
             }
+        } else if (mod_name && strcmp(mod_name, "process") == 0) {
+            if (strcmp(meth, "run") == 0 ||
+                strcmp(meth, "popen") == 0 ||
+                strcmp(meth, "popen_read") == 0) {
+                sb_add(s, strcmp(meth, "run") == 0 ? "xs_process_run(" : "xs_process_popen(");
+                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_STR(\"\")");
+                sb_addc(s, ')');
+            } else {
+                sb_printf(s, "XS_NULL /* process.%s unsupported on --emit c */", meth);
+            }
+        } else if (mod_name && strcmp(mod_name, "db") == 0) {
+            const char *fn = NULL;
+            if      (strcmp(meth, "open")  == 0) fn = "xs_db_open";
+            else if (strcmp(meth, "close") == 0) fn = "xs_db_close";
+            else if (strcmp(meth, "exec")  == 0) fn = "xs_db_exec";
+            else if (strcmp(meth, "query") == 0) fn = "xs_db_query";
+            if (fn) {
+                sb_printf(s, "%s(", fn);
+                for (int i = 0; i < n->method_call.args.len; i++) {
+                    if (i) sb_add(s, ", ");
+                    emit_expr(s, n->method_call.args.items[i], depth);
+                }
+                sb_addc(s, ')');
+            } else {
+                sb_printf(s, "XS_NULL /* db.%s unsupported on --emit c */", meth);
+            }
         } else if (mod_name && strcmp(mod_name, "os") == 0) {
             if (strcmp(meth, "getenv") == 0 || strcmp(meth, "env") == 0) {
                 sb_add(s, "xs_os_getenv(");
                 if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_STR(\"\")");
+                sb_addc(s, ')');
+            } else if (strcmp(meth, "setenv") == 0) {
+                sb_add(s, "xs_os_setenv(");
+                if (n->method_call.args.len > 0) emit_expr(s, n->method_call.args.items[0], depth);
+                else sb_add(s, "XS_STR(\"\")");
+                sb_add(s, ", ");
+                if (n->method_call.args.len > 1) emit_expr(s, n->method_call.args.items[1], depth);
                 else sb_add(s, "XS_STR(\"\")");
                 sb_addc(s, ')');
             } else if (strcmp(meth, "args") == 0) {
@@ -5958,6 +6035,176 @@ static void c_lower_nested_fns_in_block(Node *block) {
     c_lower_nested_fns_walk(block->block.expr);
 }
 
+/* ---- Nested actor decl lowering --------------------------------------
+ * An `actor Foo { fn m(...) { ... } }` declared inside a fn body needs
+ * to capture the enclosing scope's locals; the top-level actor lowering
+ * (file-scope state struct + plain C method fns) has no story for that.
+ *
+ * Trick: rewrite the nested decl into a `let Foo = { "m": |args| body }`
+ * map of lambdas. The subsequent `spawn Foo` (c_lower_node unwraps for
+ * non-actor idents) reduces to a plain `Foo` reference, and method
+ * dispatch on the spawned value already runs through the generic
+ * xs_index + xs_call path. The existing lambda capture machinery does
+ * the heavy lifting; each method lambda picks up its free vars via the
+ * same `__box_NAME` boxing path that ordinary closures use, so two
+ * sibling actors that close over the same outer var see each other's
+ * writes through the shared box. */
+
+static Node *c_actor_decl_to_map_let(Node *ad) {
+    if (!ad || VAL_TAG(ad) != NODE_ACTOR_DECL || !ad->actor_decl.name) return NULL;
+    const char *aname = ad->actor_decl.name;
+    Node *map = node_new(NODE_LIT_MAP, span_zero());
+    map->lit_map.keys = nodelist_new();
+    map->lit_map.vals = nodelist_new();
+    /* state fields (if any). The closure-capture grammar this lowering
+     * targets doesn't use them, but copy them through so the map looks
+     * the same as the JS / interp version. */
+    for (int j = 0; j < ad->actor_decl.state_fields.len; j++) {
+        const char *fk = ad->actor_decl.state_fields.items[j].key;
+        Node *fv = ad->actor_decl.state_fields.items[j].val;
+        if (!fk) continue;
+        nodelist_push(&map->lit_map.keys, mkc_str_lit(fk));
+        nodelist_push(&map->lit_map.vals, fv ? fv : mkc_null_lit());
+        ad->actor_decl.state_fields.items[j].val = NULL;
+    }
+    for (int j = 0; j < ad->actor_decl.methods.len; j++) {
+        Node *m = ad->actor_decl.methods.items[j];
+        if (!m || VAL_TAG(m) != NODE_FN_DECL || !m->fn_decl.name) continue;
+        const char *mname = m->fn_decl.name;
+        nodelist_push(&map->lit_map.keys, mkc_str_lit(mname));
+        Node *lam = c_fn_to_lambda(m);
+        nodelist_push(&map->lit_map.vals, lam);
+    }
+    /* free the husks (params/body already moved into lambdas). */
+    for (int j = 0; j < ad->actor_decl.methods.len; j++) {
+        Node *m = ad->actor_decl.methods.items[j];
+        if (m) node_free(m);
+    }
+    free(ad->actor_decl.methods.items);
+    ad->actor_decl.methods.items = NULL;
+    ad->actor_decl.methods.len = 0;
+    ad->actor_decl.methods.cap = 0;
+    Node *bind = mkc_let(aname, map, 0);
+    node_free(ad);
+    return bind;
+}
+
+static void c_lower_nested_actors_walk(Node *n);
+static void c_lower_nested_actors_in_block(Node *block) {
+    if (!block || VAL_TAG(block) != NODE_BLOCK) return;
+    NodeList *stmts = &block->block.stmts;
+    NodeList rebuilt = nodelist_new();
+    for (int i = 0; i < stmts->len; i++) {
+        Node *st = stmts->items[i];
+        if (!st) continue;
+        Node *ad = NULL;
+        Node *outer = NULL;
+        if (VAL_TAG(st) == NODE_ACTOR_DECL) ad = st;
+        else if (VAL_TAG(st) == NODE_EXPR_STMT && st->expr_stmt.expr &&
+                 VAL_TAG(st->expr_stmt.expr) == NODE_ACTOR_DECL) {
+            ad = st->expr_stmt.expr;
+            outer = st;
+            st->expr_stmt.expr = NULL;
+        }
+        if (ad) {
+            Node *bind = c_actor_decl_to_map_let(ad);
+            if (bind) nodelist_push(&rebuilt, bind);
+            if (outer) node_free(outer);
+        } else {
+            c_lower_nested_actors_walk(st);
+            nodelist_push(&rebuilt, st);
+        }
+    }
+    free(stmts->items);
+    block->block.stmts = rebuilt;
+    c_lower_nested_actors_walk(block->block.expr);
+}
+
+static void c_lower_nested_actors_walk(Node *n) {
+    if (!n) return;
+    switch (VAL_TAG(n)) {
+    case NODE_BLOCK: c_lower_nested_actors_in_block(n); return;
+    case NODE_FN_DECL:
+        if (n->fn_decl.body && VAL_TAG(n->fn_decl.body) == NODE_BLOCK)
+            c_lower_nested_actors_in_block(n->fn_decl.body);
+        return;
+    case NODE_LAMBDA:
+        if (n->lambda.body && VAL_TAG(n->lambda.body) == NODE_BLOCK)
+            c_lower_nested_actors_in_block(n->lambda.body);
+        return;
+    case NODE_IF:
+        c_lower_nested_actors_walk(n->if_expr.then);
+        for (int i = 0; i < n->if_expr.elif_thens.len; i++)
+            c_lower_nested_actors_walk(n->if_expr.elif_thens.items[i]);
+        c_lower_nested_actors_walk(n->if_expr.else_branch);
+        return;
+    case NODE_WHILE: c_lower_nested_actors_walk(n->while_loop.body); return;
+    case NODE_FOR:   c_lower_nested_actors_walk(n->for_loop.body); return;
+    case NODE_LOOP:  c_lower_nested_actors_walk(n->loop.body); return;
+    case NODE_TRY:
+        c_lower_nested_actors_walk(n->try_.body);
+        for (int i = 0; i < n->try_.catch_arms.len; i++)
+            c_lower_nested_actors_walk(n->try_.catch_arms.items[i].body);
+        c_lower_nested_actors_walk(n->try_.finally_block);
+        return;
+    case NODE_MATCH:
+        for (int i = 0; i < n->match.arms.len; i++)
+            c_lower_nested_actors_walk(n->match.arms.items[i].body);
+        return;
+    case NODE_IMPL_DECL:
+        for (int i = 0; i < n->impl_decl.members.len; i++) {
+            Node *m = n->impl_decl.members.items[i];
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_actors_in_block(m->fn_decl.body);
+        }
+        return;
+    case NODE_CLASS_DECL:
+        for (int i = 0; i < n->class_decl.members.len; i++) {
+            Node *m = n->class_decl.members.items[i];
+            if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_actors_in_block(m->fn_decl.body);
+        }
+        return;
+    case NODE_LET: case NODE_VAR: c_lower_nested_actors_walk(n->let.value); return;
+    case NODE_CONST:    c_lower_nested_actors_walk(n->const_.value); return;
+    case NODE_EXPR_STMT: c_lower_nested_actors_walk(n->expr_stmt.expr); return;
+    case NODE_RETURN:   c_lower_nested_actors_walk(n->ret.value); return;
+    case NODE_SPAWN:    c_lower_nested_actors_walk(n->spawn_.expr); return;
+    default: return;
+    }
+}
+
+/* Top-level driver: walk program statements, recurse into fn / lambda
+ * bodies (top-level actor decls keep the state-struct lowering they
+ * already have via the file-scope emit). */
+static void c_lower_nested_actors(Node *program) {
+    if (!program || VAL_TAG(program) != NODE_PROGRAM) return;
+    for (int i = 0; i < program->program.stmts.len; i++) {
+        Node *st = program->program.stmts.items[i];
+        if (!st) continue;
+        if (VAL_TAG(st) == NODE_FN_DECL) {
+            if (st->fn_decl.body && VAL_TAG(st->fn_decl.body) == NODE_BLOCK)
+                c_lower_nested_actors_in_block(st->fn_decl.body);
+        } else if (VAL_TAG(st) == NODE_IMPL_DECL) {
+            for (int j = 0; j < st->impl_decl.members.len; j++) {
+                Node *m = st->impl_decl.members.items[j];
+                if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                    VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                    c_lower_nested_actors_in_block(m->fn_decl.body);
+            }
+        } else if (VAL_TAG(st) == NODE_CLASS_DECL) {
+            for (int j = 0; j < st->class_decl.members.len; j++) {
+                Node *m = st->class_decl.members.items[j];
+                if (m && VAL_TAG(m) == NODE_FN_DECL && m->fn_decl.body &&
+                    VAL_TAG(m->fn_decl.body) == NODE_BLOCK)
+                    c_lower_nested_actors_in_block(m->fn_decl.body);
+            }
+        }
+    }
+}
+
 /* ---- Generator lowering for the C target ------------------------------ */
 
 /* Replace every NODE_YIELD inside subtree with `__gen_buf.push(value)`. */
@@ -6807,6 +7054,12 @@ static void c_lower_program(Node *program, const char *src_filename) {
     /* Phase 3a: copy trait default-method bodies into impls that
      * don't override them so call sites see a real `Type_method`. */
     c_inherit_trait_defaults(program);
+
+    /* Phase 3b: actor decls inside fn bodies become `let Name = {
+     * method: |args| body, ... }` maps so the closure machinery
+     * (run by phase 3 + downstream lambda capture) covers their
+     * upvalues. Top-level actors keep the state-struct lowering. */
+    c_lower_nested_actors(program);
 
     /* Phase 3: lower nested fn decls to lambda lets so the closure
      * machinery handles captures. Top-level fns stay as C functions. */
@@ -8914,6 +9167,17 @@ char *transpile_c(Node *program, const char *filename) {
         "    return XS_BOOL(mkdir(path.s, 0755) == 0);\n"
         "#endif\n"
         "}\n"
+        "static xs_val xs_fs_temp_dir(void) {\n"
+        "#if defined(_WIN32)\n"
+        "    const char *t = getenv(\"TEMP\");\n"
+        "    if (!t) t = getenv(\"TMP\");\n"
+        "    if (!t) t = \"C:\\\\Windows\\\\Temp\";\n"
+        "#else\n"
+        "    const char *t = getenv(\"TMPDIR\");\n"
+        "    if (!t || !*t) t = \"/tmp\";\n"
+        "#endif\n"
+        "    return XS_STR(strdup(t));\n"
+        "}\n"
         "/* main() stashes argc/argv into these for os.args() to consume. */\n"
         "static int xs_user_argc = 0;\n"
         "static char **xs_user_argv = NULL;\n"
@@ -8927,6 +9191,17 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (name.tag != 2 || !name.s) return XS_NULL;\n"
         "    const char *v = getenv(name.s);\n"
         "    return v ? XS_STR(strdup(v)) : XS_NULL;\n"
+        "}\n"
+        "static xs_val xs_os_setenv(xs_val name, xs_val val) {\n"
+        "    if (name.tag != 2 || !name.s) return XS_NULL;\n"
+        "    const char *v = (val.tag == 2 && val.s) ? val.s : xs_to_str(val);\n"
+        "#if defined(_WIN32)\n"
+        "    /* Win32 _putenv_s; falls back to putenv with NAME=VAL string. */\n"
+        "    _putenv_s(name.s, v ? v : \"\");\n"
+        "#else\n"
+        "    setenv(name.s, v ? v : \"\", 1);\n"
+        "#endif\n"
+        "    return XS_NULL;\n"
         "}\n"
         "static xs_val xs_os_exit(xs_val code) {\n"
         "    int c = (code.tag == 0) ? (int)code.i : 0;\n"
@@ -9054,6 +9329,345 @@ char *transpile_c(Node *program, const char *filename) {
         "    if (!armed) { armed = 1; atexit(__xs_run_onexit); }\n"
         "}\n\n"
     );
+
+    /* process.run: popen the command, slurp stdout to a fresh buffer,
+     * pclose to recover the exit status. Returns a map matching the
+     * interp contract: { ok: bool, code: int, stdout: str }. Tests
+     * read .stdout primarily; .ok / .code are there for parity. */
+    if (program_imports_module(program, "process")) {
+        sb_add(&s,
+            "static xs_val xs_process_run(xs_val cmd) {\n"
+            "    xs_val m = xs_map(0);\n"
+            "    if (cmd.tag != 2 || !cmd.s) {\n"
+            "        xs_map_put(&m, XS_STR(\"ok\"), XS_BOOL(0));\n"
+            "        xs_map_put(&m, XS_STR(\"stdout\"), XS_STR(\"\"));\n"
+            "        xs_map_put(&m, XS_STR(\"code\"), XS_INT(-1));\n"
+            "        return m;\n"
+            "    }\n"
+            "    FILE *p = popen(cmd.s, \"r\");\n"
+            "    if (!p) {\n"
+            "        xs_map_put(&m, XS_STR(\"ok\"), XS_BOOL(0));\n"
+            "        xs_map_put(&m, XS_STR(\"stdout\"), XS_STR(\"\"));\n"
+            "        xs_map_put(&m, XS_STR(\"code\"), XS_INT(-1));\n"
+            "        return m;\n"
+            "    }\n"
+            "    size_t cap = 4096, len = 0;\n"
+            "    char *buf = (char*)malloc(cap);\n"
+            "    if (!buf) { pclose(p);\n"
+            "        xs_map_put(&m, XS_STR(\"ok\"), XS_BOOL(0));\n"
+            "        xs_map_put(&m, XS_STR(\"stdout\"), XS_STR(\"\"));\n"
+            "        xs_map_put(&m, XS_STR(\"code\"), XS_INT(-1));\n"
+            "        return m;\n"
+            "    }\n"
+            "    size_t n;\n"
+            "    while ((n = fread(buf + len, 1, cap - len - 1, p)) > 0) {\n"
+            "        len += n;\n"
+            "        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); if (!buf) { pclose(p);\n"
+            "            xs_map_put(&m, XS_STR(\"ok\"), XS_BOOL(0));\n"
+            "            xs_map_put(&m, XS_STR(\"stdout\"), XS_STR(\"\"));\n"
+            "            xs_map_put(&m, XS_STR(\"code\"), XS_INT(-1));\n"
+            "            return m; } }\n"
+            "    }\n"
+            "    buf[len] = 0;\n"
+            "    int rc = pclose(p);\n"
+            "    int code = 0;\n"
+            "#if defined(WIFEXITED)\n"
+            "    if (WIFEXITED(rc)) code = WEXITSTATUS(rc); else code = rc;\n"
+            "#else\n"
+            "    code = rc;\n"
+            "#endif\n"
+            "    xs_map_put(&m, XS_STR(\"ok\"), XS_BOOL(code == 0));\n"
+            "    xs_map_put(&m, XS_STR(\"stdout\"), XS_STR(buf));\n"
+            "    xs_map_put(&m, XS_STR(\"code\"), XS_INT(code));\n"
+            "    return m;\n"
+            "}\n"
+            "static xs_val xs_process_popen(xs_val cmd) {\n"
+            "    xs_val r = xs_process_run(cmd);\n"
+            "    return xs_index(r, XS_STR(\"stdout\"));\n"
+            "}\n"
+        );
+    }
+
+    /* db: in-memory polyfill matching the JS target. CREATE TABLE,
+     * INSERT INTO, SELECT * with WHERE col op v / ORDER BY / LIMIT.
+     * Each row carries both real column names and positional cN keys.
+     * Self-contained; no libsqlite3, no libpq. */
+    if (program_imports_module(program, "db")) {
+        sb_add(&s,
+            /* trim leading + trailing whitespace into a fresh strdup */
+            "static char *__xs_db_trim(const char *p, size_t n) {\n"
+            "    while (n > 0 && (*p==' '||*p=='\\t'||*p=='\\n'||*p=='\\r')) { p++; n--; }\n"
+            "    while (n > 0 && (p[n-1]==' '||p[n-1]=='\\t'||p[n-1]=='\\n'||p[n-1]=='\\r')) n--;\n"
+            "    char *r = (char*)malloc(n + 1);\n"
+            "    if (n) memcpy(r, p, n);\n"
+            "    r[n] = 0;\n"
+            "    return r;\n"
+            "}\n"
+            /* case-insensitive substring search (libc strcasestr isn't
+             * portable to MSVC; do it by hand). */
+            "static const char *__xs_db_istr(const char *hay, const char *needle) {\n"
+            "    if (!hay || !needle || !*needle) return hay;\n"
+            "    size_t nl = strlen(needle);\n"
+            "    for (; *hay; hay++) {\n"
+            "        size_t i = 0;\n"
+            "        for (; i < nl; i++) {\n"
+            "            char a = hay[i], b = needle[i];\n"
+            "            if (a >= 'A' && a <= 'Z') a += 32;\n"
+            "            if (b >= 'A' && b <= 'Z') b += 32;\n"
+            "            if (a != b) break;\n"
+            "        }\n"
+            "        if (i == nl) return hay;\n"
+            "    }\n"
+            "    return NULL;\n"
+            "}\n"
+            /* parse a SQL literal: 'foo' / \"foo\" / int / float / bare */
+            "static xs_val __xs_db_lit(const char *p, size_t n) {\n"
+            "    while (n > 0 && (*p==' '||*p=='\\t')) { p++; n--; }\n"
+            "    while (n > 0 && (p[n-1]==' '||p[n-1]=='\\t')) n--;\n"
+            "    if (n >= 2 && (p[0]=='\\''||p[0]=='\"') && p[n-1]==p[0])\n"
+            "        return XS_STR(__xs_db_trim(p+1, n-2));\n"
+            "    char *t = __xs_db_trim(p, n);\n"
+            "    int isnum = 1, isfloat = 0, i = 0;\n"
+            "    if (t[0] == '-') i = 1;\n"
+            "    if (!t[i]) isnum = 0;\n"
+            "    for (; t[i]; i++) {\n"
+            "        if (t[i] == '.') { if (isfloat) { isnum = 0; break; } isfloat = 1; }\n"
+            "        else if (t[i] < '0' || t[i] > '9') { isnum = 0; break; }\n"
+            "    }\n"
+            "    if (isnum && isfloat) { xs_val v = XS_FLOAT(strtod(t, NULL)); free(t); return v; }\n"
+            "    if (isnum)            { xs_val v = XS_INT(strtoll(t, NULL, 10)); free(t); return v; }\n"
+            "    return XS_STR(t);\n"
+            "}\n"
+            /* split a comma list at the top level (no nesting needed for
+             * the supported grammar). returns count via *nout; caller frees
+             * each entry + the array. */
+            "static char **__xs_db_split(const char *p, size_t n, int *nout) {\n"
+            "    int cap = 4, cnt = 0; char **out = (char**)malloc(cap * sizeof *out);\n"
+            "    size_t s = 0;\n"
+            "    for (size_t i = 0; i <= n; i++) {\n"
+            "        if (i == n || p[i] == ',') {\n"
+            "            if (cnt == cap) { cap *= 2; out = (char**)realloc(out, cap * sizeof *out); }\n"
+            "            out[cnt++] = __xs_db_trim(p + s, i - s);\n"
+            "            s = i + 1;\n"
+            "        }\n"
+            "    }\n"
+            "    *nout = cnt; return out;\n"
+            "}\n"
+            /* a conn is a map { name, schemas: { tname -> [colnames] },\n"
+             *                    rows: { tname -> [row, ...] } }. */
+            "static xs_val xs_db_open(xs_val name) {\n"
+            "    xs_val conn = xs_map(0);\n"
+            "    xs_map_put(&conn, XS_STR(\"name\"),    name);\n"
+            "    xs_map_put(&conn, XS_STR(\"schemas\"), xs_map(0));\n"
+            "    xs_map_put(&conn, XS_STR(\"rows\"),    xs_map(0));\n"
+            "    return conn;\n"
+            "}\n"
+            "static xs_val xs_db_close(xs_val conn) { (void)conn; return XS_NULL; }\n"
+            /* CREATE TABLE name (c1, c2, ...): pull the parenthesised
+             * list, store the cleaned column names against the table. */
+            "static int __xs_db_exec_create(xs_val conn, const char *sql) {\n"
+            "    const char *p = __xs_db_istr(sql, \"CREATE\");\n"
+            "    if (!p) return 0;\n"
+            "    p = __xs_db_istr(p, \"TABLE\");\n"
+            "    if (!p) return 0;\n"
+            "    p += 5; while (*p == ' '||*p=='\\t') p++;\n"
+            "    const char *nstart = p;\n"
+            "    while (*p && *p != ' ' && *p != '\\t' && *p != '(') p++;\n"
+            "    char *tname = __xs_db_trim(nstart, p - nstart);\n"
+            "    const char *lp = strchr(p, '(');\n"
+            "    const char *rp = lp ? strchr(lp, ')') : NULL;\n"
+            "    if (!lp || !rp) { free(tname); return 0; }\n"
+            "    int ncols = 0;\n"
+            "    char **parts = __xs_db_split(lp + 1, rp - lp - 1, &ncols);\n"
+            "    xs_val cols = xs_array(0);\n"
+            "    for (int i = 0; i < ncols; i++) {\n"
+            "        /* take the first whitespace-delimited word (column name) */\n"
+            "        char *q = parts[i];\n"
+            "        char *ws = strchr(q, ' ');\n"
+            "        if (ws) *ws = 0;\n"
+            "        if (*q) xs_arr_push(cols, XS_STR(strdup(q)));\n"
+            "        free(parts[i]);\n"
+            "    }\n"
+            "    free(parts);\n"
+            "    xs_val schemas = xs_index(conn, XS_STR(\"schemas\"));\n"
+            "    xs_val rows    = xs_index(conn, XS_STR(\"rows\"));\n"
+            "    xs_map_put(&schemas, XS_STR(tname), cols);\n"
+            "    xs_map_put(&rows,    XS_STR(tname), xs_array(0));\n"
+            "    /* xs_map_put mutates in place via *map; schemas/rows already\n"
+            "     * point at the same hmap struct stored on conn, so re-storing\n"
+            "     * isn't necessary. The strdup'd tname lives on inside the key\n"
+            "     * table. */\n"
+            "    free(tname);\n"
+            "    return 1;\n"
+            "}\n"
+            /* INSERT INTO name [(col,...)] VALUES (v,...). */
+            "static int __xs_db_exec_insert(xs_val conn, const char *sql) {\n"
+            "    const char *p = __xs_db_istr(sql, \"INSERT\");\n"
+            "    if (!p) return 0;\n"
+            "    p = __xs_db_istr(p, \"INTO\");\n"
+            "    if (!p) return 0;\n"
+            "    p += 4; while (*p == ' '||*p=='\\t') p++;\n"
+            "    const char *nstart = p;\n"
+            "    while (*p && *p != ' ' && *p != '\\t' && *p != '(') p++;\n"
+            "    char *tname = __xs_db_trim(nstart, p - nstart);\n"
+            "    char **incols = NULL; int n_incols = 0;\n"
+            "    /* optional column list */\n"
+            "    if (*p == '(' || (__xs_db_istr(p, \"VALUES\") && strchr(p, '(') && strchr(p, '(') < __xs_db_istr(p, \"VALUES\"))) {\n"
+            "        const char *lp = strchr(p, '(');\n"
+            "        const char *rp = strchr(lp, ')');\n"
+            "        if (lp && rp && rp < __xs_db_istr(p, \"VALUES\")) {\n"
+            "            incols = __xs_db_split(lp + 1, rp - lp - 1, &n_incols);\n"
+            "            p = rp + 1;\n"
+            "        }\n"
+            "    }\n"
+            "    const char *vp = __xs_db_istr(p, \"VALUES\");\n"
+            "    if (!vp) { free(tname); return 0; }\n"
+            "    const char *lp2 = strchr(vp, '(');\n"
+            "    const char *rp2 = lp2 ? strrchr(lp2, ')') : NULL;\n"
+            "    if (!lp2 || !rp2) { free(tname); return 0; }\n"
+            "    int nvals = 0;\n"
+            "    char **valparts = __xs_db_split(lp2 + 1, rp2 - lp2 - 1, &nvals);\n"
+            "    xs_val schemas = xs_index(conn, XS_STR(\"schemas\"));\n"
+            "    xs_val cols    = xs_index(schemas, XS_STR(tname));\n"
+            "    xs_arr *colsa  = (cols.tag == 5 && cols.p) ? (xs_arr*)cols.p : NULL;\n"
+            "    xs_val row = xs_map(0);\n"
+            "    for (int i = 0; i < nvals; i++) {\n"
+            "        xs_val v = __xs_db_lit(valparts[i], strlen(valparts[i]));\n"
+            "        char ckey[24]; snprintf(ckey, sizeof ckey, \"c%d\", i);\n"
+            "        xs_map_put(&row, XS_STR(strdup(ckey)), v);\n"
+            "        const char *named = NULL;\n"
+            "        if (incols && i < n_incols) named = incols[i];\n"
+            "        else if (colsa && i < colsa->len && colsa->items[i].tag == 2) named = colsa->items[i].s;\n"
+            "        if (named && *named) xs_map_put(&row, XS_STR(strdup(named)), v);\n"
+            "        free(valparts[i]);\n"
+            "    }\n"
+            "    free(valparts);\n"
+            "    if (incols) { for (int i = 0; i < n_incols; i++) free(incols[i]); free(incols); }\n"
+            "    xs_val rows  = xs_index(conn, XS_STR(\"rows\"));\n"
+            "    xs_val table = xs_index(rows, XS_STR(tname));\n"
+            "    if (table.tag != 5 || !table.p) {\n"
+            "        table = xs_array(0);\n"
+            "        xs_map_put(&rows, XS_STR(strdup(tname)), table);\n"
+            "    }\n"
+            "    xs_arr_push(table, row);\n"
+            "    free(tname);\n"
+            "    return 1;\n"
+            "}\n"
+            "static xs_val xs_db_exec(xs_val conn, xs_val sql) {\n"
+            "    if (sql.tag != 2 || !sql.s) return XS_NULL;\n"
+            "    if (__xs_db_exec_create(conn, sql.s)) return XS_NULL;\n"
+            "    if (__xs_db_exec_insert(conn, sql.s)) return XS_NULL;\n"
+            "    return XS_NULL;\n"
+            "}\n"
+            /* check a single WHERE col op value clause against one row.
+             * cols/ncols map column name -> positional cN key so the
+             * lookup works whether the row was stored by name or index. */
+            "static int __xs_db_match(xs_val row, const char *where, xs_val cols) {\n"
+            "    if (!where || !*where) return 1;\n"
+            "    /* find operator */\n"
+            "    const char *op = NULL; int op_len = 0;\n"
+            "    static const char *ops[] = { \"<=\", \">=\", \"!=\", \"==\", \"=\", \"<\", \">\", NULL };\n"
+            "    int best = -1, best_len = 0;\n"
+            "    for (int i = 0; ops[i]; i++) {\n"
+            "        const char *q = strstr(where, ops[i]);\n"
+            "        if (q && (best < 0 || q - where < best)) { best = q - where; op = ops[i]; op_len = (int)strlen(ops[i]); }\n"
+            "    }\n"
+            "    if (!op) return 1;\n"
+            "    char *col = __xs_db_trim(where, best);\n"
+            "    xs_val rhs = __xs_db_lit(where + best + op_len, strlen(where + best + op_len));\n"
+            "    /* try named lookup first; fall back to positional via cols */\n"
+            "    xs_val lhs = xs_index(row, XS_STR(col));\n"
+            "    if (lhs.tag == 4 && cols.tag == 5 && cols.p) {\n"
+            "        xs_arr *ca = (xs_arr*)cols.p;\n"
+            "        for (int i = 0; i < ca->len; i++) {\n"
+            "            if (ca->items[i].tag == 2 && ca->items[i].s && strcmp(ca->items[i].s, col) == 0) {\n"
+            "                char ckey[24]; snprintf(ckey, sizeof ckey, \"c%d\", i);\n"
+            "                lhs = xs_index(row, XS_STR(ckey));\n"
+            "                break;\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "    free(col);\n"
+            "    int eq = xs_eq(lhs, rhs);\n"
+            "    int cmp = xs_cmp(lhs, rhs);\n"
+            "    if (strcmp(op, \"=\") == 0 || strcmp(op, \"==\") == 0) return eq;\n"
+            "    if (strcmp(op, \"!=\") == 0) return !eq;\n"
+            "    if (strcmp(op, \"<\")  == 0) return cmp <  0;\n"
+            "    if (strcmp(op, \">\")  == 0) return cmp >  0;\n"
+            "    if (strcmp(op, \"<=\") == 0) return cmp <= 0;\n"
+            "    if (strcmp(op, \">=\") == 0) return cmp >= 0;\n"
+            "    return 0;\n"
+            "}\n"
+            /* SELECT * FROM t [WHERE ...] [ORDER BY col [ASC|DESC]] [LIMIT n] */
+            "static xs_val xs_db_query(xs_val conn, xs_val sql) {\n"
+            "    if (sql.tag != 2 || !sql.s) return xs_array(0);\n"
+            "    const char *p = __xs_db_istr(sql.s, \"FROM\");\n"
+            "    if (!p) return xs_array(0);\n"
+            "    p += 4; while (*p == ' '||*p=='\\t') p++;\n"
+            "    const char *nstart = p;\n"
+            "    while (*p && *p != ' ' && *p != '\\t' && *p != ';') p++;\n"
+            "    char *tname = __xs_db_trim(nstart, p - nstart);\n"
+            "    const char *wh = __xs_db_istr(p, \"WHERE\");\n"
+            "    const char *ob = __xs_db_istr(p, \"ORDER\");\n"
+            "    const char *lm = __xs_db_istr(p, \"LIMIT\");\n"
+            "    char *where = NULL;\n"
+            "    if (wh) {\n"
+            "        const char *end = ob ? ob : (lm ? lm : sql.s + strlen(sql.s));\n"
+            "        while (*end == ' ') end--;\n"
+            "        where = __xs_db_trim(wh + 5, end - wh - 5);\n"
+            "        /* trim trailing semicolon */\n"
+            "        size_t wl = strlen(where);\n"
+            "        while (wl > 0 && (where[wl-1] == ';' || where[wl-1] == ' ')) where[--wl] = 0;\n"
+            "    }\n"
+            "    int limit = -1;\n"
+            "    if (lm) { limit = (int)strtol(lm + 5, NULL, 10); }\n"
+            "    char *orderby = NULL; int order_desc = 0;\n"
+            "    if (ob) {\n"
+            "        const char *q = ob + 5;\n"
+            "        q = __xs_db_istr(q, \"BY\"); if (q) q += 2;\n"
+            "        while (q && *q && (*q == ' '||*q=='\\t')) q++;\n"
+            "        const char *qs = q;\n"
+            "        while (q && *q && *q != ' ' && *q != ';' && *q != '\\t') q++;\n"
+            "        orderby = __xs_db_trim(qs, q - qs);\n"
+            "        while (*q == ' ') q++;\n"
+            "        if (__xs_db_istr(q, \"DESC\") == q) order_desc = 1;\n"
+            "    }\n"
+            "    xs_val rows    = xs_index(conn, XS_STR(\"rows\"));\n"
+            "    xs_val schemas = xs_index(conn, XS_STR(\"schemas\"));\n"
+            "    xs_val cols    = xs_index(schemas, XS_STR(tname));\n"
+            "    xs_val table   = xs_index(rows, XS_STR(tname));\n"
+            "    xs_val out = xs_array(0);\n"
+            "    if (table.tag == 5 && table.p) {\n"
+            "        xs_arr *ta = (xs_arr*)table.p;\n"
+            "        for (int i = 0; i < ta->len; i++) {\n"
+            "            if (__xs_db_match(ta->items[i], where, cols))\n"
+            "                xs_arr_push(out, ta->items[i]);\n"
+            "        }\n"
+            "    }\n"
+            "    if (orderby) {\n"
+            "        xs_arr *oa = (xs_arr*)out.p;\n"
+            "        /* simple in-place bubble sort; the workloads here are tiny. */\n"
+            "        for (int i = 0; i < oa->len; i++) {\n"
+            "            for (int j = 0; j < oa->len - i - 1; j++) {\n"
+            "                xs_val ka = xs_index(oa->items[j],   XS_STR(orderby));\n"
+            "                xs_val kb = xs_index(oa->items[j+1], XS_STR(orderby));\n"
+            "                int c = xs_cmp(ka, kb);\n"
+            "                if (order_desc) c = -c;\n"
+            "                if (c > 0) { xs_val tmp = oa->items[j]; oa->items[j] = oa->items[j+1]; oa->items[j+1] = tmp; }\n"
+            "            }\n"
+            "        }\n"
+            "        free(orderby);\n"
+            "    }\n"
+            "    if (limit >= 0 && out.p) {\n"
+            "        xs_arr *oa = (xs_arr*)out.p;\n"
+            "        if (oa->len > limit) oa->len = limit;\n"
+            "    }\n"
+            "    free(tname);\n"
+            "    free(where);\n"
+            "    return out;\n"
+            "}\n"
+        );
+    }
 
     if (!program) {
         sb_add(&s, "/* (empty program) */\n");

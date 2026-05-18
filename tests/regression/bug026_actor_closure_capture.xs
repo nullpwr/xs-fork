@@ -1,4 +1,3 @@
--- skip-emit: c, wasm (TODO: actor decls inside fn bodies need lifting + outer-scope upvalue capture; the existing actor lowering is top-level-only)
 -- bug026: VM actors used to compile with flattened state and dropped
 -- captures of outer-scope variables, so a method that referenced an
 -- outer `let` either crashed or read garbage. The interpreter handled
