@@ -3835,6 +3835,65 @@ static int is_trigger_decorator(const char *n) {
            strcmp(n, "on_signal") == 0|| strcmp(n, "on_panic") == 0;
 }
 
+/* Post-pass that strips block / line comments and collapses blank lines
+ * from the emitted JS. Same shape as the c-side helper: aware of string
+ * and template literals so comment-looking content inside strings stays
+ * intact. */
+static char *js_compact_emitted(const char *src) {
+    if (!src) return NULL;
+    char *out = (char*)malloc(strlen(src) + 1);
+    size_t op = 0, line_start_op = 0;
+    int line_has_code = 0;
+    int prev_blank = 1;
+    for (size_t i = 0; src[i];) {
+        char c = src[i];
+        if (c == '"' || c == '\'' || c == '`') {
+            char q = c;
+            out[op++] = c; i++;
+            while (src[i] && src[i] != q) {
+                if (src[i] == '\\' && src[i+1]) { out[op++] = src[i++]; }
+                if (src[i] == '\n' && q != '`') break;
+                out[op++] = src[i++];
+            }
+            if (src[i] == q) { out[op++] = src[i++]; }
+            line_has_code = 1;
+            continue;
+        }
+        if (c == '/' && src[i+1] == '*') {
+            i += 2;
+            while (src[i] && !(src[i] == '*' && src[i+1] == '/')) i++;
+            if (src[i]) i += 2;
+            continue;
+        }
+        if (c == '/' && src[i+1] == '/') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        if (c == '\n') {
+            while (op > line_start_op && (out[op-1] == ' ' || out[op-1] == '\t')) op--;
+            if (!line_has_code) {
+                if (prev_blank) { i++; continue; }
+                op = line_start_op;
+                prev_blank = 1;
+            } else {
+                out[op++] = '\n';
+                prev_blank = 0;
+            }
+            line_start_op = op;
+            line_has_code = 0;
+            i++;
+            continue;
+        }
+        if (c != ' ' && c != '\t') line_has_code = 1;
+        out[op++] = c;
+        i++;
+    }
+    while (op > 0 && (out[op-1] == '\n' || out[op-1] == ' ' || out[op-1] == '\t')) op--;
+    out[op++] = '\n';
+    out[op] = 0;
+    return out;
+}
+
 char *transpile_js(Node *program, const char *filename) {
     const char *unsupported = find_unsupported_for_js(program);
     if (unsupported) {
@@ -5287,5 +5346,7 @@ char *transpile_js(Node *program, const char *filename) {
         sb_printf(&s, "\n//# sourceMappingURL=%s.map\n", base);
     }
 
-    return s.data;
+    char *compact = js_compact_emitted(s.data);
+    free(s.data);
+    return compact;
 }

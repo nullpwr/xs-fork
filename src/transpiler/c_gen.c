@@ -7088,6 +7088,70 @@ static void c_lower_program(Node *program, const char *src_filename) {
     }
 }
 
+/* Post-pass that strips block / line comments and collapses blank lines
+ * from the emitted source. Keeps indentation and the rest of the code
+ * untouched so the output stays readable, just less verbose. Aware of
+ * string and char literals so a slash-star inside a string survives. */
+static char *compact_emitted(const char *src) {
+    if (!src) return NULL;
+    size_t cap = strlen(src) + 1;
+    char *out = (char*)malloc(cap);
+    size_t op = 0;
+    int line_has_code = 0;  /* did the current line emit any non-space? */
+    size_t line_start_op = 0;
+    int prev_blank = 1;     /* treat start-of-file as if a blank just emitted */
+    for (size_t i = 0; src[i];) {
+        char c = src[i];
+        /* string literal: copy through, honour backslash escapes */
+        if (c == '"' || c == '\'') {
+            char q = c;
+            out[op++] = c; i++;
+            while (src[i] && src[i] != q) {
+                if (src[i] == '\\' && src[i+1]) { out[op++] = src[i++]; }
+                out[op++] = src[i++];
+            }
+            if (src[i] == q) { out[op++] = src[i++]; }
+            line_has_code = 1;
+            continue;
+        }
+        /* block comment: slash-star ... star-slash */
+        if (c == '/' && src[i+1] == '*') {
+            i += 2;
+            while (src[i] && !(src[i] == '*' && src[i+1] == '/')) i++;
+            if (src[i]) i += 2;
+            continue;
+        }
+        /* // ... to end of line */
+        if (c == '/' && src[i+1] == '/') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        /* end of line: collapse if it was blank, drop trailing whitespace */
+        if (c == '\n') {
+            while (op > line_start_op && (out[op-1] == ' ' || out[op-1] == '\t')) op--;
+            if (!line_has_code) {
+                if (prev_blank) { i++; continue; }
+                op = line_start_op;
+                prev_blank = 1;
+            } else {
+                out[op++] = '\n';
+                prev_blank = 0;
+            }
+            line_start_op = op;
+            line_has_code = 0;
+            i++;
+            continue;
+        }
+        if (c != ' ' && c != '\t') line_has_code = 1;
+        out[op++] = c;
+        i++;
+    }
+    while (op > 0 && (out[op-1] == '\n' || out[op-1] == ' ' || out[op-1] == '\t')) op--;
+    out[op++] = '\n';
+    out[op] = 0;
+    return out;
+}
+
 char *transpile_c(Node *program, const char *filename) {
     /* Lower the AST first so the codegen sees only constructs it
      * already handles: no async markers, no NODE_AWAIT/SPAWN/NURSERY
@@ -10163,5 +10227,7 @@ char *transpile_c(Node *program, const char *filename) {
         }
     }
 
-    return s.data;
+    char *compact = compact_emitted(s.data);
+    free(s.data);
+    return compact;
 }
