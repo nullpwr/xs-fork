@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.32
+
+Transpilers gain a small post-pass that strips block / line comments
+and collapses blank lines from the emitted output. Same code, less
+noise. A 1-line `println("hello, world!")` drops from 2329 lines to
+2054 on `--emit c`. JS already had a dense prelude so its gain is
+marginal (931 to 926).
+
+The pass walks the emitted string once, character by character. It
+knows about string and template literals so a slash-star sequence
+inside a string literal survives. No code is rewritten; only
+comments and empty lines disappear.
+
 ## 1.2.30
 
 bug055 closes on --emit wasm by restructuring the test to print a
